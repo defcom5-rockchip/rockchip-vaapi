@@ -32,6 +32,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <unistd.h>
+#ifdef HAVE_RGA
+#include <rga/im2d.h>
+#include <rga/rga.h>
+#endif
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/ioctl.h>
@@ -696,7 +700,26 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
        Re-stride here instead: read with src_hs, write with dst_hs. */
     int dst_hs = s->hstride ? s->hstride : copy_w;
     int dst_vs = s->vstride ? s->vstride : copy_h;
-    if (src && dst) {
+#ifdef HAVE_RGA
+    /* Offload the plane copy to RGA, the RK3588 2D blitter, which handles
+       strided NV12->NV12 in hardware, dma-buf to dma-buf.  At 4K the CPU
+       memcpy moves 12.4MB per frame (~6ms, about a third of the 16.7ms budget
+       at 60fps) on the decode path, which shows up as dropped frames.
+       10-bit/P010 keeps the CPU path; memcpy stays the fallback. */
+    if (!i10 && buf && s->priv_buf) {
+        int sfd = mpp_buffer_get_fd(buf);
+        int dfd = mpp_buffer_get_fd(s->priv_buf);
+        if (sfd > 0 && dfd > 0) {
+            rga_buffer_t rs = wrapbuffer_fd_t(sfd, copy_w, copy_h, src_hs, src_vs,
+                                              RK_FORMAT_YCbCr_420_SP);
+            rga_buffer_t rd = wrapbuffer_fd_t(dfd, copy_w, copy_h, dst_hs, dst_vs,
+                                              RK_FORMAT_YCbCr_420_SP);
+            if (imcopy_t(rs, rd, 1) == IM_STATUS_SUCCESS)
+                copied = 2;   /* 2 = RGA hardware blit */
+        }
+    }
+#endif
+    if (!copied && src && dst) {
         const uint8_t *sy = (const uint8_t *)src;
         uint8_t       *dy = (uint8_t       *)dst;
         int row_bytes = (copy_w < dst_hs ? copy_w : dst_hs) * bpp;
