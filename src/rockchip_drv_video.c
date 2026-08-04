@@ -319,10 +319,24 @@ static VAStatus rk_QueryConfigAttributes(VADriverContextP ctx,
     RKDriver *d = drv_from_ctx(ctx);
     RKConfig *c = config_by_id(d, id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONFIG;
-    (void)attribs;
     *profile = c->profile;
     *entrypoint = c->entrypoint;
-    *n = 0;
+
+    /* Chromium reads VAConfigAttribRTFormat here to decide which internal
+       formats a profile supports; finding none, it treats the profile as
+       unsupported.  NOTE: it passes an UNINITIALISED int as *n
+       (`int num_config_attributes;`), so *n must not be read as an input
+       capacity -- always write when attribs is non-NULL.  Otherwise Chromium
+       reads a zero-filled entry whose type happens to equal
+       VAConfigAttribRTFormat (enum value 0) with value 0, i.e. "no formats". */
+    if (attribs) {
+        attribs[0].type  = VAConfigAttribRTFormat;
+        attribs[0].value = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10;
+    }
+    *n = 1;
+    LOG("QueryConfigAttributes: profile=%d entrypoint=%d -> RTFormat=0x%x",
+        c->profile, c->entrypoint,
+        (unsigned)(VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10));
     return VA_STATUS_SUCCESS;
 }
 
