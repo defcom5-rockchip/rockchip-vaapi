@@ -685,19 +685,32 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     int  copied = 0;
     void *src = buf ? mpp_buffer_get_ptr(buf) : NULL;
     void *dst = s->priv_buf ? mpp_buffer_get_ptr(s->priv_buf) : NULL;
+    /* The destination layout must match what ExportSurfaceHandle already
+       reported, not MPP's frame stride.  Clients import the dma-buf once --
+       Chromium does so at frame-pool creation, before any decode -- and never
+       re-read the layout, so writing at MPP's stride puts the chroma plane at
+       the wrong offset.  MPP does not use the alignment the surface was
+       created with; observed on RK3588:
+           3840x2160 -> MPP frame stride 3840x2176
+           1920x1080 -> MPP frame stride 2304x1088
+       Re-stride here instead: read with src_hs, write with dst_hs. */
+    int dst_hs = s->hstride ? s->hstride : copy_w;
+    int dst_vs = s->vstride ? s->vstride : copy_h;
     if (src && dst) {
         const uint8_t *sy = (const uint8_t *)src;
         uint8_t       *dy = (uint8_t       *)dst;
+        int row_bytes = (copy_w < dst_hs ? copy_w : dst_hs) * bpp;
+        if (row_bytes > src_hs * bpp) row_bytes = src_hs * bpp;
         for (int r = 0; r < copy_h; r++)
-            memcpy(dy + (size_t)r * src_hs * bpp,
+            memcpy(dy + (size_t)r * dst_hs * bpp,
                    sy + (size_t)r * src_hs * bpp,
-                   (size_t)src_hs * bpp);
+                   (size_t)row_bytes);
         const uint8_t *su = sy + (size_t)src_hs * src_vs * bpp;
-        uint8_t       *du = dy + (size_t)src_hs * src_vs * bpp;
+        uint8_t       *du = dy + (size_t)dst_hs * dst_vs * bpp;
         for (int r = 0; r < copy_h / 2; r++)
-            memcpy(du + (size_t)r * src_hs * bpp,
+            memcpy(du + (size_t)r * dst_hs * bpp,
                    su + (size_t)r * src_hs * bpp,
-                   (size_t)src_hs * bpp);
+                   (size_t)row_bytes);
         copied = 1;
     }
     mpp_frame_deinit(&frame);
@@ -707,8 +720,10 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     s->fmt    = ffmt;
     if (fwidth  > 0) s->width   = fwidth;
     if (fheight > 0) s->height  = fheight;
-    if (fhs     > 0) s->hstride = fhs;
-    if (fvs     > 0) s->vstride = fvs;
+    /* hstride/vstride are deliberately NOT updated from the MPP frame: they
+       describe the layout already handed to the client by ExportSurfaceHandle.
+       Changing them would desynchronise the importer's view of the buffer.
+       The copy above re-strides into this fixed layout. */
     s->decoded  = true;
     pthread_cond_signal(&s->cond);
     pthread_mutex_unlock(&s->lock);
