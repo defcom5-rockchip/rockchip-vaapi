@@ -1373,7 +1373,7 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
         config, attrib_list ? "provided" : "NULL (query count)");
 
     /* Firefox calls this twice: first with NULL to get count, then with buffer */
-    const unsigned int n = 4;
+    const unsigned int n = 7;
     if (!attrib_list) {
         *num_attribs = n;
         return VA_STATUS_SUCCESS;
@@ -1408,6 +1408,21 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
     attrib_list[3].flags             = VA_SURFACE_ATTRIB_GETTABLE;
     attrib_list[3].value.type        = VAGenericValueTypeInteger;
     attrib_list[3].value.value.i     = 7680;
+
+    attrib_list[4].type              = VASurfaceAttribMaxHeight;
+    attrib_list[4].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[4].value.type        = VAGenericValueTypeInteger;
+    attrib_list[4].value.value.i     = 4320;
+
+    attrib_list[5].type              = VASurfaceAttribMinWidth;
+    attrib_list[5].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[5].value.type        = VAGenericValueTypeInteger;
+    attrib_list[5].value.value.i     = 16;
+
+    attrib_list[6].type              = VASurfaceAttribMinHeight;
+    attrib_list[6].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[6].value.type        = VAGenericValueTypeInteger;
+    attrib_list[6].value.value.i     = 16;
 
     *num_attribs = n;
     LOG("QuerySurfaceAttributes: returned %u attribs (NV12, P010, DRM_PRIME_2)", n);
