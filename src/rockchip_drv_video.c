@@ -858,19 +858,17 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
         return VA_STATUS_ERROR_DECODING_ERROR;
     }
 
-    for (int tries = 0; tries < 100; tries++) {
-        RKSurface *tgt = surface_by_id(d, c->render_target);
-        if (tgt) {
-            pthread_mutex_lock(&tgt->lock);
-            bool done = tgt->decoded;
-            pthread_mutex_unlock(&tgt->lock);
-            if (done) break;
-        }
-        MppFrame frame = NULL;
-        if (c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame)
-            assign_mpp_frame(frame, c, d);
-        else
-            usleep(1000);
+    /* Do NOT block waiting for THIS surface to come out.  With B-frames MPP
+       cannot emit it until later frames have been submitted, so the wait always
+       runs to its limit: 100 tries x 1ms = ~100ms per frame, i.e. ~10fps, and
+       1080p ends up decoding SLOWER than 4K.  Measured on a 1080p29.97 stream
+       with has_b_frames=2: 0.56x realtime, versus 4.5x in software.
+       Waiting is vaSyncSurface's job, and rk_SyncSurface() already drains MPP
+       with a 3s deadline.  Here, just collect whatever is already available. */
+    MppFrame frame = NULL;
+    while (c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame) {
+        assign_mpp_frame(frame, c, d);
+        frame = NULL;
     }
 
     return VA_STATUS_SUCCESS;
