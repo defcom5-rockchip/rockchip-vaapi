@@ -30,7 +30,7 @@ Key features:
 | SoC | Board (tested) |
 |-----|---------------|
 | RK3588 | Orange Pi 5 Plus |
-| RK3588S | Orange Pi 5 / Rock 5B (untested, should work) |
+| RK3588S | Orange Pi 5B (tested); Orange Pi 5 / Rock 5B (should work) |
 | RK3576 | Likely compatible (untested) |
 
 ## Supported codecs
