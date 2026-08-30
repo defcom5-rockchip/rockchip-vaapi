@@ -125,3 +125,18 @@ Firefox integration issues.
 
 All code was reviewed, tested, and validated on real hardware by
 Eduardo García-Mádico Portabella — EGP Sistemas.
+
+### Fork additions — defcom5-rockchip
+
+This fork (`defcom5-rockchip/rockchip-vaapi`) builds on the base driver above, adding:
+
+- **truongsinh's PR #2** (chroma-plane re-stride into the exported layout, optional RGA
+  blit offload, RTFormat / surface-attribute reporting) — previously unmerged upstream.
+- **VP9 unaligned-width fix** — 64-align the exported surface stride so VP9 streams whose
+  coded width is not a multiple of 16 (e.g. 2970×2160@25, 1.375:1 Academy-ratio content)
+  no longer render as a solid green frame. See [REPRO.md](REPRO.md).
+
+These fork additions were developed with the assistance of **Claude (Fable 5)** and were
+reviewed, tested, and validated on real hardware — **Orange Pi 5B (RK3588S)**, panfork
+Mesa 23, Firefox 154 VA-API — by **defcom5-rockchip**. (The base-driver validation credit
+above belongs to Eduardo García-Mádico Portabella; it does not cover these fork additions.)
