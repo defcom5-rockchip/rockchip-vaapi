@@ -381,7 +381,7 @@ static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
         /* Pre-allocate placeholder DMA-BUF so ExportSurfaceHandle succeeds
          * before any decode (e.g. Firefox's DMABUF capability probe). */
         {
-            unsigned hs = (unsigned)((width  + 15) & ~15);
+            unsigned hs = (unsigned)((width  + 63) & ~63);
             unsigned vs = (unsigned)((height + 15) & ~15);
             MppBufferGroup grp = NULL;
             MppBuffer      buf = NULL;
