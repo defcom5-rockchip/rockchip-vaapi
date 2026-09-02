@@ -228,12 +228,16 @@ static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
     list[i++] = VAProfileH264ConstrainedBaseline;
     list[i++] = VAProfileH264Main;
     list[i++] = VAProfileH264High;
-    list[i++] = VAProfileH264High10;
-    list[i++] = VAProfileHEVCMain;
-    list[i++] = VAProfileHEVCMain10;
     list[i++] = VAProfileVP8Version0_3;
     list[i++] = VAProfileVP9Profile0;
-    list[i++] = VAProfileVP9Profile2;
+    /* HEVC (all depths), H264High10 and VP9Profile2 not advertised: the export
+     * path mishandles their output (HEVC renders a solid green frame at every
+     * bit depth; VP9 Profile 2 renders corrupted frames) - hardware-verified on
+     * RK3588S, 2026-09-02. MPP decodes these fine; until the surface export is
+     * fixed (NV15/P010 layout work), advertising them routes browsers and
+     * media servers into broken playback instead of their working fallbacks
+     * (server-side transcode / software decode). Codecs that remain listed are
+     * eyeball-verified end to end. */
     /* AV1 not advertised: MPP needs a full OBU bytestream but VA-API hands us
      * only headerless tile data, so MPP can never parse it. Firefox falls back
      * to VP9 (hardware-decoded) for AV1-capable content. */
