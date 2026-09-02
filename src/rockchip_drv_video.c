@@ -1607,7 +1607,7 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
     ctx->max_image_formats    = 4;
     ctx->max_subpic_formats   = 4;
     ctx->max_display_attributes = 4;
-    ctx->str_vendor           = "Rockchip MPP VA-API Driver 0.1";
+    ctx->str_vendor           = "Rockchip MPP VA-API Driver 2.0 (defcom5)";
 
     struct VADriverVTable *v = ctx->vtable;
     v->vaTerminate                = rk_Terminate;
