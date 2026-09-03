@@ -771,6 +771,21 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
             nv15_row_to_p010(su + (size_t)r * src_bs,
                              (uint16_t *)(du + (size_t)r * dst_hs * 2), copy_w);
         copied = 3;   /* 3 = NV15->P010 CPU repack */
+        /* Deep Ink debug valve: dump ONE repacked frame as raw P010 for
+         * GL-free verification (ffmpeg -f rawvideo -pix_fmt p010le). */
+        static int dumped = 0;
+        const char *dump = getenv("RKVA_DUMP");
+        if (dump && !dumped) {
+            FILE *df = fopen(dump, "wb");
+            if (df) {
+                fwrite(dy, 1, (size_t)dst_hs * 2 * dst_vs, df);          /* Y  */
+                fwrite(du, 1, (size_t)dst_hs * 2 * (dst_vs / 2), df);    /* UV */
+                fclose(df);
+                dumped = 1;
+                LOG("deepink: dumped P010 frame %dx%d stride=%d to %s",
+                    copy_w, copy_h, dst_hs, dump);
+            }
+        }
     }
     if (!copied && src && dst) {
         const uint8_t *sy = (const uint8_t *)src;
