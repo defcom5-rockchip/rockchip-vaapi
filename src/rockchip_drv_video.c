@@ -1336,7 +1336,9 @@ static VAStatus rk_CreateImage(VADriverContextP ctx,
     (void)format;
 
     VABufferID buf_id;
-    unsigned int stride = (unsigned int)((width + 15) & ~15);
+    /* P010 images carry uint16 samples; size and pitches are in BYTES. */
+    unsigned int bpp    = (format && format->fourcc == VA_FOURCC_P010) ? 2u : 1u;
+    unsigned int stride = (unsigned int)((width + 15) & ~15) * bpp;
     unsigned int size   = stride * (unsigned int)height * 3 / 2;
     VAStatus st = rk_CreateBuffer(ctx, 0, VAImageBufferType, size, 1,
                                   NULL, &buf_id);
@@ -1360,19 +1362,16 @@ static VAStatus rk_CreateImage(VADriverContextP ctx,
 
 static VAStatus rk_DeriveImage(VADriverContextP ctx,
                                 VASurfaceID sid, VAImage *image) {
-    RKDriver  *d = drv_from_ctx(ctx);
-    RKSurface *s = surface_by_id(d, sid);
-    if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
-
-    /* priv_buf is not CPU-mappable as a shared VAImage; force callers to use
-     * vaGetImage instead (copies pixels, but always works). */
-    (void)image;
+    /* Deliberately unsupported.  A derived image must alias the surface's
+     * own memory; this driver keeps decoded pixels in an MPP buffer that a
+     * malloc'd VAImage cannot alias.  The old implementation returned a
+     * fresh EMPTY image here, so every vaDeriveImage+map reader (ffmpeg's
+     * hwframe transfer, mpv --hwdec=vaapi-copy) silently downloaded zeros
+     * at all bit depths.  Failing honestly routes clients to their
+     * vaCreateImage + vaGetImage fallback, which copies real pixels
+     * (NV12 and, post Deep Ink, true P010). */
+    (void)ctx; (void)sid; (void)image;
     return VA_STATUS_ERROR_OPERATION_FAILED;
-
-    VAImageFormat fmt;
-    memset(&fmt, 0, sizeof(fmt));
-    fmt.fourcc = VA_FOURCC_NV12;
-    return rk_CreateImage(ctx, &fmt, s->width, s->height, image);
 }
 
 static VAStatus rk_DestroyImage(VADriverContextP ctx, VAImageID id) {
