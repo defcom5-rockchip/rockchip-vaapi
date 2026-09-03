@@ -230,6 +230,15 @@ static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
     list[i++] = VAProfileH264High;
     list[i++] = VAProfileVP8Version0_3;
     list[i++] = VAProfileVP9Profile0;
+    /* Deep Ink dev switch: advertise the 10-bit/HEVC profiles ONLY when
+     * explicitly requested, so the repack can be tested end-to-end without
+     * changing the shipped default.  Release builds keep the honest menu. */
+    if (getenv("RKVA_ADVERTISE_ALL")) {
+        list[i++] = VAProfileH264High10;
+        list[i++] = VAProfileHEVCMain;
+        list[i++] = VAProfileHEVCMain10;
+        list[i++] = VAProfileVP9Profile2;
+    }
     /* HEVC (all depths), H264High10 and VP9Profile2 not advertised: the export
      * path mishandles their output (HEVC renders a solid green frame at every
      * bit depth; VP9 Profile 2 renders corrupted frames) - hardware-verified on
@@ -640,6 +649,26 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
 
 /* Route one MPP output frame to the right surface and mark it decoded.
  * Shared by EndPicture poll loops and the SyncSurface drain loop. */
+/* NV15 -> P010 row repack ("Deep Ink").
+ * MPP emits 10-bit YUV as NV15: fully packed, 5 bytes per 4 samples, no padding
+ * bits.  Every consumer of this surface (the export descriptor above, Firefox,
+ * Chrome, mpv) was promised P010: one uint16 per sample, 10 significant bits,
+ * MSB-aligned.  Until now the copy below moved the packed bytes verbatim under
+ * the P010 label -- solid green (HEVC) / corruption (VP9 Profile 2).
+ * Unpack math per the canonical CPU reference (nyanmisaka ffmpeg-rockchip,
+ * nv15_20ToYUV_c): sample x lives at bit offset x*10 of the row; read two
+ * little-endian bytes, shift, mask to 10 bits; P010 wants it << 6. */
+static inline void nv15_row_to_p010(const uint8_t *srow, uint16_t *drow, int n)
+{
+    for (int x = 0; x < n; x++) {
+        int pos   = (x * 10) >> 3;
+        int shift = (x << 1) & 7;
+        uint16_t v = (uint16_t)((((uint16_t)srow[pos] |
+                                 ((uint16_t)srow[pos + 1] << 8)) >> shift) & 0x3FF);
+        drow[x] = (uint16_t)(v << 6);
+    }
+}
+
 static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
 {
     if (mpp_frame_get_info_change(frame)) {
@@ -723,6 +752,26 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         }
     }
 #endif
+    if (!copied && src && dst && i10) {
+        /* Deep Ink: repack NV15 -> true P010 (see nv15_row_to_p010 above).
+         * For 10-bit frames MPP's hor_stride is a BYTE stride of the packed
+         * plane.  Defensive: if it looks like a sample count instead (older
+         * kernels), derive the packed byte stride from it. */
+        int src_bs = src_hs;
+        int min_bs = (copy_w * 10 + 7) / 8;
+        if (src_bs < min_bs) src_bs = ((src_hs * 10 + 7) / 8 + 63) & ~63;
+        const uint8_t *sy = (const uint8_t *)src;
+        uint8_t       *dy = (uint8_t       *)dst;
+        for (int r = 0; r < copy_h; r++)
+            nv15_row_to_p010(sy + (size_t)r * src_bs,
+                             (uint16_t *)(dy + (size_t)r * dst_hs * 2), copy_w);
+        const uint8_t *su = sy + (size_t)src_bs * src_vs;
+        uint8_t       *du = dy + (size_t)dst_hs * 2 * dst_vs;
+        for (int r = 0; r < copy_h / 2; r++)
+            nv15_row_to_p010(su + (size_t)r * src_bs,
+                             (uint16_t *)(du + (size_t)r * dst_hs * 2), copy_w);
+        copied = 3;   /* 3 = NV15->P010 CPU repack */
+    }
     if (!copied && src && dst) {
         const uint8_t *sy = (const uint8_t *)src;
         uint8_t       *dy = (uint8_t       *)dst;
