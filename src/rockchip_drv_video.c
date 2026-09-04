@@ -239,16 +239,22 @@ static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
     list[i++] = VAProfileH264High;
     list[i++] = VAProfileVP8Version0_3;
     list[i++] = VAProfileVP9Profile0;
+    /* HEVC Main (8-bit) — earned its place: the bitstream assembler decodes it
+     * bit-exact (pixel-identical to software decode), and it displays
+     * correctly in both browsers (Chrome and Firefox hardware-decode it).
+     * Main10 is deliberately NOT here: it decodes correctly but the panfork
+     * GL stack cannot present 10-bit surfaces, and advertising it makes
+     * Chrome direct-play HEVC 10-bit into a green screen. See KNOWN-ISSUES. */
+    list[i++] = VAProfileHEVCMain;
     /* Deep Ink dev switch: advertise the 10-bit/HEVC profiles ONLY when
      * explicitly requested, so the repack can be tested end-to-end without
      * changing the shipped default.  Release builds keep the honest menu. */
     if (getenv("RKVA_ADVERTISE_ALL")) {
         list[i++] = VAProfileH264High10;
-        list[i++] = VAProfileHEVCMain;
         list[i++] = VAProfileHEVCMain10;
         list[i++] = VAProfileVP9Profile2;
     }
-    /* HEVC (all depths), H264High10 and VP9Profile2 not advertised: the export
+    /* HEVC Main10, H264High10 and VP9Profile2 not advertised: the export
      * path mishandles their output (HEVC renders a solid green frame at every
      * bit depth; VP9 Profile 2 renders corrupted frames) - hardware-verified on
      * RK3588S, 2026-09-02. MPP decodes these fine; until the surface export is
