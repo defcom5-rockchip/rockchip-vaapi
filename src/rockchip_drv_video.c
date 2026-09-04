@@ -139,6 +139,7 @@ typedef struct {
     unsigned int   size;
     unsigned int   num_elements;
     void          *data;
+    bool           borrowed;   /* data points into an MPP buffer: do not free */
 } RKBuffer;
 
 typedef struct {
@@ -612,7 +613,7 @@ static VAStatus rk_DestroyBuffer(VADriverContextP ctx, VABufferID id) {
     RKDriver *d = drv_from_ctx(ctx);
     RKBuffer *b = buffer_by_id(d, id);
     if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
-    free(b->data);
+    if (!b->borrowed) free(b->data);   /* derived images alias MPP memory */
     memset(b, 0, sizeof(*b));
     return VA_STATUS_SUCCESS;
 }
@@ -1481,17 +1482,53 @@ static VAStatus rk_CreateImage(VADriverContextP ctx,
 
 static VAStatus rk_DeriveImage(VADriverContextP ctx,
                                 VASurfaceID sid, VAImage *image) {
-    /* Deliberately unsupported.  A derived image must alias the surface's
-     * own memory; this driver keeps decoded pixels in an MPP buffer that a
-     * malloc'd VAImage cannot alias.  The old implementation returned a
-     * fresh EMPTY image here, so every vaDeriveImage+map reader (ffmpeg's
-     * hwframe transfer, mpv --hwdec=vaapi-copy) silently downloaded zeros
-     * at all bit depths.  Failing honestly routes clients to their
-     * vaCreateImage + vaGetImage fallback, which copies real pixels
-     * (NV12 and, post Deep Ink, true P010). */
-    (void)ctx; (void)sid; (void)image;
-    return VA_STATUS_ERROR_OPERATION_FAILED;
+    /* Map the surface's own memory as a VAImage.  This is what VLC's GL
+     * interop and ffmpeg's hwframe transfer call; both fail without it.
+     * The decode path has already written this buffer in exactly the layout
+     * reported here: NV12 for 8-bit, true P010 for 10-bit (the NV15 repack
+     * runs before the frame is published), both at the surface's own stride.
+     * The image buffer BORROWS the MPP mapping - it must not be freed. */
+    RKDriver  *d = drv_from_ctx(ctx);
+    RKSurface *s = surface_by_id(d, sid);
+    if (!s || !s->priv_buf) return VA_STATUS_ERROR_INVALID_SURFACE;
+
+    void *ptr = mpp_buffer_get_ptr(s->priv_buf);
+    if (!ptr) return VA_STATUS_ERROR_INVALID_SURFACE;
+
+    bool i10 = MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt);
+    int  bpp = i10 ? 2 : 1;
+    int  hs  = (s->hstride ? s->hstride : s->width) * bpp;   /* bytes per row */
+    int  vs  = s->vstride ? s->vstride : s->height;
+
+    VABufferID buf_id;
+    VAStatus st = rk_CreateBuffer(ctx, 0, VAImageBufferType, 1, 1, NULL, &buf_id);
+    if (st != VA_STATUS_SUCCESS) return st;
+    RKBuffer *b = buffer_by_id(d, buf_id);
+    if (!b) return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    free(b->data);
+    b->data     = ptr;          /* alias the decoded surface */
+    b->borrowed = true;
+    b->size     = (unsigned int)(hs * vs * 3 / 2);
+
+    memset(image, 0, sizeof(*image));
+    image->image_id           = buf_id;
+    image->buf                = buf_id;
+    image->format.fourcc      = i10 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+    image->format.byte_order  = VA_LSB_FIRST;
+    image->format.bits_per_pixel = i10 ? 24 : 12;
+    image->width              = (unsigned short)s->width;
+    image->height             = (unsigned short)s->height;
+    image->num_planes         = 2;
+    image->pitches[0]         = (unsigned int)hs;
+    image->pitches[1]         = (unsigned int)hs;
+    image->offsets[0]         = 0;
+    image->offsets[1]         = (unsigned int)(hs * vs);
+    image->data_size          = (unsigned int)(hs * vs * 3 / 2);
+    LOG("DeriveImage: surface=0x%x %dx%d %s pitch=%d -> image=0x%x",
+        sid, s->width, s->height, i10 ? "P010" : "NV12", hs, (unsigned)buf_id);
+    return VA_STATUS_SUCCESS;
 }
+
 
 static VAStatus rk_DestroyImage(VADriverContextP ctx, VAImageID id) {
     return rk_DestroyBuffer(ctx, (VABufferID)id);
