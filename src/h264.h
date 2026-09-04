@@ -16,3 +16,7 @@ int h264_write_sps(uint8_t *buf, size_t buf_size,
 
 int h264_write_pps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferH264 *pp);
+
+/* Shared with hevc.c: insert 0x03 emulation-prevention bytes. */
+size_t emulation_prevent(const uint8_t *in, size_t in_sz,
+                         uint8_t *out, size_t out_cap);

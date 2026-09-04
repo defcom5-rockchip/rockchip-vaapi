@@ -42,6 +42,7 @@
 #include <errno.h>
 
 #include "h264.h"
+#include "hevc.h"
 
 /* ── logging ─────────────────────────────────────────────────── */
 static FILE *g_log_fp = NULL;
@@ -96,6 +97,9 @@ typedef struct {
     /* H.264 state for SPS/PPS reconstruction */
     VAPictureParameterBufferH264 last_pp;
     bool         sps_sent;
+
+    /* HEVC state for VPS/SPS/PPS reconstruction (Deep Ink phase 1.5) */
+    VAPictureParameterBufferHEVC last_pp_hevc;
 } RKContext;
 
 typedef struct {
@@ -642,6 +646,10 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
             c->coding == MPP_VIDEO_CodingAVC) {
             memcpy(&c->last_pp, b->data,
                    sizeof(VAPictureParameterBufferH264));
+        } else if (b && b->type == VAPictureParameterBufferType &&
+                   c->coding == MPP_VIDEO_CodingHEVC) {
+            memcpy(&c->last_pp_hevc, b->data,
+                   sizeof(VAPictureParameterBufferHEVC));
         }
     }
     return VA_STATUS_SUCCESS;
@@ -982,9 +990,41 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     pkt_sz += _l;                                          \
 } while (0)
 
+    /* HEVC (Deep Ink phase 1.5): MPP is a bitstream decoder and VA-API never
+       hands us the VPS/SPS/PPS bytes -- only the parsed fields.  Re-synthesise
+       them (hevc.c) ahead of the slices on every IRAP (and the first frame),
+       and give each slice NALU its Annex B start code.  Without this MPP
+       parsed nothing and returned zero-filled buffers: the solid green. */
+    bool hevc = (c->coding == MPP_VIDEO_CodingHEVC);
+    int  n_slices = 0;
+    for (int i = 0; i < c->n_pending; i++) {
+        RKBuffer *b = buffer_by_id(d, c->pending[i]);
+        if (b && b->type == VASliceDataBufferType) n_slices++;
+    }
+    if (hevc && n_slices) {
+        const VAPictureParameterBufferHEVC *hp = &c->last_pp_hevc;
+        bool irap = hp->slice_parsing_fields.bits.RapPicFlag;
+        if (irap || !c->sps_sent) {
+            int main10 = hp->bit_depth_luma_minus8 > 0;
+            uint8_t hdr[1024];
+            int n;
+            n = hevc_write_vps(hdr, sizeof(hdr), hp, main10); if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            n = hevc_write_sps(hdr, sizeof(hdr), hp, main10); if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            n = hevc_write_pps(hdr, sizeof(hdr), hp);         if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            c->sps_sent = true;
+            LOG("do_hevc: VPS/SPS/PPS synthesised (%zu bytes) %dx%d main10=%d irap=%d st_rps_bits=%u",
+                pkt_sz, hp->pic_width_in_luma_samples, hp->pic_height_in_luma_samples,
+                main10, (int)irap, (unsigned)hp->st_rps_bits);
+        }
+        if (hp->st_rps_bits == 0 && !hp->slice_parsing_fields.bits.IntraPicFlag)
+            LOG("do_hevc: WARNING inter slice with st_rps_bits=0 -> slices reference SPS RPS sets "
+                "we cannot reconstruct; expect decode errors on this stream");
+    }
+    static const uint8_t hevc_sc[4] = {0x00, 0x00, 0x00, 0x01};
     for (int i = 0; i < c->n_pending; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
         if (!b || b->type != VASliceDataBufferType) continue;
+        if (hevc) PKT_APPEND(hevc_sc, 4);
         PKT_APPEND(b->data, (size_t)b->size * b->num_elements);
     }
 #undef PKT_APPEND

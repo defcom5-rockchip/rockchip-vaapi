@@ -24,7 +24,7 @@
 #include <stdint.h>
 
 /* Insert emulation prevention bytes (0x03) to avoid 0x000001/0x000002 sequences */
-static size_t emulation_prevent(const uint8_t *in, size_t in_sz,
+size_t emulation_prevent(const uint8_t *in, size_t in_sz,
                                 uint8_t *out, size_t out_cap) {
     size_t out_pos = 0;
     int zeros = 0;
