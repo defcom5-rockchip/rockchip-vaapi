@@ -8,22 +8,30 @@ Current as of **v2.0.0 "Reframe"**.
 
 ---
 
-## KI-1: H.264 B-frame streams fell back to software — FIXED
+## KI-1: H.264 streams with B-frames decode to a corrupted picture
 
-**Status:** fixed on `deep-ink`, pending release · **Severity:** was playback corruption / software fallback
+**Status:** open, reproducible, present in v2.0 · **Severity:** wrong picture on affected content
 
-Some H.264 files — the common case being High-profile content with B-frames — either
-showed a green corner and stuttered, or silently fell back to software decode.
+H.264 video that uses B-frames decodes in hardware but comes out wrong: ghosting and
+doubled edges, occasional solid green frames. H.264 without B-frames is pixel-perfect, so
+the split is clean and easy to check with `ffprobe … -show_entries stream=has_b_frames`.
 
-Cause: H.264 states its reordering constraint (`max_num_reorder_frames`) only inside the
-VUI, and the driver's synthesised SPS carried no VUI at all. A decoder then has to assume
-the worst case and may hold decoded pictures back for output ordering — but a stateless
-VA-API client is already blocking on the exact surface it submitted, so those pictures
-never arrive. The driver now writes a minimal VUI declaring `max_num_reorder_frames = 0`,
-the same constraint the HEVC path states directly.
+This matters more than an edge case: most real-world H.264 uses B-frames. Streaming sites
+mostly serve VP9 to browsers on this platform, which is why the fault is easy to miss —
+it shows up on local files and downloads.
 
-Verified: H.264 High 720p60 with B-frames went from software fallback to hardware decode
-with zero decoder frame drops.
+Measured objectively (hardware frames compared pixel-by-pixel against a software reference,
+`tools/hevc-ladder.sh`): mean absolute difference ≈ 36/255 on affected frames, versus 0.00
+for every codec that works. Reproducer: any H.264 High-profile clip encoded with B-frames.
+
+Two things were ruled out while investigating: it is not the missing reordering constraint
+(adding an H.264 VUI declaring `max_num_reorder_frames = 0` changed which streams took the
+hardware path but not the corruption, and was reverted), and it is not decoded-picture-buffer
+sizing (a generous `max_dec_frame_buffering` made no difference). The remaining suspect is
+reference-list handling — the same class of defect the HEVC path had with its reference-picture
+sets, in the code that builds H.264 reference lists.
+
+**Workaround:** the file plays correctly with software decode (`mpv --hwdec=no`).
 
 ## KI-2: HEVC — FIXED, and now advertised (8-bit)
 
