@@ -40,6 +40,9 @@
 #include <pthread.h>
 #include <sys/ioctl.h>
 #include <errno.h>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include "h264.h"
 #include "hevc.h"
@@ -669,14 +672,33 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
  * nv15_20ToYUV_c): sample x lives at bit offset x*10 of the row; read two
  * little-endian bytes, shift, mask to 10 bits; P010 wants it << 6. */
 /* NV15 is periodic: every 5 bytes hold exactly 4 samples at bit offsets
- * 0/10/20/30, so a group needs one 32-bit load plus one byte instead of the
- * per-sample multiply + two unaligned byte loads the naive form uses.  At
- * 4096x1714 that is ~10.5M samples per frame, 24 times a second, on the decode
- * thread -- the arithmetic is not free.  Bit math is identical to the scalar
- * tail below (and to nyanmisaka's nv15_20ToYUV_c), so output is bit-exact. */
+ * 0/10/20/30.  At 4096x1714 this runs ~10.5M times per frame, 24 times a
+ * second, on the decode thread, so it is worth vectorising.
+ *
+ * NEON path (8 samples / 10 bytes per iteration): one byte-table shuffle
+ * gathers the little-endian 16-bit word containing each sample, one variable
+ * right shift aligns all eight lanes, mask to 10 bits, shift left 6 for P010.
+ * The x + 16 <= n guard keeps the 16-byte load inside the row's own packed
+ * bytes: at the last iteration the read ends 4 bytes before the row does.
+ * The scalar paths (4-at-a-time, then per sample) cover the tail and non-NEON
+ * builds.  All three compute identical bits -- same math as nyanmisaka's
+ * nv15_20ToYUV_c -- so output is bit-exact whichever runs. */
 static inline void nv15_row_to_p010(const uint8_t *srow, uint16_t *drow, int n)
 {
     int x = 0;
+#if defined(__aarch64__)
+    {
+        static const uint8_t gather[16] = { 0,1, 1,2, 2,3, 3,4, 5,6, 6,7, 7,8, 8,9 };
+        const uint8x16_t tbl = vld1q_u8(gather);
+        const int16x8_t  rsh = { 0, -2, -4, -6, 0, -2, -4, -6 };
+        const uint16x8_t msk = vdupq_n_u16(0x03FF);
+        for (; x + 16 <= n; x += 8, srow += 10, drow += 8) {
+            uint16x8_t v = vreinterpretq_u16_u8(vqtbl1q_u8(vld1q_u8(srow), tbl));
+            v = vandq_u16(vshlq_u16(v, rsh), msk);
+            vst1q_u16(drow, vshlq_n_u16(v, 6));
+        }
+    }
+#endif
     for (; x + 4 <= n; x += 4, srow += 5, drow += 4) {
         uint32_t lo = (uint32_t)srow[0]        | ((uint32_t)srow[1] << 8) |
                      ((uint32_t)srow[2] << 16) | ((uint32_t)srow[3] << 24);
@@ -686,12 +708,10 @@ static inline void nv15_row_to_p010(const uint8_t *srow, uint16_t *drow, int n)
         drow[2] = (uint16_t)(((lo >> 20)  & 0x3FFu) << 6);
         drow[3] = (uint16_t)((((lo >> 30) | (hi << 2)) & 0x3FFu) << 6);
     }
-    for (; x < n; x++) {                     /* tail: same math, per sample */
-        int pos   = (x * 10) >> 3;
-        int shift = (x << 1) & 7;
-        uint16_t v = (uint16_t)((((uint16_t)srow[pos - ((x >> 2) * 5)] |
-                                 ((uint16_t)srow[pos - ((x >> 2) * 5) + 1] << 8)) >> shift) & 0x3FF);
-        drow[x - ((x >> 2) * 4)] = (uint16_t)(v << 6);
+    for (int i = 0; x < n; x++, i++) {          /* fewer than 4 samples left */
+        int pos = (i * 10) >> 3, sh = (i * 10) & 7;
+        drow[i] = (uint16_t)(((((uint16_t)srow[pos] |
+                                ((uint16_t)srow[pos + 1] << 8)) >> sh) & 0x3FF) << 6);
     }
 }
 
