@@ -35,12 +35,23 @@ Key features:
 
 ## Supported codecs
 
-| Codec | Profile | Max resolution |
-|-------|---------|---------------|
-| H.264 | Constrained Baseline, Main, High, High10 | 4K |
-| HEVC | Main, Main10 | 8K |
-| VP9 | Profile 0, 2 | 8K |
-| AV1 | Profile 0, 1 | 8K |
+This driver advertises only what has been verified to decode correctly on
+hardware. Anything not listed here is deliberately **not** offered to clients,
+so players and media servers fall back to paths that work (software decode,
+server-side transcode) instead of rendering a broken picture.
+
+| Codec | Profile | Status |
+|-------|---------|--------|
+| H.264 | Constrained Baseline, Main, High | ✅ hardware decode (see KI-1 for a B-frame edge case) |
+| VP8   | Version 0–3 | ✅ advertised |
+| VP9   | Profile 0 (8-bit) | ✅ hardware decode, including non-16-aligned widths |
+| H.264 | High10 | ❌ not advertised — 10-bit export work in progress |
+| HEVC  | Main, Main10 | ❌ not advertised — decode never worked; see [KNOWN-ISSUES](KNOWN-ISSUES.md) |
+| VP9   | Profile 2 (10-bit) | ❌ not advertised — fix written, blocked on the GPU stack |
+| AV1   | any | ❌ not implemented (VA-API supplies headerless tile data; MPP needs full OBU) |
+
+Earlier releases advertised HEVC, High10 and VP9 Profile 2. They never decoded
+correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story and progress.
 
 ## Dependencies
 
