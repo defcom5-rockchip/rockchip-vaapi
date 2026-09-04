@@ -1048,26 +1048,39 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     if (hevc && n_slices) {
         const VAPictureParameterBufferHEVC *hp = &c->last_pp_hevc;
         bool irap = hp->slice_parsing_fields.bits.RapPicFlag;
-        /* Learn the encoder's RPS layout from the first slice that carries an
-           inline RPS (any non-IDR picture), by matching against st_rps_bits. */
-        if (hp->st_rps_bits > 0 && c->hevc_sets_plus1 == 0) {
-            for (int i = 0; i < c->n_pending; i++) {
-                RKBuffer *b = buffer_by_id(d, c->pending[i]);
-                if (!b || b->type != VASliceDataBufferType) continue;
-                int det = hevc_detect_num_st_rps(b->data, (size_t)b->size * b->num_elements, hp);
-                if (det >= 0) { c->hevc_sets_plus1 = det + 1;
-                    LOG("do_hevc: RPS layout detected: original SPS had %s short-term sets (st_rps_bits=%u)",
-                        det ? ">=1" : "0", (unsigned)hp->st_rps_bits); }
-                else if (det == -2)
-                    LOG("do_hevc: WARNING slice uses SPS-level RPS sets or inter-RPS prediction -> "
-                        "not reconstructible from VA-API; expect decode errors");
-                break;
+        /* How many short-term RPS sets did the encoder's SPS declare?  Only the
+           count CLASS matters to us (0 vs >=1): a slice-inline RPS parses as
+           st_ref_pic_set(num_sets), and that carries an
+           inter_ref_pic_set_prediction_flag iff the index is non-zero -- get the
+           class wrong and every slice header shifts by one bit.
+           VA-API hands us the real number in pp->num_short_term_ref_pic_sets, so
+           it is known at the very first picture.  Phase 1.5 guessed and then
+           corrected itself by re-emitting a DIFFERENT SPS mid-stream; re-activating
+           an SPS flushes the DPB, which destroys the earlier references a B-frame
+           needs ("Could not find ref with POC 0") and dropped every reordered
+           stream to software.  Decide once, here, and never change it. */
+        int want_plus1 = (hp->num_short_term_ref_pic_sets > 0) ? 2 : 1;
+        if (c->hevc_sets_plus1 == 0) {
+            c->hevc_sets_plus1 = want_plus1;
+            /* Cross-check against the slice-header probe on the first picture that
+               actually carries an inline RPS; disagreement is worth knowing about. */
+            if (hp->st_rps_bits > 0) {
+                for (int i = 0; i < c->n_pending; i++) {
+                    RKBuffer *b = buffer_by_id(d, c->pending[i]);
+                    if (!b || b->type != VASliceDataBufferType) continue;
+                    int det = hevc_detect_num_st_rps(b->data, (size_t)b->size * b->num_elements, hp);
+                    if (det >= 0 && (det + 1) != want_plus1)
+                        LOG("do_hevc: NOTE pp->num_short_term_ref_pic_sets=%u implies %d sets, "
+                            "slice probe says %d (trusting pp)",
+                            (unsigned)hp->num_short_term_ref_pic_sets, want_plus1 - 1, det);
+                    else if (det == -2)
+                        LOG("do_hevc: WARNING slice uses SPS-level RPS sets or inter-RPS "
+                            "prediction -> not reconstructible from VA-API");
+                    break;
+                }
             }
         }
-        /* Until detected, assume >=1 (what most fixed-GOP encoders do); a wrong guess
-           is corrected by re-sending the parameter sets ahead of the first inter slice. */
-        int want_plus1 = c->hevc_sets_plus1 ? c->hevc_sets_plus1 : 2;
-        if (irap || !c->sps_sent || c->hevc_sent_plus1 != want_plus1) {
+        if (irap || !c->sps_sent) {
             int main10 = hp->bit_depth_luma_minus8 > 0;
             uint8_t hdr[1024];
             int n;
