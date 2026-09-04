@@ -30,24 +30,24 @@ ffprobe -v error -select_streams v:0 \
 
 ---
 
-## KI-2: HEVC is not decoded (not advertised since v2.0.0)
+## KI-2: HEVC decode — FIXED on the `deep-ink` branch, pending soak
 
-**Status:** root-caused, fix in development · **Severity:** feature absent
+**Status:** fixed in development, not yet in the advertised menu · **Severity:** feature absent in releases
 
-HEVC never worked in this driver, at any bit depth — a solid green frame was the
-result for everyone. The cause is not the export path or the hardware: **there is
-no HEVC bitstream assembler.** Decode requests are routed through the H.264
-assembly path, so MPP receives a stream it cannot parse and the surface is handed
-back empty.
+HEVC never worked in this driver — there was no HEVC bitstream assembler; decode requests
+were mis-routed and MPP received a stream it could not parse (solid green at every bit
+depth, for everyone, since the driver existed).
 
-Since v2.0.0 the driver no longer advertises HEVC, so clients fall back to
-software decode (correct picture) and media servers transcode instead of
-direct-playing into a green wall. Writing the missing assembler (VPS/SPS/PPS
-synthesis from the VA parameters, following the existing H.264 pattern) is the
-current work; HEVC returns to the advertised list when it decodes on hardware,
-not before.
+The assembler now exists (`src/hevc.c`, branch `deep-ink`): VPS synthesised from scratch,
+SPS/PPS reconstructed from the VA-API parameters, Annex B stitching, plus two non-obvious
+requirements discovered on hardware — `max_num_reorder_pics` must be 0 for a stateless
+VA-API bridge, and the original SPS's reference-picture-set count class must be detected
+(deterministically, from `st_rps_bits`) because it changes the slice-header bit layout.
+**Verified bit-exact against software decode** (pixel-identical frames, 8-bit AND 4K
+HDR10 Main10) with objective tooling committed in `tools/`.
 
----
+HEVC returns to the default advertised menu after real-playback soak — not before.
+Until then: test with `RKVA_ADVERTISE_ALL=1`.
 
 ## KI-3: 10-bit content (VP9 Profile 2, H.264 High10) is not advertised
 
@@ -82,6 +82,17 @@ corrupt rather than the UI flickering, that is a different problem — please
 report it.
 
 ---
+
+## KI-5: some HEVC streams use SPS-indexed reference-picture sets (not yet reconstructible)
+
+**Status:** open (Phase 1.6 candidate) · **Severity:** affected streams fall back to software
+
+Slices that reference SPS-level RPS entries by index (`short_term_ref_pic_set_sps_flag=1`)
+or use inter-RPS prediction cannot be rebuilt from what VA-API provides — the set tables
+are not in the parameter struct. The driver detects this and logs a WARNING rather than
+guessing. The planned fix rebuilds the picture's RPS from `ReferenceFrames` and rewrites
+the slice header with an explicit inline set. Long-term SPS reference sets and custom
+scaling lists are likewise not yet handled (defaults are used).
 
 ## Reporting
 
