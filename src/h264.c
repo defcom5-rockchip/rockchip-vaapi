@@ -108,7 +108,33 @@ int h264_write_sps(uint8_t *buf, size_t buf_size,
 
     bs_write(&bs, pp->seq_fields.bits.direct_8x8_inference_flag, 1);
     bs_write(&bs, 0, 1); /* frame_cropping_flag = 0 */
-    bs_write(&bs, 0, 1); /* vui_parameters_present_flag = 0 */
+
+    /* VUI carrying bitstream restrictions.  H.264 states the reordering
+     * constraint ONLY here: with no VUI a decoder must assume the worst case
+     * (max_num_reorder_frames = MaxDpbFrames) and is entitled to hold decoded
+     * pictures back for output ordering.  A stateless VA-API client blocks in
+     * vaSyncSurface on the exact surface it submitted, so those held frames
+     * never arrive and the client falls back to software on any stream with
+     * B-frames.  Declaring max_num_reorder_frames = 0 tells the decoder to
+     * emit in decode order, which is what the client wants -- the same
+     * constraint the HEVC path states directly as sps_max_num_reorder_pics. */
+    bs_write(&bs, 1, 1); /* vui_parameters_present_flag = 1 */
+    bs_write(&bs, 0, 1); /* aspect_ratio_info_present_flag  */
+    bs_write(&bs, 0, 1); /* overscan_info_present_flag      */
+    bs_write(&bs, 0, 1); /* video_signal_type_present_flag  */
+    bs_write(&bs, 0, 1); /* chroma_loc_info_present_flag    */
+    bs_write(&bs, 0, 1); /* timing_info_present_flag        */
+    bs_write(&bs, 0, 1); /* nal_hrd_parameters_present_flag */
+    bs_write(&bs, 0, 1); /* vcl_hrd_parameters_present_flag */
+    bs_write(&bs, 0, 1); /* pic_struct_present_flag         */
+    bs_write(&bs, 1, 1); /* bitstream_restriction_flag = 1  */
+    bs_write(&bs, 1, 1);        /* motion_vectors_over_pic_boundaries_flag */
+    bs_write_ue(&bs, 0);        /* max_bytes_per_pic_denom (0 = unlimited) */
+    bs_write_ue(&bs, 0);        /* max_bits_per_mb_denom   (0 = unlimited) */
+    bs_write_ue(&bs, 16);       /* log2_max_mv_length_horizontal */
+    bs_write_ue(&bs, 16);       /* log2_max_mv_length_vertical   */
+    bs_write_ue(&bs, 0);        /* max_num_reorder_frames = 0 */
+    bs_write_ue(&bs, pp->num_ref_frames); /* max_dec_frame_buffering */
 
     bs_rbsp_trailing(&bs);
 
