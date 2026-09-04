@@ -668,14 +668,30 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
  * Unpack math per the canonical CPU reference (nyanmisaka ffmpeg-rockchip,
  * nv15_20ToYUV_c): sample x lives at bit offset x*10 of the row; read two
  * little-endian bytes, shift, mask to 10 bits; P010 wants it << 6. */
+/* NV15 is periodic: every 5 bytes hold exactly 4 samples at bit offsets
+ * 0/10/20/30, so a group needs one 32-bit load plus one byte instead of the
+ * per-sample multiply + two unaligned byte loads the naive form uses.  At
+ * 4096x1714 that is ~10.5M samples per frame, 24 times a second, on the decode
+ * thread -- the arithmetic is not free.  Bit math is identical to the scalar
+ * tail below (and to nyanmisaka's nv15_20ToYUV_c), so output is bit-exact. */
 static inline void nv15_row_to_p010(const uint8_t *srow, uint16_t *drow, int n)
 {
-    for (int x = 0; x < n; x++) {
+    int x = 0;
+    for (; x + 4 <= n; x += 4, srow += 5, drow += 4) {
+        uint32_t lo = (uint32_t)srow[0]        | ((uint32_t)srow[1] << 8) |
+                     ((uint32_t)srow[2] << 16) | ((uint32_t)srow[3] << 24);
+        uint32_t hi = (uint32_t)srow[4];
+        drow[0] = (uint16_t)(( lo         & 0x3FFu) << 6);
+        drow[1] = (uint16_t)(((lo >> 10)  & 0x3FFu) << 6);
+        drow[2] = (uint16_t)(((lo >> 20)  & 0x3FFu) << 6);
+        drow[3] = (uint16_t)((((lo >> 30) | (hi << 2)) & 0x3FFu) << 6);
+    }
+    for (; x < n; x++) {                     /* tail: same math, per sample */
         int pos   = (x * 10) >> 3;
         int shift = (x << 1) & 7;
-        uint16_t v = (uint16_t)((((uint16_t)srow[pos] |
-                                 ((uint16_t)srow[pos + 1] << 8)) >> shift) & 0x3FF);
-        drow[x] = (uint16_t)(v << 6);
+        uint16_t v = (uint16_t)((((uint16_t)srow[pos - ((x >> 2) * 5)] |
+                                 ((uint16_t)srow[pos - ((x >> 2) * 5) + 1] << 8)) >> shift) & 0x3FF);
+        drow[x - ((x >> 2) * 4)] = (uint16_t)(v << 6);
     }
 }
 
