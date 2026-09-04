@@ -8,46 +8,38 @@ Current as of **v2.0.0 "Reframe"**.
 
 ---
 
-## KI-1: Some H.264 files show a green corner and stutter
+## KI-1: H.264 B-frame streams fell back to software — FIXED
 
-**Status:** open, needs bisect · **Severity:** playback corruption on affected content
+**Status:** fixed on `deep-ink`, pending release · **Severity:** was playback corruption / software fallback
 
-Standard progressive H.264 decodes correctly, but at least one 720p60 High-profile
-file with B-frames (`has_b_frames=1`, level 4.1) plays with a green corner and
-visible stutter. The inherited B-frame handling appears incomplete for some
-reference patterns.
+Some H.264 files — the common case being High-profile content with B-frames — either
+showed a green corner and stuttered, or silently fell back to software decode.
 
-**If you hit this, a report helps** — post the output of:
+Cause: H.264 states its reordering constraint (`max_num_reorder_frames`) only inside the
+VUI, and the driver's synthesised SPS carried no VUI at all. A decoder then has to assume
+the worst case and may hold decoded pictures back for output ordering — but a stateless
+VA-API client is already blocking on the exact surface it submitted, so those pictures
+never arrive. The driver now writes a minimal VUI declaring `max_num_reorder_frames = 0`,
+the same constraint the HEVC path states directly.
 
-```sh
-ffprobe -v error -select_streams v:0 \
-  -show_entries stream=codec_name,profile,level,width,height,r_frame_rate,field_order,has_b_frames \
-  -of default=noprint_wrappers=1 <file>
-```
+Verified: H.264 High 720p60 with B-frames went from software fallback to hardware decode
+with zero decoder frame drops.
 
-**Workaround:** the file will play correctly with software decode
-(`mpv --hwdec=no`, or by not passing the hardware flags to the browser).
+## KI-2: HEVC — FIXED, and now advertised (8-bit)
 
----
+**Status:** fixed on `deep-ink`; `HEVCMain` restored to the advertised list · **Severity:** was total
 
-## KI-2: HEVC decode — FIXED on the `deep-ink` branch, pending soak
+HEVC had never decoded through this driver, at any bit depth — there was no HEVC bitstream
+assembler, so the decoder received a stream it could not parse and returned empty (green)
+buffers. The assembler now exists: VPS synthesised, SPS/PPS reconstructed from the VA-API
+parameters, Annex B stitching, with two requirements found on hardware — `max_num_reorder_pics`
+must be 0 for a stateless bridge, and the reference-picture-set count must be taken from
+`num_short_term_ref_pic_sets` and never revised mid-stream (re-sending a changed SPS flushes
+the decoder's picture buffer and destroys the references B-frames depend on).
 
-**Status:** fixed in development, not yet in the advertised menu · **Severity:** feature absent in releases
-
-HEVC never worked in this driver — there was no HEVC bitstream assembler; decode requests
-were mis-routed and MPP received a stream it could not parse (solid green at every bit
-depth, for everyone, since the driver existed).
-
-The assembler now exists (`src/hevc.c`, branch `deep-ink`): VPS synthesised from scratch,
-SPS/PPS reconstructed from the VA-API parameters, Annex B stitching, plus two non-obvious
-requirements discovered on hardware — `max_num_reorder_pics` must be 0 for a stateless
-VA-API bridge, and the original SPS's reference-picture-set count class must be detected
-(deterministically, from `st_rps_bits`) because it changes the slice-header bit layout.
-**Verified bit-exact against software decode** (pixel-identical frames, 8-bit AND 4K
-HDR10 Main10) with objective tooling committed in `tools/`.
-
-HEVC returns to the default advertised menu after real-playback soak — not before.
-Until then: test with `RKVA_ADVERTISE_ALL=1`.
+Verified pixel-identical to software decode at 8-bit and 10-bit, with a full 12-minute
+4096×1714 Main10 feature playing through end to end. **HEVC Main (8-bit) is now advertised
+and hardware-decodes in both Firefox and Chrome.** Main10 stays unadvertised — see KI-3.
 
 ## KI-3: 10-bit content (VP9 Profile 2, H.264 High10) is not advertised
 
