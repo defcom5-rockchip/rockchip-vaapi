@@ -100,6 +100,8 @@ typedef struct {
 
     /* HEVC state for VPS/SPS/PPS reconstruction (Deep Ink phase 1.5) */
     VAPictureParameterBufferHEVC last_pp_hevc;
+    int  hevc_sets_plus1;        /* 0 = unknown, 1 = original SPS had 0 RPS sets, 2 = had >=1 */
+    int  hevc_sent_plus1;        /* what the last emitted SPS declared (same encoding) */
 } RKContext;
 
 typedef struct {
@@ -1004,21 +1006,37 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     if (hevc && n_slices) {
         const VAPictureParameterBufferHEVC *hp = &c->last_pp_hevc;
         bool irap = hp->slice_parsing_fields.bits.RapPicFlag;
-        if (irap || !c->sps_sent) {
+        /* Learn the encoder's RPS layout from the first slice that carries an
+           inline RPS (any non-IDR picture), by matching against st_rps_bits. */
+        if (hp->st_rps_bits > 0 && c->hevc_sets_plus1 == 0) {
+            for (int i = 0; i < c->n_pending; i++) {
+                RKBuffer *b = buffer_by_id(d, c->pending[i]);
+                if (!b || b->type != VASliceDataBufferType) continue;
+                int det = hevc_detect_num_st_rps(b->data, (size_t)b->size * b->num_elements, hp);
+                if (det >= 0) { c->hevc_sets_plus1 = det + 1;
+                    LOG("do_hevc: RPS layout detected: original SPS had %s short-term sets (st_rps_bits=%u)",
+                        det ? ">=1" : "0", (unsigned)hp->st_rps_bits); }
+                else if (det == -2)
+                    LOG("do_hevc: WARNING slice uses SPS-level RPS sets or inter-RPS prediction -> "
+                        "not reconstructible from VA-API; expect decode errors");
+                break;
+            }
+        }
+        /* Until detected, assume >=1 (what most fixed-GOP encoders do); a wrong guess
+           is corrected by re-sending the parameter sets ahead of the first inter slice. */
+        int want_plus1 = c->hevc_sets_plus1 ? c->hevc_sets_plus1 : 2;
+        if (irap || !c->sps_sent || c->hevc_sent_plus1 != want_plus1) {
             int main10 = hp->bit_depth_luma_minus8 > 0;
             uint8_t hdr[1024];
             int n;
-            n = hevc_write_vps(hdr, sizeof(hdr), hp, main10); if (n > 0) PKT_APPEND(hdr, (size_t)n);
-            n = hevc_write_sps(hdr, sizeof(hdr), hp, main10); if (n > 0) PKT_APPEND(hdr, (size_t)n);
-            n = hevc_write_pps(hdr, sizeof(hdr), hp);         if (n > 0) PKT_APPEND(hdr, (size_t)n);
-            c->sps_sent = true;
-            LOG("do_hevc: VPS/SPS/PPS synthesised (%zu bytes) %dx%d main10=%d irap=%d st_rps_bits=%u",
+            n = hevc_write_vps(hdr, sizeof(hdr), hp, main10);                 if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            n = hevc_write_sps(hdr, sizeof(hdr), hp, main10, want_plus1 - 1); if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            n = hevc_write_pps(hdr, sizeof(hdr), hp);                         if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            c->sps_sent = true; c->hevc_sent_plus1 = want_plus1;
+            LOG("do_hevc: VPS/SPS/PPS synthesised (%zu bytes) %dx%d main10=%d irap=%d st_rps=%d st_rps_bits=%u",
                 pkt_sz, hp->pic_width_in_luma_samples, hp->pic_height_in_luma_samples,
-                main10, (int)irap, (unsigned)hp->st_rps_bits);
+                main10, (int)irap, want_plus1 - 1, (unsigned)hp->st_rps_bits);
         }
-        if (hp->st_rps_bits == 0 && !hp->slice_parsing_fields.bits.IntraPicFlag)
-            LOG("do_hevc: WARNING inter slice with st_rps_bits=0 -> slices reference SPS RPS sets "
-                "we cannot reconstruct; expect decode errors on this stream");
     }
     static const uint8_t hevc_sc[4] = {0x00, 0x00, 0x00, 0x01};
     for (int i = 0; i < c->n_pending; i++) {
@@ -1068,6 +1086,12 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
         c->dq_tail = (c->dq_tail + 1) & 63;
     }
 
+    /* Debug valve: RKVA_DUMP_HEVC=<path> appends every assembled HEVC packet
+       so `ffmpeg -f hevc -i <path> -f null -` can name a broken syntax element. */
+    if (hevc) {
+        const char *dump = getenv("RKVA_DUMP_HEVC");
+        if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(pkt_data, 1, pkt_sz, df); fclose(df); } }
+    }
     LOG("do_generic_decode: sending %zu bytes to MPP (coding=%d) target=0x%x%s",
         pkt_sz, (int)c->coding, (unsigned)c->render_target,
         is_hidden ? " [altref]" : "");

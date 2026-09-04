@@ -99,7 +99,7 @@ int hevc_write_vps(uint8_t *buf, size_t buf_size,
     profile_tier_level(&bs, is_main10);
     bs_write(&bs, 1, 1);        /* vps_sub_layer_ordering_info_present_flag */
     bs_write_ue(&bs, pp->sps_max_dec_pic_buffering_minus1);  /* vps_max_dec_pic_buffering_minus1[0] */
-    bs_write_ue(&bs, pp->sps_max_dec_pic_buffering_minus1);  /* vps_max_num_reorder_pics[0] (max legal) */
+    bs_write_ue(&bs, 0);        /* vps_max_num_reorder_pics[0] = 0: stateless client reorders; MPP must emit eagerly */
     bs_write_ue(&bs, 0);        /* vps_max_latency_increase_plus1[0] */
     bs_write(&bs, 0, 6);        /* vps_max_layer_id */
     bs_write_ue(&bs, 0);        /* vps_num_layer_sets_minus1 */
@@ -109,7 +109,8 @@ int hevc_write_vps(uint8_t *buf, size_t buf_size,
 }
 
 int hevc_write_sps(uint8_t *buf, size_t buf_size,
-                   const VAPictureParameterBufferHEVC *pp, int is_main10)
+                   const VAPictureParameterBufferHEVC *pp, int is_main10,
+                   int num_st_rps)
 {
     uint8_t raw[512];
     BSWriter bs;
@@ -135,7 +136,10 @@ int hevc_write_sps(uint8_t *buf, size_t buf_size,
 
     bs_write(&bs, 1, 1);        /* sps_sub_layer_ordering_info_present_flag */
     bs_write_ue(&bs, pp->sps_max_dec_pic_buffering_minus1);  /* sps_max_dec_pic_buffering_minus1[0] */
-    bs_write_ue(&bs, pp->sps_max_dec_pic_buffering_minus1);  /* sps_max_num_reorder_pics[0] */
+    bs_write_ue(&bs, 0);        /* sps_max_num_reorder_pics[0] = 0: the VA-API client owns reordering.
+                                   A non-zero value makes MPP hold decoded pictures for output
+                                   ordering while the client already waits on vaSyncSurface for
+                                   that exact picture -> deadline -> "internal decoding error". */
     bs_write_ue(&bs, 0);        /* sps_max_latency_increase_plus1[0] */
 
     bs_write_ue(&bs, pp->log2_min_luma_coding_block_size_minus3);
@@ -161,7 +165,17 @@ int hevc_write_sps(uint8_t *buf, size_t buf_size,
         bs_write(&bs, pp->pic_fields.bits.pcm_loop_filter_disabled_flag, 1);
     }
 
-    bs_write_ue(&bs, 0);        /* num_short_term_ref_pic_sets = 0 (slices carry inline RPS) */
+    /* num_short_term_ref_pic_sets: 0, or 1 dummy set (see hevc.h).  The dummy
+       set is never referenced by a slice; it only exists so that slice-inline
+       RPS parse as st_ref_pic_set(1) and read their inter_ref_pic_set_prediction
+       bit, exactly as they did against the encoder's original SPS. */
+    bs_write_ue(&bs, (uint32_t)(num_st_rps ? 1 : 0));
+    if (num_st_rps) {           /* st_ref_pic_set(0): one used negative pic, delta -1 */
+        bs_write_ue(&bs, 1);    /* num_negative_pics */
+        bs_write_ue(&bs, 0);    /* num_positive_pics */
+        bs_write_ue(&bs, 0);    /* delta_poc_s0_minus1[0] */
+        bs_write(&bs, 1, 1);    /* used_by_curr_pic_s0_flag[0] */
+    }
     bs_write(&bs, pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag, 1);
     if (pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag)
         bs_write_ue(&bs, 0);    /* num_long_term_ref_pics_sps = 0 */
@@ -226,4 +240,74 @@ int hevc_write_pps(uint8_t *buf, size_t buf_size,
     bs_write(&bs, pp->slice_parsing_fields.bits.slice_segment_header_extension_present_flag, 1);
     bs_write(&bs, 0, 1);        /* pps_extension_present_flag */
     return finish(&bs, raw, buf, buf_size);
+}
+
+
+/* ------------------------------------------------------------------------ */
+/* Slice-header probe: which RPS layout did the encoder's SPS imply?         */
+
+typedef struct { const uint8_t *p; size_t n; size_t pos; } BR;   /* pos in bits */
+static uint32_t br_u(BR *b, int k) {
+    uint32_t v = 0;
+    while (k-- > 0) {
+        size_t byte = b->pos >> 3; int bit = 7 - (int)(b->pos & 7);
+        v = (v << 1) | (byte < b->n ? (uint32_t)((b->p[byte] >> bit) & 1) : 0u);
+        b->pos++;
+    }
+    return v;
+}
+static uint32_t br_ue(BR *b) {
+    int lz = 0;
+    while (lz < 32 && br_u(b, 1) == 0) lz++;
+    if (lz == 0) return 0;
+    return ((1u << lz) - 1u) + br_u(b, lz);
+}
+/* Strip emulation-prevention bytes so the header parses as RBSP. */
+static size_t rbsp_unescape(const uint8_t *in, size_t n, uint8_t *out, size_t cap) {
+    size_t o = 0; int zeros = 0;
+    for (size_t i = 0; i < n && o < cap; i++) {
+        if (zeros >= 2 && in[i] == 0x03) { zeros = 0; continue; }
+        out[o++] = in[i];
+        zeros = (in[i] == 0) ? zeros + 1 : 0;
+    }
+    return o;
+}
+/* Explicit st_ref_pic_set body (no inter prediction). Returns 0 on nonsense. */
+static int parse_explicit_rps(BR *b) {
+    uint32_t nneg = br_ue(b), npos = br_ue(b);
+    if (nneg > 16 || npos > 16) return 0;
+    for (uint32_t i = 0; i < nneg; i++) { br_ue(b); br_u(b, 1); }
+    for (uint32_t i = 0; i < npos; i++) { br_ue(b); br_u(b, 1); }
+    return 1;
+}
+
+int hevc_detect_num_st_rps(const uint8_t *nal, size_t len,
+                           const VAPictureParameterBufferHEVC *pp)
+{
+    uint8_t buf[256];
+    size_t n = rbsp_unescape(nal, len < 512 ? len : 512, buf, sizeof(buf));
+    if (n < 4) return -1;
+    int nal_type = (buf[0] >> 1) & 0x3F;
+    if (nal_type == 19 || nal_type == 20) return -1;        /* IDR: no RPS in header */
+    if (nal_type > 23) return -1;                           /* not a VCL slice */
+    BR b = { buf, n, 16 };                                  /* skip 2-byte NAL header */
+    if (!br_u(&b, 1)) return -1;                            /* first_slice_segment_in_pic_flag */
+    if (nal_type >= 16) br_u(&b, 1);                        /* no_output_of_prior_pics_flag */
+    br_ue(&b);                                              /* slice_pic_parameter_set_id */
+    for (int i = 0; i < pp->num_extra_slice_header_bits; i++) br_u(&b, 1);
+    br_ue(&b);                                              /* slice_type */
+    if (pp->slice_parsing_fields.bits.output_flag_present_flag) br_u(&b, 1);
+    if (pp->pic_fields.bits.separate_colour_plane_flag) br_u(&b, 2);
+    br_u(&b, pp->log2_max_pic_order_cnt_lsb_minus4 + 4);   /* slice_pic_order_cnt_lsb */
+    if (br_u(&b, 1)) return -2;                             /* short_term_ref_pic_set_sps_flag=1 */
+    size_t start = b.pos;
+    /* Hypothesis A: original SPS had 0 sets -> st_ref_pic_set(0), explicit, no pred bit */
+    BR a = b; int okA = parse_explicit_rps(&a); size_t bitsA = a.pos - start;
+    /* Hypothesis B: original SPS had >=1 sets -> st_ref_pic_set(idx!=0): pred bit first */
+    BR c = b; int pred = (int)br_u(&c, 1); int okB = 0; size_t bitsB = 0;
+    if (!pred) { okB = parse_explicit_rps(&c); bitsB = c.pos - start; }
+    if (okA && bitsA == pp->st_rps_bits) return 0;
+    if (okB && bitsB == pp->st_rps_bits) return 1;
+    if (pred) return -2;                                    /* inter-RPS prediction: needs the real sets */
+    return -1;
 }
