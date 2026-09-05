@@ -8,37 +8,26 @@ Current as of **v2.0.0 "Reframe"**.
 
 ---
 
-## KI-1: H.264 streams with B-frames decode to a corrupted picture
+## KI-1: H.264 with B-frames — correct from the start of playback; corrupt after seeking (open-GOP content)
 
-**Status:** open, reproducible, present in v2.0 · **Severity:** wrong picture on affected content
+**Status:** largely fixed in v2.1.1; seek case open · **Severity:** wrong picture after seeking in affected files
 
-H.264 video that uses B-frames decodes in hardware but comes out wrong: ghosting and
-doubled edges, occasional solid green frames. H.264 without B-frames is pixel-perfect, so
-the split is clean and easy to check with `ffprobe … -show_entries stream=has_b_frames`.
+Through v2.1.0, H.264 streams using B-frames decoded to a corrupted picture (ghosting,
+occasional green frames) at all times: decoded pictures were being routed into the wrong
+surfaces whenever output order differed from submission order. v2.1.1 routes by picture
+identity instead, and B-frame H.264 now decodes in hardware **pixel-identical to software
+from the start of playback** (verified objectively, repeatedly).
 
-This matters more than an edge case: most real-world H.264 uses B-frames. Streaming sites
-mostly serve VP9 to browsers on this platform, which is why the fault is easy to miss —
-it shows up on local files and downloads.
+What remains: after **seeking** in *open-GOP* content (broadcast-style streams whose seek
+points are not true keyframes), the decoder resumes against reference state from the old
+position and produces a plausible but wrong picture until the next real keyframe. Typical
+movie files are closed-GOP and **seek correctly in hardware**; broadcast captures are the
+exposed class. The mechanism is understood (the decoder cannot be safely reset mid-stream
+without a true IDR to restart from — six remedies tested and documented) and a fix is in
+development.
 
-Measured objectively (hardware frames compared pixel-by-pixel against a software reference,
-`tools/hevc-ladder.sh`): mean absolute difference ≈ 36/255 on affected frames, versus 0.00
-for every codec that works. Reproducer: any H.264 High-profile clip encoded with B-frames.
-
-Two things were ruled out while investigating: it is not the missing reordering constraint
-(adding an H.264 VUI declaring `max_num_reorder_frames = 0` changed which streams took the
-hardware path but not the corruption, and was reverted), and it is not decoded-picture-buffer
-sizing (a generous `max_dec_frame_buffering` made no difference). The remaining suspect is
-reference-list handling — the same class of defect the HEVC path had with its reference-picture
-sets, in the code that builds H.264 reference lists.
-
-**Mitigated since v2.1.1:** H.264 output is now routed through the same decode-order queue
-the other codecs use, instead of a shortcut that assumed output order matches submit order.
-Affected streams no longer produce a corrupted picture — players fall back to software decode
-and show the correct image. Hardware decode of B-frame H.264 is still not working, so this
-issue stays open; a wrong picture is worse than a slow one.
-
-**Workaround:** none needed for correctness; the picture is right. If the CPU cost matters,
-re-encoding without B-frames restores hardware decode.
+**Workaround for affected files:** `mpv --hwdec=no` plays them perfectly, or simply
+letting playback continue past the next keyframe clears the artefacts.
 
 ## KI-2: HEVC — FIXED, and now advertised (8-bit)
 
