@@ -1,6 +1,8 @@
 /*
  * h264.c — H.264 Annex B SPS/PPS reconstruction from VA-API structs
  *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
  * Copyright (C) 2026 Eduardo García-Mádico Portabella <woodyst@gmail.com>
  *
  * This library is free software; you can redistribute it and/or

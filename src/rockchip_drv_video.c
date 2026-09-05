@@ -1,6 +1,8 @@
 /*
  * rockchip_drv_video.c — VA-API driver for Rockchip RK3588 via MPP
  *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
  * Copyright (C) 2026 Eduardo García-Mádico Portabella <woodyst@gmail.com>
  *
  * This library is free software; you can redistribute it and/or

@@ -151,3 +151,23 @@ These fork additions were developed with the assistance of **Claude (Fable 5)** 
 reviewed, tested, and validated on real hardware — **Orange Pi 5B (RK3588S)**, panfork
 Mesa 23, Firefox 154 VA-API — by **defcom5-rockchip**. (The base-driver validation credit
 above belongs to Eduardo García-Mádico Portabella; it does not cover these fork additions.)
+
+## License and attribution
+
+**LGPL-2.1-or-later** — see [LICENSE](LICENSE). Per-file copyright is recorded in
+[debian/copyright](debian/copyright); every source file carries an SPDX identifier.
+
+This is a fork, and the lineage matters:
+
+- **Eduardo García-Mádico Portabella** (`woodyst`) wrote the original driver —
+  the VA-API vtable, the MPP plumbing, the H.264 parameter-set reconstruction and
+  the bit writer this fork still builds on. Upstream: https://github.com/woodyst/rockchip-vaapi
+- **truongsinh** contributed the surface-stride fixes carried here from upstream PR #2.
+- **defcom5-rockchip** maintains this fork: the HEVC bitstream assembler (`src/hevc.c`,
+  original work — upstream has no HEVC), the NV15 to P010 repack with its NEON path,
+  B-frame and reference-routing fixes, `vaDeriveImage`, the honest profile
+  advertisement, and the test tooling. Developed with Claude as co-engineer;
+  contributions are attributed in the commit trailers.
+
+Rockchip MPP, libva and the other libraries this links against carry their own
+licenses and are not redistributed here.
