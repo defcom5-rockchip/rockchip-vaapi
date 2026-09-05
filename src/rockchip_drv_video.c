@@ -786,6 +786,25 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     int  copy_h = fheight > 0 ? fheight : s->height;
     int  src_hs = fhs > 0 ? fhs : copy_w;
     int  src_vs = fvs > 0 ? fvs : copy_h;
+    /* Every layout in this driver - surface sizing, the NV15 repack, the
+     * exported descriptor - assumes 4:2:0 chroma (half-height chroma plane).
+     * MPP_FRAME_FMT_IS_YUV_10BIT is true for 4:2:2 as well, so a 4:2:2 frame
+     * would be repacked as if half its chroma existed and published as a
+     * plausible but wrong picture. Refuse it instead: the surface is left
+     * undecoded, the client falls back to software, and the viewer sees the
+     * right image. 4:2:2 profiles are not advertised, so this is a guard
+     * against a decoder that hands back something we never asked for.
+     * (Formats: NV15 is 4:2:0, NV20 is its 4:2:2 sibling - see the kernel's
+     * V4L2_PIX_FMT_NV15/NV20 definitions.) */
+    unsigned fmt_masked = (unsigned)ffmt & MPP_FRAME_FMT_MASK;
+    if (fmt_masked == MPP_FMT_YUV422SP || fmt_masked == MPP_FMT_YUV422SP_10BIT) {
+        LOG("assign_mpp_frame: 4:2:2 frame (fmt=0x%x) refused - this driver only "
+            "handles 4:2:0 layouts; leaving surface undecoded for software fallback",
+            (unsigned)ffmt);
+        mpp_frame_deinit(&frame);
+        return;
+    }
+
     bool i10    = MPP_FRAME_FMT_IS_YUV_10BIT(ffmt);
     int  bpp    = i10 ? 2 : 1;
     int  copied = 0;
