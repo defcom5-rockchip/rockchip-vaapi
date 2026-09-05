@@ -1,9 +1,31 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: rockchip-vaapi
-Upstream-Contact: Eduardo García-Mádico Portabella <woodyst@gmail.com>
+Upstream-Contact: defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+Source: https://github.com/defcom5-rockchip/rockchip-vaapi
+Comment:
+ This is the defcom5-rockchip fork of the rockchip-vaapi driver originally
+ written by Eduardo García-Mádico Portabella. The fork adds HEVC decoding,
+ correct 10-bit output and a number of decode-path fixes; the original
+ author's work remains the foundation and is licensed unchanged.
 
 Files: *
 Copyright: 2026 Eduardo García-Mádico Portabella <woodyst@gmail.com>
+           2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+License: LGPL-2.1+
+
+Files: src/hevc.c src/hevc.h
+Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+Comment:
+ The HEVC bitstream assembler is original work in this fork; the upstream
+ project has no HEVC support.
+License: LGPL-2.1+
+
+Files: tests/* tools/*
+Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+License: LGPL-2.1+
+
+Files: debian/*
+Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
 License: LGPL-2.1+
 
 License: LGPL-2.1+

@@ -1,6 +1,8 @@
 /*
  * hevc.c — H.265/HEVC Annex B VPS/SPS/PPS reconstruction from VA-API structs
  *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
  * Copyright (C) 2026 defcom5-rockchip
  *
  * This library is free software; you can redistribute it and/or
