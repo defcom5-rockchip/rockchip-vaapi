@@ -31,7 +31,14 @@ sizing (a generous `max_dec_frame_buffering` made no difference). The remaining 
 reference-list handling — the same class of defect the HEVC path had with its reference-picture
 sets, in the code that builds H.264 reference lists.
 
-**Workaround:** the file plays correctly with software decode (`mpv --hwdec=no`).
+**Mitigated since v2.1.1:** H.264 output is now routed through the same decode-order queue
+the other codecs use, instead of a shortcut that assumed output order matches submit order.
+Affected streams no longer produce a corrupted picture — players fall back to software decode
+and show the correct image. Hardware decode of B-frame H.264 is still not working, so this
+issue stays open; a wrong picture is worse than a slow one.
+
+**Workaround:** none needed for correctness; the picture is right. If the CPU cost matters,
+re-encoding without B-frames restores hardware decode.
 
 ## KI-2: HEVC — FIXED, and now advertised (8-bit)
 
