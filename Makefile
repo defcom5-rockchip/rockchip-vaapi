@@ -14,7 +14,7 @@ LDFLAGS += $(RGA_LIBS)
 endif
 
 TARGET  := rockchip_drv_video.so
-SRCS    := src/rockchip_drv_video.c src/h264.c
+SRCS    := src/rockchip_drv_video.c src/h264.c src/hevc.c
 OBJS    := $(SRCS:.c=.o)
 INSTALL_DIR := /usr/lib/aarch64-linux-gnu/dri
 

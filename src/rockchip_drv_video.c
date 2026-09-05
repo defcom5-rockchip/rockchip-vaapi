@@ -40,8 +40,12 @@
 #include <pthread.h>
 #include <sys/ioctl.h>
 #include <errno.h>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include "h264.h"
+#include "hevc.h"
 
 /* ── logging ─────────────────────────────────────────────────── */
 static FILE *g_log_fp = NULL;
@@ -96,6 +100,11 @@ typedef struct {
     /* H.264 state for SPS/PPS reconstruction */
     VAPictureParameterBufferH264 last_pp;
     bool         sps_sent;
+
+    /* HEVC state for VPS/SPS/PPS reconstruction (Deep Ink phase 1.5) */
+    VAPictureParameterBufferHEVC last_pp_hevc;
+    int  hevc_sets_plus1;        /* 0 = unknown, 1 = original SPS had 0 RPS sets, 2 = had >=1 */
+    int  hevc_sent_plus1;        /* what the last emitted SPS declared (same encoding) */
 } RKContext;
 
 typedef struct {
@@ -130,6 +139,7 @@ typedef struct {
     unsigned int   size;
     unsigned int   num_elements;
     void          *data;
+    bool           borrowed;   /* data points into an MPP buffer: do not free */
 } RKBuffer;
 
 typedef struct {
@@ -230,7 +240,22 @@ static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
     list[i++] = VAProfileH264High;
     list[i++] = VAProfileVP8Version0_3;
     list[i++] = VAProfileVP9Profile0;
-    /* HEVC (all depths), H264High10 and VP9Profile2 not advertised: the export
+    /* HEVC Main (8-bit) — earned its place: the bitstream assembler decodes it
+     * bit-exact (pixel-identical to software decode), and it displays
+     * correctly in both browsers (Chrome and Firefox hardware-decode it).
+     * Main10 is deliberately NOT here: it decodes correctly but the panfork
+     * GL stack cannot present 10-bit surfaces, and advertising it makes
+     * Chrome direct-play HEVC 10-bit into a green screen. See KNOWN-ISSUES. */
+    list[i++] = VAProfileHEVCMain;
+    /* Deep Ink dev switch: advertise the 10-bit/HEVC profiles ONLY when
+     * explicitly requested, so the repack can be tested end-to-end without
+     * changing the shipped default.  Release builds keep the honest menu. */
+    if (getenv("RKVA_ADVERTISE_ALL")) {
+        list[i++] = VAProfileH264High10;
+        list[i++] = VAProfileHEVCMain10;
+        list[i++] = VAProfileVP9Profile2;
+    }
+    /* HEVC Main10, H264High10 and VP9Profile2 not advertised: the export
      * path mishandles their output (HEVC renders a solid green frame at every
      * bit depth; VP9 Profile 2 renders corrupted frames) - hardware-verified on
      * RK3588S, 2026-09-02. MPP decodes these fine; until the surface export is
@@ -588,7 +613,7 @@ static VAStatus rk_DestroyBuffer(VADriverContextP ctx, VABufferID id) {
     RKDriver *d = drv_from_ctx(ctx);
     RKBuffer *b = buffer_by_id(d, id);
     if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
-    free(b->data);
+    if (!b->borrowed) free(b->data);   /* derived images alias MPP memory */
     memset(b, 0, sizeof(*b));
     return VA_STATUS_SUCCESS;
 }
@@ -633,6 +658,10 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
             c->coding == MPP_VIDEO_CodingAVC) {
             memcpy(&c->last_pp, b->data,
                    sizeof(VAPictureParameterBufferH264));
+        } else if (b && b->type == VAPictureParameterBufferType &&
+                   c->coding == MPP_VIDEO_CodingHEVC) {
+            memcpy(&c->last_pp_hevc, b->data,
+                   sizeof(VAPictureParameterBufferHEVC));
         }
     }
     return VA_STATUS_SUCCESS;
@@ -640,6 +669,59 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
 
 /* Route one MPP output frame to the right surface and mark it decoded.
  * Shared by EndPicture poll loops and the SyncSurface drain loop. */
+/* NV15 -> P010 row repack ("Deep Ink").
+ * MPP emits 10-bit YUV as NV15: fully packed, 5 bytes per 4 samples, no padding
+ * bits.  Every consumer of this surface (the export descriptor above, Firefox,
+ * Chrome, mpv) was promised P010: one uint16 per sample, 10 significant bits,
+ * MSB-aligned.  Until now the copy below moved the packed bytes verbatim under
+ * the P010 label -- solid green (HEVC) / corruption (VP9 Profile 2).
+ * Unpack math per the canonical CPU reference (nyanmisaka ffmpeg-rockchip,
+ * nv15_20ToYUV_c): sample x lives at bit offset x*10 of the row; read two
+ * little-endian bytes, shift, mask to 10 bits; P010 wants it << 6. */
+/* NV15 is periodic: every 5 bytes hold exactly 4 samples at bit offsets
+ * 0/10/20/30.  At 4096x1714 this runs ~10.5M times per frame, 24 times a
+ * second, on the decode thread, so it is worth vectorising.
+ *
+ * NEON path (8 samples / 10 bytes per iteration): one byte-table shuffle
+ * gathers the little-endian 16-bit word containing each sample, one variable
+ * right shift aligns all eight lanes, mask to 10 bits, shift left 6 for P010.
+ * The x + 16 <= n guard keeps the 16-byte load inside the row's own packed
+ * bytes: at the last iteration the read ends 4 bytes before the row does.
+ * The scalar paths (4-at-a-time, then per sample) cover the tail and non-NEON
+ * builds.  All three compute identical bits -- same math as nyanmisaka's
+ * nv15_20ToYUV_c -- so output is bit-exact whichever runs. */
+static inline void nv15_row_to_p010(const uint8_t *srow, uint16_t *drow, int n)
+{
+    int x = 0;
+#if defined(__aarch64__)
+    {
+        static const uint8_t gather[16] = { 0,1, 1,2, 2,3, 3,4, 5,6, 6,7, 7,8, 8,9 };
+        const uint8x16_t tbl = vld1q_u8(gather);
+        const int16x8_t  rsh = { 0, -2, -4, -6, 0, -2, -4, -6 };
+        const uint16x8_t msk = vdupq_n_u16(0x03FF);
+        for (; x + 16 <= n; x += 8, srow += 10, drow += 8) {
+            uint16x8_t v = vreinterpretq_u16_u8(vqtbl1q_u8(vld1q_u8(srow), tbl));
+            v = vandq_u16(vshlq_u16(v, rsh), msk);
+            vst1q_u16(drow, vshlq_n_u16(v, 6));
+        }
+    }
+#endif
+    for (; x + 4 <= n; x += 4, srow += 5, drow += 4) {
+        uint32_t lo = (uint32_t)srow[0]        | ((uint32_t)srow[1] << 8) |
+                     ((uint32_t)srow[2] << 16) | ((uint32_t)srow[3] << 24);
+        uint32_t hi = (uint32_t)srow[4];
+        drow[0] = (uint16_t)(( lo         & 0x3FFu) << 6);
+        drow[1] = (uint16_t)(((lo >> 10)  & 0x3FFu) << 6);
+        drow[2] = (uint16_t)(((lo >> 20)  & 0x3FFu) << 6);
+        drow[3] = (uint16_t)((((lo >> 30) | (hi << 2)) & 0x3FFu) << 6);
+    }
+    for (int i = 0; x < n; x++, i++) {          /* fewer than 4 samples left */
+        int pos = (i * 10) >> 3, sh = (i * 10) & 7;
+        drow[i] = (uint16_t)(((((uint16_t)srow[pos] |
+                                ((uint16_t)srow[pos + 1] << 8)) >> sh) & 0x3FF) << 6);
+    }
+}
+
 static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
 {
     if (mpp_frame_get_info_change(frame)) {
@@ -723,6 +805,41 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         }
     }
 #endif
+    if (!copied && src && dst && i10) {
+        /* Deep Ink: repack NV15 -> true P010 (see nv15_row_to_p010 above).
+         * For 10-bit frames MPP's hor_stride is a BYTE stride of the packed
+         * plane.  Defensive: if it looks like a sample count instead (older
+         * kernels), derive the packed byte stride from it. */
+        int src_bs = src_hs;
+        int min_bs = (copy_w * 10 + 7) / 8;
+        if (src_bs < min_bs) src_bs = ((src_hs * 10 + 7) / 8 + 63) & ~63;
+        const uint8_t *sy = (const uint8_t *)src;
+        uint8_t       *dy = (uint8_t       *)dst;
+        for (int r = 0; r < copy_h; r++)
+            nv15_row_to_p010(sy + (size_t)r * src_bs,
+                             (uint16_t *)(dy + (size_t)r * dst_hs * 2), copy_w);
+        const uint8_t *su = sy + (size_t)src_bs * src_vs;
+        uint8_t       *du = dy + (size_t)dst_hs * 2 * dst_vs;
+        for (int r = 0; r < copy_h / 2; r++)
+            nv15_row_to_p010(su + (size_t)r * src_bs,
+                             (uint16_t *)(du + (size_t)r * dst_hs * 2), copy_w);
+        copied = 3;   /* 3 = NV15->P010 CPU repack */
+        /* Deep Ink debug valve: dump ONE repacked frame as raw P010 for
+         * GL-free verification (ffmpeg -f rawvideo -pix_fmt p010le). */
+        static int dumped = 0;
+        const char *dump = getenv("RKVA_DUMP");
+        if (dump && !dumped) {
+            FILE *df = fopen(dump, "wb");
+            if (df) {
+                fwrite(dy, 1, (size_t)dst_hs * 2 * dst_vs, df);          /* Y  */
+                fwrite(du, 1, (size_t)dst_hs * 2 * (dst_vs / 2), df);    /* UV */
+                fclose(df);
+                dumped = 1;
+                LOG("deepink: dumped P010 frame %dx%d stride=%d to %s",
+                    copy_w, copy_h, dst_hs, dump);
+            }
+        }
+    }
     if (!copied && src && dst) {
         const uint8_t *sy = (const uint8_t *)src;
         uint8_t       *dy = (uint8_t       *)dst;
@@ -918,9 +1035,70 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     pkt_sz += _l;                                          \
 } while (0)
 
+    /* HEVC (Deep Ink phase 1.5): MPP is a bitstream decoder and VA-API never
+       hands us the VPS/SPS/PPS bytes -- only the parsed fields.  Re-synthesise
+       them (hevc.c) ahead of the slices on every IRAP (and the first frame),
+       and give each slice NALU its Annex B start code.  Without this MPP
+       parsed nothing and returned zero-filled buffers: the solid green. */
+    bool hevc = (c->coding == MPP_VIDEO_CodingHEVC);
+    int  n_slices = 0;
+    for (int i = 0; i < c->n_pending; i++) {
+        RKBuffer *b = buffer_by_id(d, c->pending[i]);
+        if (b && b->type == VASliceDataBufferType) n_slices++;
+    }
+    if (hevc && n_slices) {
+        const VAPictureParameterBufferHEVC *hp = &c->last_pp_hevc;
+        bool irap = hp->slice_parsing_fields.bits.RapPicFlag;
+        /* How many short-term RPS sets did the encoder's SPS declare?  Only the
+           count CLASS matters to us (0 vs >=1): a slice-inline RPS parses as
+           st_ref_pic_set(num_sets), and that carries an
+           inter_ref_pic_set_prediction_flag iff the index is non-zero -- get the
+           class wrong and every slice header shifts by one bit.
+           VA-API hands us the real number in pp->num_short_term_ref_pic_sets, so
+           it is known at the very first picture.  Phase 1.5 guessed and then
+           corrected itself by re-emitting a DIFFERENT SPS mid-stream; re-activating
+           an SPS flushes the DPB, which destroys the earlier references a B-frame
+           needs ("Could not find ref with POC 0") and dropped every reordered
+           stream to software.  Decide once, here, and never change it. */
+        int want_plus1 = (hp->num_short_term_ref_pic_sets > 0) ? 2 : 1;
+        if (c->hevc_sets_plus1 == 0) {
+            c->hevc_sets_plus1 = want_plus1;
+            /* Cross-check against the slice-header probe on the first picture that
+               actually carries an inline RPS; disagreement is worth knowing about. */
+            if (hp->st_rps_bits > 0) {
+                for (int i = 0; i < c->n_pending; i++) {
+                    RKBuffer *b = buffer_by_id(d, c->pending[i]);
+                    if (!b || b->type != VASliceDataBufferType) continue;
+                    int det = hevc_detect_num_st_rps(b->data, (size_t)b->size * b->num_elements, hp);
+                    if (det >= 0 && (det + 1) != want_plus1)
+                        LOG("do_hevc: NOTE pp->num_short_term_ref_pic_sets=%u implies %d sets, "
+                            "slice probe says %d (trusting pp)",
+                            (unsigned)hp->num_short_term_ref_pic_sets, want_plus1 - 1, det);
+                    else if (det == -2)
+                        LOG("do_hevc: WARNING slice uses SPS-level RPS sets or inter-RPS "
+                            "prediction -> not reconstructible from VA-API");
+                    break;
+                }
+            }
+        }
+        if (irap || !c->sps_sent) {
+            int main10 = hp->bit_depth_luma_minus8 > 0;
+            uint8_t hdr[1024];
+            int n;
+            n = hevc_write_vps(hdr, sizeof(hdr), hp, main10);                 if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            n = hevc_write_sps(hdr, sizeof(hdr), hp, main10, want_plus1 - 1); if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            n = hevc_write_pps(hdr, sizeof(hdr), hp);                         if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            c->sps_sent = true; c->hevc_sent_plus1 = want_plus1;
+            LOG("do_hevc: VPS/SPS/PPS synthesised (%zu bytes) %dx%d main10=%d irap=%d st_rps=%d st_rps_bits=%u",
+                pkt_sz, hp->pic_width_in_luma_samples, hp->pic_height_in_luma_samples,
+                main10, (int)irap, want_plus1 - 1, (unsigned)hp->st_rps_bits);
+        }
+    }
+    static const uint8_t hevc_sc[4] = {0x00, 0x00, 0x00, 0x01};
     for (int i = 0; i < c->n_pending; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
         if (!b || b->type != VASliceDataBufferType) continue;
+        if (hevc) PKT_APPEND(hevc_sc, 4);
         PKT_APPEND(b->data, (size_t)b->size * b->num_elements);
     }
 #undef PKT_APPEND
@@ -964,6 +1142,12 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
         c->dq_tail = (c->dq_tail + 1) & 63;
     }
 
+    /* Debug valve: RKVA_DUMP_HEVC=<path> appends every assembled HEVC packet
+       so `ffmpeg -f hevc -i <path> -f null -` can name a broken syntax element. */
+    if (hevc) {
+        const char *dump = getenv("RKVA_DUMP_HEVC");
+        if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(pkt_data, 1, pkt_sz, df); fclose(df); } }
+    }
     LOG("do_generic_decode: sending %zu bytes to MPP (coding=%d) target=0x%x%s",
         pkt_sz, (int)c->coding, (unsigned)c->render_target,
         is_hidden ? " [altref]" : "");
@@ -1272,7 +1456,9 @@ static VAStatus rk_CreateImage(VADriverContextP ctx,
     (void)format;
 
     VABufferID buf_id;
-    unsigned int stride = (unsigned int)((width + 15) & ~15);
+    /* P010 images carry uint16 samples; size and pitches are in BYTES. */
+    unsigned int bpp    = (format && format->fourcc == VA_FOURCC_P010) ? 2u : 1u;
+    unsigned int stride = (unsigned int)((width + 15) & ~15) * bpp;
     unsigned int size   = stride * (unsigned int)height * 3 / 2;
     VAStatus st = rk_CreateBuffer(ctx, 0, VAImageBufferType, size, 1,
                                   NULL, &buf_id);
@@ -1296,20 +1482,53 @@ static VAStatus rk_CreateImage(VADriverContextP ctx,
 
 static VAStatus rk_DeriveImage(VADriverContextP ctx,
                                 VASurfaceID sid, VAImage *image) {
+    /* Map the surface's own memory as a VAImage.  This is what VLC's GL
+     * interop and ffmpeg's hwframe transfer call; both fail without it.
+     * The decode path has already written this buffer in exactly the layout
+     * reported here: NV12 for 8-bit, true P010 for 10-bit (the NV15 repack
+     * runs before the frame is published), both at the surface's own stride.
+     * The image buffer BORROWS the MPP mapping - it must not be freed. */
     RKDriver  *d = drv_from_ctx(ctx);
     RKSurface *s = surface_by_id(d, sid);
-    if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
+    if (!s || !s->priv_buf) return VA_STATUS_ERROR_INVALID_SURFACE;
 
-    /* priv_buf is not CPU-mappable as a shared VAImage; force callers to use
-     * vaGetImage instead (copies pixels, but always works). */
-    (void)image;
-    return VA_STATUS_ERROR_OPERATION_FAILED;
+    void *ptr = mpp_buffer_get_ptr(s->priv_buf);
+    if (!ptr) return VA_STATUS_ERROR_INVALID_SURFACE;
 
-    VAImageFormat fmt;
-    memset(&fmt, 0, sizeof(fmt));
-    fmt.fourcc = VA_FOURCC_NV12;
-    return rk_CreateImage(ctx, &fmt, s->width, s->height, image);
+    bool i10 = MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt);
+    int  bpp = i10 ? 2 : 1;
+    int  hs  = (s->hstride ? s->hstride : s->width) * bpp;   /* bytes per row */
+    int  vs  = s->vstride ? s->vstride : s->height;
+
+    VABufferID buf_id;
+    VAStatus st = rk_CreateBuffer(ctx, 0, VAImageBufferType, 1, 1, NULL, &buf_id);
+    if (st != VA_STATUS_SUCCESS) return st;
+    RKBuffer *b = buffer_by_id(d, buf_id);
+    if (!b) return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    free(b->data);
+    b->data     = ptr;          /* alias the decoded surface */
+    b->borrowed = true;
+    b->size     = (unsigned int)(hs * vs * 3 / 2);
+
+    memset(image, 0, sizeof(*image));
+    image->image_id           = buf_id;
+    image->buf                = buf_id;
+    image->format.fourcc      = i10 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+    image->format.byte_order  = VA_LSB_FIRST;
+    image->format.bits_per_pixel = i10 ? 24 : 12;
+    image->width              = (unsigned short)s->width;
+    image->height             = (unsigned short)s->height;
+    image->num_planes         = 2;
+    image->pitches[0]         = (unsigned int)hs;
+    image->pitches[1]         = (unsigned int)hs;
+    image->offsets[0]         = 0;
+    image->offsets[1]         = (unsigned int)(hs * vs);
+    image->data_size          = (unsigned int)(hs * vs * 3 / 2);
+    LOG("DeriveImage: surface=0x%x %dx%d %s pitch=%d -> image=0x%x",
+        sid, s->width, s->height, i10 ? "P010" : "NV12", hs, (unsigned)buf_id);
+    return VA_STATUS_SUCCESS;
 }
+
 
 static VAStatus rk_DestroyImage(VADriverContextP ctx, VAImageID id) {
     return rk_DestroyBuffer(ctx, (VABufferID)id);
@@ -1607,7 +1826,7 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
     ctx->max_image_formats    = 4;
     ctx->max_subpic_formats   = 4;
     ctx->max_display_attributes = 4;
-    ctx->str_vendor           = "Rockchip MPP VA-API Driver 2.0 (defcom5)";
+    ctx->str_vendor           = "Rockchip MPP VA-API Driver 2.1 (defcom5)";
 
     struct VADriverVTable *v = ctx->vtable;
     v->vaTerminate                = rk_Terminate;
