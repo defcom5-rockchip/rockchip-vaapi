@@ -737,16 +737,14 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     RKSurface  *s       = sid ? surface_by_id(d, sid) : NULL;
 
     if (!s) {
-        if (c->coding == MPP_VIDEO_CodingAVC) {
-            sid = c->render_target;
-        } else if (c->dq_head != c->dq_tail) {
+        if (c->dq_head != c->dq_tail) {
             sid = c->decode_queue[c->dq_head];
             c->dq_head = (c->dq_head + 1) & 63;
             LOG("assign_mpp_frame: PTS=0x%llx unmapped, FIFO → surface=0x%x",
                 (unsigned long long)raw_pts, (unsigned)sid);
         }
         s = sid ? surface_by_id(d, sid) : NULL;
-    } else if (c->coding != MPP_VIDEO_CodingAVC) {
+    } else {
         /* PTS valid — advance FIFO head only if this surface is at the front */
         if (c->dq_head != c->dq_tail && c->decode_queue[c->dq_head] == sid)
             c->dq_head = (c->dq_head + 1) & 63;
@@ -949,6 +947,14 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
             f = NULL;
         }
     }
+
+    /* Enqueue this surface for PTS-routing fallback, exactly as the generic
+     * path does.  H.264 used to skip the queue and fall back to render_target,
+     * which is only correct when output order matches submit order: with
+     * B-frames a decoded picture would land in whichever surface was submitted
+     * most recently, producing ghosted frames. */
+    c->decode_queue[c->dq_tail] = c->render_target;
+    c->dq_tail = (c->dq_tail + 1) & 63;
 
     LOG("do_h264_decode: sending %zu bytes target=0x%x", pkt_sz, (unsigned)c->render_target);
     MppPacket pkt = NULL;
