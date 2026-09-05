@@ -99,6 +99,20 @@ typedef struct {
     VASurfaceID  decode_queue[64];
     int          dq_head, dq_tail;
 
+    /* Last surface published with clean pixels (errinfo == 0); the source for
+     * freeze-frame concealment when MPP flags a frame as damaged. */
+    VASurfaceID  last_good;
+
+    /* Sticky concealment window.  MPP's errinfo marks only SOME of the frames
+     * decoded against post-seek stale references - unflagged damaged frames
+     * leak through and alternate with concealed ones (flicker, green blips).
+     * So the window is driven by the reference lists instead: it opens when a
+     * submitted picture references surfaces from before the discontinuity
+     * (epoch mismatch) and closes when a picture arrives whose references are
+     * all from the current epoch - the true recovery point. */
+    unsigned int epoch;
+    bool         concealing;
+
     /* H.264 state for SPS/PPS reconstruction */
     VAPictureParameterBufferH264 last_pp;
     bool         sps_sent;
@@ -130,6 +144,7 @@ typedef struct {
 
     MppFrameFormat fmt;     /* pixel format of last decoded frame (0 = NV12 default) */
     bool         decoded;
+    unsigned int decode_epoch;  /* c->epoch at the time this surface was produced */
     VAContextID  ctx_id;   /* context currently decoding into this surface */
     pthread_mutex_t  lock;
     pthread_cond_t   cond;
@@ -807,6 +822,47 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         return;
     }
 
+    /* Freeze-frame concealment.  MPP's parser detects stream discontinuities
+     * itself (a seek lands on a picture whose frame_num does not follow the
+     * last reference - check_dpb_discontinuous in h264d) and marks every
+     * affected output frame with errinfo until the next intra picture.  Those
+     * frames were decoded against reference state from before the seek: the
+     * pixels are plausible but wrong (ghosting).  Publishing them is worse
+     * than repeating the last clean picture, so when a frame arrives flagged
+     * and a clean predecessor exists, copy the predecessor's pixels instead.
+     * The decoder is never reset - which matters, because MPP will not
+     * restart hardware parsing after a reset without a strict IDR, and
+     * open-GOP content never provides one at a seek point. */
+    RK_U32 err_info = mpp_frame_get_errinfo(frame);
+    if (c->concealing)
+        err_info |= 0x80000000u;   /* window open: treat as damaged even if unflagged */
+    if (err_info && !getenv("RKVA_NO_CONCEAL")) {
+        RKSurface *g = c->last_good ? surface_by_id(d, c->last_good) : NULL;
+        if (g && g != s && g->priv_buf && s->priv_buf) {
+            void *gp = mpp_buffer_get_ptr(g->priv_buf);
+            void *sp = mpp_buffer_get_ptr(s->priv_buf);
+            size_t gsz = mpp_buffer_get_size(g->priv_buf);
+            size_t ssz = mpp_buffer_get_size(s->priv_buf);
+            size_t sz  = gsz < ssz ? gsz : ssz;
+            if (gp && sp && sz) {
+                memcpy(sp, gp, sz);
+                s->decoded = true;
+                /* NOT the current epoch: our copy is clean but MPP's internal
+                 * reference for this slot is still the damaged picture. Any
+                 * pic referencing this surface must keep the window open. */
+                s->decode_epoch = ~0u;
+                LOG("assign_mpp_frame: errinfo=0x%x -> concealed surface 0x%x "
+                    "with last good 0x%x (%zu bytes)",
+                    (unsigned)err_info, (unsigned)sid, (unsigned)c->last_good, sz);
+                mpp_frame_deinit(&frame);
+                return;
+            }
+        }
+        /* no clean predecessor (errors at stream start): publish as decoded */
+        LOG("assign_mpp_frame: errinfo=0x%x with no clean predecessor - publishing",
+            (unsigned)err_info);
+    }
+
     bool i10    = MPP_FRAME_FMT_IS_YUV_10BIT(ffmt);
     int  bpp    = i10 ? 2 : 1;
     int  copied = 0;
@@ -906,6 +962,9 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
        Changing them would desynchronise the importer's view of the buffer.
        The copy above re-strides into this fixed layout. */
     s->decoded  = true;
+    s->decode_epoch = c->epoch;
+    if (!err_info)
+        c->last_good = sid;
     pthread_cond_signal(&s->cond);
     pthread_mutex_unlock(&s->lock);
     LOG("assign_mpp_frame: surface=0x%x prime_fd=%d MPP %dx%d stride=%dx%d fmt=0x%x copied=%d",
@@ -913,6 +972,22 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
 }
 
 /* Build Annex B bitstream from VA-API buffers and send to MPP */
+/* Do the picture's references all come from the current decode epoch?
+ * A reference naming a surface this driver never produced, or produced before
+ * the last discontinuity, means MPP will decode against stale state. */
+static bool h264_refs_current(const VAPictureParameterBufferH264 *pp,
+                              RKContext *c, RKDriver *d)
+{
+    for (int i = 0; i < 16; i++) {
+        const VAPictureH264 *r = &pp->ReferenceFrames[i];
+        if (r->flags & VA_PICTURE_H264_INVALID) continue;
+        if (r->picture_id == VA_INVALID_SURFACE) continue;
+        RKSurface *rs = surface_by_id(d, (VASurfaceID)r->picture_id);
+        if (!rs || !rs->decoded || rs->decode_epoch != c->epoch) return false;
+    }
+    return true;
+}
+
 static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
 {
     /* gather slice data */
@@ -985,6 +1060,19 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
             assign_mpp_frame(f, c, d);
             f = NULL;
         }
+    }
+
+    /* Discontinuity bookkeeping for the sticky concealment window. */
+    if (!h264_refs_current(&c->last_pp, c, d)) {
+        if (!c->concealing) {
+            c->epoch++;
+            c->concealing = true;
+            LOG("do_h264_decode: stale references -> epoch %u, concealment window OPEN",
+                c->epoch);
+        }
+    } else if (c->concealing) {
+        c->concealing = false;
+        LOG("do_h264_decode: references current -> concealment window CLOSED");
     }
 
     /* Enqueue this surface for PTS-routing fallback, exactly as the generic
