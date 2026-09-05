@@ -533,6 +533,24 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         int block = 0;
         c->mpi->control(c->mpp, MPP_SET_OUTPUT_BLOCK, (MppParam)&block);
 
+        /* Emit every picture as soon as it is decoded, in decode order, instead
+           of holding it back for output reordering.  A stateless VA-API client
+           owns presentation order and blocks in vaSyncSurface on the exact
+           surface it submitted; if MPP holds that picture waiting for later
+           input, the client never submits the later input -- it is waiting on
+           us -- and the sync deadline expires.  That deadlock is why B-frame
+           streams fell back to software after a seek (the pre-roll submits too
+           few pictures to satisfy a reorder window).  Telling MPP the truth
+           here is better than telling the bitstream a lie about
+           max_num_reorder_frames. */
+        {
+            RK_U32 immediate = 1;
+            MPP_RET r = c->mpi->control(c->mpp, MPP_DEC_SET_IMMEDIATE_OUT,
+                                        (MppParam)&immediate);
+            LOG("CreateContext: MPP_DEC_SET_IMMEDIATE_OUT=1 -> %d%s",
+                (int)r, r == MPP_OK ? "" : " (unsupported; reorder deadlock may persist)");
+        }
+
         c->used      = true;
         c->config_id = config_id;
         c->width     = width;
