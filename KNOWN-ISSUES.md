@@ -8,26 +8,26 @@ Current as of **v2.0.0 "Reframe"**.
 
 ---
 
-## KI-1: H.264 with B-frames — correct from the start of playback; corrupt after seeking (open-GOP content)
+## KI-1: H.264 B-frame corruption — ROOT CAUSE FOUND, fixed in v2.1.2
 
-**Status:** largely fixed in v2.1.1; seek case open · **Severity:** wrong picture after seeking in affected files
+**Status:** fixed in v2.1.2 · **v2.1.1 and earlier are affected — update.**
 
-Through v2.1.0, H.264 streams using B-frames decoded to a corrupted picture (ghosting,
-occasional green frames) at all times: decoded pictures were being routed into the wrong
-surfaces whenever output order differed from submission order. v2.1.1 routes by picture
-identity instead, and B-frame H.264 now decodes in hardware **pixel-identical to software
-from the start of playback** (verified objectively, repeatedly).
+The full story, because it hid from everyone including us: the driver synthesises the
+H.264 parameter sets, and the PPS hardcoded `num_ref_idx_default_active = 1` as a
+"conservative default". Real encoders set it higher (broadcast content: 4; typical x264:
+2), and slices rely on that default exactly once the decoder's reference buffer fills —
+about half a second in. So every I-frame was pixel-perfect, playback *started* clean, and
+the picture then drifted into ghosting. Short verification windows (ours included) sailed
+past it, which is how it shipped: **v2.1.1's "correct from start" claim was measured on
+12-frame windows and is wrong beyond the first GOP.** It also masqueraded as a
+seek-only bug for a full day of investigation.
 
-What remains: after **seeking** in *open-GOP* content (broadcast-style streams whose seek
-points are not true keyframes), the decoder resumes against reference state from the old
-position and produces a plausible but wrong picture until the next real keyframe. Typical
-movie files are closed-GOP and **seek correctly in hardware**; broadcast captures are the
-exposed class. The mechanism is understood (the decoder cannot be safely reset mid-stream
-without a true IDR to restart from — six remedies tested and documented) and a fix is in
-development.
+v2.1.2 learns the true defaults from the stream itself (any slice that doesn't override
+them states them) and re-emits a corrected PPS once. Verified 0.0/255 across 144-frame
+runs on broadcast-style and open-GOP reproducers, all seek cases included, plus the full
+regression suite at the new 48-frame minimum depth.
 
-**Workaround for affected files:** `mpv --hwdec=no` plays them perfectly, or simply
-letting playback continue past the next keyframe clears the artefacts.
+If you saw ghosting or "flicker" on H.264 with any earlier version, it was this.
 
 ## KI-2: HEVC — FIXED, and now advertised (8-bit)
 
