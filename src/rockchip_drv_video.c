@@ -107,6 +107,7 @@ typedef struct {
     VAPictureParameterBufferHEVC last_pp_hevc;
     int  hevc_sets_plus1;        /* 0 = unknown, 1 = original SPS had 0 RPS sets, 2 = had >=1 */
     int  hevc_sent_plus1;        /* what the last emitted SPS declared (same encoding) */
+    int  h264_l0_minus1, h264_l1_minus1;   /* learned PPS num_ref_idx_lX_default_active_minus1 (0 until a slice teaches us) */
 } RKContext;
 
 typedef struct {
@@ -894,26 +895,58 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     pkt_sz += _l;                                          \
 } while (0)
 
-    /* check if first slice is IDR to prepend SPS+PPS */
-    bool is_idr = false;
+    /* Classify the picture: is it an IDR (SPS+PPS go ahead of it)?  And what do
+       the slices say the PPS reference-count defaults are?  An override-free P/B
+       slice inherits the PPS defaults, and ffmpeg's per-slice active counts are
+       then exactly those defaults -- the only place VA-API lets us see them. */
+    bool is_idr = false, seen_first = false;
+    const VAPictureParameterBufferH264 *hpp = &c->last_pp;
+    const VASliceParameterBufferH264 *last_sp = NULL;
+    int learned_l0 = c->h264_l0_minus1, learned_l1 = c->h264_l1_minus1;
     for (int i = 0; i < c->n_pending; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
-        if (!b || b->type != VASliceDataBufferType) continue;
-        uint8_t nal_type = ((uint8_t *)b->data)[0] & 0x1F;
-        is_idr = (nal_type == 5);
-        break;
+        if (!b) continue;
+        if (b->type == VASliceParameterBufferType) { last_sp = (const VASliceParameterBufferH264 *)b->data; continue; }
+        if (b->type != VASliceDataBufferType) continue;
+        const uint8_t *nal = (const uint8_t *)b->data;
+        size_t len = (size_t)b->size * b->num_elements;
+        if (!seen_first) { is_idr = ((nal[0] & 0x1F) == 5); seen_first = true; }
+        int st5 = -1;
+        if (h264_peek_ref_override(nal, len, hpp, &st5) == 0 && last_sp) {
+            learned_l0 = last_sp->num_ref_idx_l0_active_minus1;
+            if (st5 == 1) learned_l1 = last_sp->num_ref_idx_l1_active_minus1;
+        }
     }
+    bool pps_dirty = false;
+    if (learned_l0 != c->h264_l0_minus1 || learned_l1 != c->h264_l1_minus1) {
+        LOG("do_h264_decode: PPS num_ref_idx defaults learned from an override-free slice: "
+            "L0 %d -> %d, L1 %d -> %d (re-emitting PPS)",
+            c->h264_l0_minus1 + 1, learned_l0 + 1, c->h264_l1_minus1 + 1, learned_l1 + 1);
+        c->h264_l0_minus1 = learned_l0; c->h264_l1_minus1 = learned_l1; pps_dirty = true;
+    }
+    if (getenv("RKVA_TRACE_H264") && (is_idr || !c->sps_sent))
+        LOG("h264 sps/pps: poc_type=%u log2_poc_lsb=%u frame_mbs_only=%u direct8x8=%u gaps_allowed=%u log2_mfn=%u "
+            "num_ref_frames=%u | entropy=%u weighted_pred=%u bipred_idc=%u t8x8=%u deblock_ctrl=%u pps_l0=%d pps_l1=%d",
+            hpp->seq_fields.bits.pic_order_cnt_type, hpp->seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4 + 4,
+            hpp->seq_fields.bits.frame_mbs_only_flag, hpp->seq_fields.bits.direct_8x8_inference_flag,
+            hpp->seq_fields.bits.gaps_in_frame_num_value_allowed_flag, hpp->seq_fields.bits.log2_max_frame_num_minus4 + 4,
+            (unsigned)hpp->num_ref_frames, hpp->pic_fields.bits.entropy_coding_mode_flag,
+            hpp->pic_fields.bits.weighted_pred_flag, hpp->pic_fields.bits.weighted_bipred_idc,
+            hpp->pic_fields.bits.transform_8x8_mode_flag, hpp->pic_fields.bits.deblocking_filter_control_present_flag,
+            c->h264_l0_minus1 + 1, c->h264_l1_minus1 + 1);
 
-    /* SPS + PPS before every IDR (or first frame) */
-    if (is_idr || !c->sps_sent) {
+    /* SPS + PPS before every IDR (or first frame); PPS alone whenever the learned
+       reference-count defaults change -- a PPS update between pictures does not
+       disturb the DPB (unlike an SPS re-activation, which flushes it). */
+    if (is_idr || !c->sps_sent || pps_dirty) {
         uint8_t hdr[512];
-        int n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
-                               profile_idc(config_by_id(d, c->config_id)->profile));
+        if (is_idr || !c->sps_sent) {
+            int n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
+                                   profile_idc(config_by_id(d, c->config_id)->profile));
+            if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
+        }
+        int n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp, c->h264_l0_minus1, c->h264_l1_minus1);
         if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
-
-        n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp);
-        if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
-
         c->sps_sent = true;
     }
 
@@ -958,6 +991,11 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     c->decode_queue[c->dq_tail] = c->render_target;
     c->dq_tail = (c->dq_tail + 1) & 63;
 
+    /* Debug valve: RKVA_DUMP_H264=<path> appends every assembled H.264 packet so
+       `ffmpeg -f h264 -i <path> -f null -` (or a hybrid with the original's
+       SPS/PPS) can judge our parameter sets before MPP has to. */
+    { const char *dump = getenv("RKVA_DUMP_H264");
+      if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(pkt_data, 1, pkt_sz, df); fclose(df); } } }
     LOG("do_h264_decode: sending %zu bytes target=0x%x", pkt_sz, (unsigned)c->render_target);
     MppPacket pkt = NULL;
     mpp_packet_init(&pkt, pkt_data, pkt_sz);
