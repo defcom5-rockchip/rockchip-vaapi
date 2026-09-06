@@ -107,6 +107,11 @@ typedef struct {
     VAPictureParameterBufferHEVC last_pp_hevc;
     int  hevc_sets_plus1;        /* 0 = unknown, 1 = original SPS had 0 RPS sets, 2 = had >=1 */
     int  hevc_sent_plus1;        /* what the last emitted SPS declared (same encoding) */
+    uint32_t h264_idr_seq;       /* Phase 1.8: idr_pic_id alternator for CRA->IDR rewrites */
+    bool     h264_fn_active;     /* Phase 1.8: renumbering frame_num after a synthetic IDR */
+    uint32_t h264_fn_offset;     /*   ... by this much, until the stream's next real IDR */
+    int  h264_l0_minus1, h264_l1_minus1;   /* learned PPS num_ref_idx_lX_default_active_minus1 */
+    int  h264_pps_l0, h264_pps_l1;         /* what the last emitted PPS declared (-1 = none yet) */
 } RKContext;
 
 typedef struct {
@@ -130,6 +135,14 @@ typedef struct {
 
     MppFrameFormat fmt;     /* pixel format of last decoded frame (0 = NV12 default) */
     bool         decoded;
+    /* Phase 1.8: identity of the picture last SUBMITTED into this surface.  A
+       reference in pp->ReferenceFrames[] that names a surface never submitted,
+       or submitted carrying a different POC, is a phantom -- ffmpeg's frame_num
+       gap-filling after a seek, or a picture it never handed us.  Stamped at
+       submit time on purpose: a flag set when MPP returns the frame lags by a
+       picture or two and makes every in-flight reference look like a phantom. */
+    bool         ever_submitted;
+    int32_t      sub_poc;
     VAContextID  ctx_id;   /* context currently decoding into this surface */
     pthread_mutex_t  lock;
     pthread_cond_t   cond;
@@ -552,6 +565,14 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
             LOG("CreateContext: MPP_DEC_SET_IMMEDIATE_OUT=1 -> %d%s",
                 (int)r, r == MPP_OK ? "" : " (unsupported; reorder deadlock may persist)");
         }
+        /* Experiment valve: RKVA_DISABLE_ERROR=1 asks MPP to emit damaged pictures
+           (with errinfo) instead of dropping them -- a dropped picture is a surface
+           the client will wait on forever. */
+        if (getenv("RKVA_DISABLE_ERROR")) {
+            RK_U32 de = 1;
+            MPP_RET r2 = c->mpi->control(c->mpp, MPP_DEC_SET_DISABLE_ERROR, (MppParam)&de);
+            LOG("CreateContext: MPP_DEC_SET_DISABLE_ERROR=1 -> %d", (int)r2);
+        }
 
         c->used      = true;
         c->config_id = config_id;
@@ -559,6 +580,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         c->height    = height;
         c->coding    = coding;
         c->sps_sent  = false;
+        c->h264_pps_l0 = c->h264_pps_l1 = -1;
 
         *out_id = CONTEXT_ID_BASE + i;
         return VA_STATUS_SUCCESS;
@@ -931,36 +953,147 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     pkt_sz += _l;                                          \
 } while (0)
 
-    /* check if first slice is IDR to prepend SPS+PPS */
-    bool is_idr = false;
+    /* Classify the picture.  is_idr decides whether SPS/PPS go ahead of it.
+       Phase 1.8 (KI-1): an all-I, non-IDR picture arriving with an EMPTY DPB can
+       only be a seek landing on an open-GOP recovery point -- during normal
+       playback an I picture's DPB is full of the previous GOP.  MPP will not
+       re-arm hardware parsing without a strict IDR, and every output-side remedy
+       failed, so at exactly that moment the slices are rewritten as IDR
+       (h264_rewrite_idr): MPP's own IDR semantics then drop the pre-seek
+       references instead of predicting from them.  Intra-only streams
+       (num_ref_frames == 0) have an empty DPB everywhere and need nothing. */
+    bool is_idr = false, seen_first = false, any_slice = false, all_I = true;
+    uint8_t first_nal_type = 0;
+    const VAPictureParameterBufferH264 *hpp = &c->last_pp;
+    const VASliceParameterBufferH264 *last_sp = NULL;
+    int learned_l0 = c->h264_l0_minus1, learned_l1 = c->h264_l1_minus1;
     for (int i = 0; i < c->n_pending; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
-        if (!b || b->type != VASliceDataBufferType) continue;
-        uint8_t nal_type = ((uint8_t *)b->data)[0] & 0x1F;
-        is_idr = (nal_type == 5);
-        break;
+        if (!b) continue;
+        if (b->type == VASliceParameterBufferType) { last_sp = (const VASliceParameterBufferH264 *)b->data; continue; }
+        if (b->type != VASliceDataBufferType) continue;
+        const uint8_t *nal = (const uint8_t *)b->data;
+        size_t len = (size_t)b->size * b->num_elements;
+        if (!seen_first) { first_nal_type = nal[0] & 0x1F; is_idr = (first_nal_type == 5); seen_first = true; }
+        any_slice = true;
+        int st5 = -1;
+        int ov = h264_peek_ref_override(nal, len, hpp, &st5);
+        if (st5 != 2) all_I = false;
+        /* An override-free P/B slice inherits the PPS defaults, and ffmpeg's
+           per-slice active counts are then exactly those defaults. */
+        if (ov == 0 && last_sp) {
+            learned_l0 = last_sp->num_ref_idx_l0_active_minus1;
+            if (st5 == 1) learned_l1 = last_sp->num_ref_idx_l1_active_minus1;
+        }
     }
+    bool pps_dirty = false;
+    if (learned_l0 != c->h264_l0_minus1 || learned_l1 != c->h264_l1_minus1) {
+        LOG("do_h264_decode: PPS num_ref_idx defaults learned from an override-free slice: "
+            "L0 %d -> %d, L1 %d -> %d (re-emitting PPS)",
+            c->h264_l0_minus1 + 1, learned_l0 + 1, c->h264_l1_minus1 + 1, learned_l1 + 1);
+        c->h264_l0_minus1 = learned_l0; c->h264_l1_minus1 = learned_l1; pps_dirty = true;
+    }
+    /* A reference that names a surface this driver never produced is a phantom:
+       ffmpeg's frame_num gap-filling after a seek, or a picture it never
+       submitted.  MPP holds nothing for it.  A DPB that is empty, or made only
+       of phantoms, describes a decoder state MPP does not have -- a seek. */
+    int refs_valid = 0, refs_phantom = 0;
+    for (int i = 0; i < 16; i++) {
+        if (hpp->ReferenceFrames[i].flags & VA_PICTURE_H264_INVALID) continue;
+        refs_valid++;
+        RKSurface *rs = surface_by_id(d, hpp->ReferenceFrames[i].picture_id);
+        if (!rs || !rs->ever_submitted || rs->sub_poc != hpp->ReferenceFrames[i].TopFieldOrderCnt)
+            refs_phantom++;
+    }
+    bool dpb_empty   = (refs_valid == 0);
+    bool dpb_phantom = (refs_valid > 0 && refs_phantom == refs_valid);
+    bool seekish = dpb_empty || dpb_phantom;
+    if (getenv("RKVA_TRACE_H264")) {
+        LOG("h264 pic: nal=%u idr=%d all_I=%d refs_valid=%d refs_phantom=%d num_ref_frames=%u frame_num=%u poc=%d target=0x%x",
+            first_nal_type, (int)is_idr, (int)all_I, refs_valid, refs_phantom,
+            (unsigned)hpp->num_ref_frames, (unsigned)hpp->frame_num, hpp->CurrPic.TopFieldOrderCnt, (unsigned)c->render_target);
+        if (!c->sps_sent || is_idr)
+            LOG("h264 sps/pps: poc_type=%u log2_poc_lsb=%u delta_poc_always_zero=%u frame_mbs_only=%u mbaff=%u direct8x8=%u "
+                "gaps_allowed=%u log2_mfn=%u chroma=%u bitdepth=%u | entropy=%u weighted_pred=%u bipred_idc=%u t8x8=%u "
+                "constr_intra=%u poc_present=%u redundant=%u deblock_ctrl=%u",
+                hpp->seq_fields.bits.pic_order_cnt_type, hpp->seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4 + 4,
+                hpp->seq_fields.bits.delta_pic_order_always_zero_flag, hpp->seq_fields.bits.frame_mbs_only_flag,
+                hpp->seq_fields.bits.mb_adaptive_frame_field_flag, hpp->seq_fields.bits.direct_8x8_inference_flag,
+                hpp->seq_fields.bits.gaps_in_frame_num_value_allowed_flag, hpp->seq_fields.bits.log2_max_frame_num_minus4 + 4,
+                hpp->seq_fields.bits.chroma_format_idc, hpp->bit_depth_luma_minus8 + 8,
+                hpp->pic_fields.bits.entropy_coding_mode_flag, hpp->pic_fields.bits.weighted_pred_flag,
+                hpp->pic_fields.bits.weighted_bipred_idc, hpp->pic_fields.bits.transform_8x8_mode_flag,
+                hpp->pic_fields.bits.constrained_intra_pred_flag, hpp->pic_fields.bits.pic_order_present_flag,
+                hpp->pic_fields.bits.redundant_pic_cnt_present_flag, hpp->pic_fields.bits.deblocking_filter_control_present_flag);
+    }
+    bool rewrite_idr = !is_idr && first_nal_type == 1 && any_slice && all_I && seekish
+                       && hpp->num_ref_frames > 0 && !getenv("RKVA_NO_IDR_REWRITE");
+    uint32_t idr_pic_id = 0;
+    /* Default: the synthetic IDR carries frame_num 0 (as the spec requires) and
+       every following picture is renumbered by the same offset until the
+       stream's next real IDR, so MPP sees a conformant closed GOP.  Measured:
+       a non-zero IDR frame_num is concealed away by MPP; a zero one followed by
+       the original numbering is a frame_num gap and MPP goes flat. */
+    const int keep_fn = getenv("RKVA_IDR_KEEP_FRAME_NUM") ? 1 : 0;
+    if (rewrite_idr) {
+        idr_pic_id = 2 + (c->h264_idr_seq++ & 1);
+        if (!keep_fn) { c->h264_fn_active = true; c->h264_fn_offset = hpp->frame_num; }
+        LOG("do_h264_decode: non-IDR I picture, DPB %s (seek landing) -> rewriting as IDR "
+            "(idr_pic_id=%u, frame_num %u -> %s%s)", dpb_empty ? "empty" : "all phantoms",
+            idr_pic_id, (unsigned)hpp->frame_num, keep_fn ? "kept" : "0",
+            keep_fn ? "" : ", renumbering follows");
+        is_idr = true;
+    } else if (is_idr && c->h264_fn_active) {
+        c->h264_fn_active = false;             /* a real IDR restarts numbering itself */
+        LOG("do_h264_decode: real IDR -> frame_num renumbering ends");
+    }
+    const bool renumber = c->h264_fn_active && !rewrite_idr && !getenv("RKVA_NO_RENUMBER");
 
-    /* SPS + PPS before every IDR (or first frame) */
-    if (is_idr || !c->sps_sent) {
+    /* SPS + PPS before every IDR (or first frame); PPS alone whenever the learned
+       reference-count defaults change -- a PPS update between pictures does not
+       disturb the DPB (unlike an SPS re-activation, which flushes it). */
+    if (is_idr || !c->sps_sent || pps_dirty) {
         uint8_t hdr[512];
-        int n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
-                               profile_idc(config_by_id(d, c->config_id)->profile));
+        if (is_idr || !c->sps_sent) {
+            int n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
+                                   profile_idc(config_by_id(d, c->config_id)->profile));
+            if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
+        }
+        int n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp, c->h264_l0_minus1, c->h264_l1_minus1);
         if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
-
-        n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp);
-        if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
-
+        c->h264_pps_l0 = c->h264_l0_minus1; c->h264_pps_l1 = c->h264_l1_minus1;
         c->sps_sent = true;
     }
 
-    /* append each slice with Annex B start code */
+    /* append each slice with Annex B start code (rewritten as IDR when needed) */
     static const uint8_t sc[4] = {0x00, 0x00, 0x00, 0x01};
     for (int i = 0; i < c->n_pending; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
         if (!b || b->type != VASliceDataBufferType) continue;
+        size_t len = (size_t)b->size * b->num_elements;
         PKT_APPEND(sc, 4);
-        PKT_APPEND(b->data, (size_t)b->size * b->num_elements);
+        if (rewrite_idr) {
+            size_t cap = len + len / 2 + 64;
+            uint8_t *nb = malloc(cap);
+            int n = nb ? h264_rewrite_idr((const uint8_t *)b->data, len, hpp, idr_pic_id, keep_fn, nb, cap) : -9;
+            if (n > 0) {
+                PKT_APPEND(nb, (size_t)n);
+                LOG("do_h264_decode: slice rewritten CRA->IDR: %zu -> %d bytes", len, n);
+            } else {
+                LOG("do_h264_decode: IDR rewrite refused (%d) -- sending the original slice", n);
+                PKT_APPEND(b->data, len);
+            }
+            free(nb);
+        } else if (renumber) {
+            size_t cap = len + len / 2 + 64;
+            uint8_t *nb = malloc(cap);
+            int n = nb ? h264_renumber_frame_num((const uint8_t *)b->data, len, hpp, c->h264_fn_offset, nb, cap) : -9;
+            if (n > 0) PKT_APPEND(nb, (size_t)n);
+            else { LOG("do_h264_decode: frame_num renumber refused (%d) -- original slice", n); PKT_APPEND(b->data, len); }
+            free(nb);
+        } else {
+            PKT_APPEND(b->data, len);
+        }
     }
 #undef PKT_APPEND
 
@@ -995,6 +1128,13 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     c->decode_queue[c->dq_tail] = c->render_target;
     c->dq_tail = (c->dq_tail + 1) & 63;
 
+    { RKSurface *ts = surface_by_id(d, c->render_target);
+      if (ts) { ts->ever_submitted = true; ts->sub_poc = hpp->CurrPic.TopFieldOrderCnt; } }
+
+    /* Debug valve: RKVA_DUMP_H264=<path> appends every assembled H.264 packet so
+       `ffmpeg -f h264 -i <path> -f null -` can judge a rewritten slice before MPP does. */
+    { const char *dump = getenv("RKVA_DUMP_H264");
+      if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(pkt_data, 1, pkt_sz, df); fclose(df); } } }
     LOG("do_h264_decode: sending %zu bytes target=0x%x", pkt_sz, (unsigned)c->render_target);
     MppPacket pkt = NULL;
     mpp_packet_init(&pkt, pkt_data, pkt_sz);
