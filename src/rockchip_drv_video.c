@@ -1468,7 +1468,7 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         desc->layers[0].offset[0]            = 0;
         desc->layers[0].pitch[0]             = (uint32_t)(hs * 2);
         /* UV plane */
-        desc->layers[1].drm_format           = 0x36315247; /* DRM_FORMAT_GR1616 */
+        desc->layers[1].drm_format           = 0x32335247; /* DRM_FORMAT_GR1616 = fourcc(G,R,3,2). Was 0x36315247 ("GR16", not a fourcc): Mesa answered EGL_BAD_MATCH "unknown drm fourcc format" on every 10-bit UV plane — the whole of KI-3 "display blocked" */
         desc->layers[1].num_planes           = 1;
         desc->layers[1].object_index[0]      = 0;
         desc->layers[1].offset[0]            = (uint32_t)(hs * vs * 2);
