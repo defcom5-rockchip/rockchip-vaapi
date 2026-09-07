@@ -45,9 +45,10 @@ server-side transcode) instead of rendering a broken picture.
 | H.264 | Constrained Baseline, Main, High | ✅ hardware decode (see KI-1 for a B-frame edge case) |
 | VP8   | Version 0–3 | ✅ advertised |
 | VP9   | Profile 0 (8-bit) | ✅ hardware decode, including non-16-aligned widths |
-| H.264 | High10 | ❌ not advertised — 10-bit export work in progress |
-| HEVC  | Main, Main10 | ❌ not advertised — decode never worked; see [KNOWN-ISSUES](KNOWN-ISSUES.md) |
-| VP9   | Profile 2 (10-bit) | ❌ not advertised — fix written, blocked on the GPU stack |
+| H.264 | High10 | ✅ hardware decode + zero-copy display since v2.1.3 — behind `RKVA_ADVERTISE_ALL=1` until the Chromium re-test (see KI-3) |
+| HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+), bit-exact vs software |
+| HEVC  | Main10 | ✅ hardware decode + zero-copy display since v2.1.3 (mpv, Firefox verified) — behind `RKVA_ADVERTISE_ALL=1` until the Chromium re-test |
+| VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display since v2.1.3 — same gate as Main10 |
 | AV1   | any | ❌ not implemented (VA-API supplies headerless tile data; MPP needs full OBU) |
 
 Earlier releases advertised HEVC, High10 and VP9 Profile 2. They never decoded

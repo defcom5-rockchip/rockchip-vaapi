@@ -49,6 +49,16 @@
 #include "h264.h"
 #include "hevc.h"
 
+/* DRM fourccs spelled out, never as hex literals: KI-3 (v2.0.0–v2.1.2) was
+ * DRM_FORMAT_GR1616 mistyped as "GR16" — a fourcc that does not exist. */
+#define RK_FOURCC(a,b,c,d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
+#define RK_DRM_FORMAT_NV12   RK_FOURCC('N','V','1','2')   /* 0x3231564e */
+#define RK_DRM_FORMAT_P010   RK_FOURCC('P','0','1','0')   /* 0x30313050 */
+#define RK_DRM_FORMAT_R8     RK_FOURCC('R','8',' ',' ')   /* 0x20203852 */
+#define RK_DRM_FORMAT_GR88   RK_FOURCC('G','R','8','8')   /* 0x38385247 */
+#define RK_DRM_FORMAT_R16    RK_FOURCC('R','1','6',' ')   /* 0x20363152 */
+#define RK_DRM_FORMAT_GR1616 RK_FOURCC('G','R','3','2')   /* 0x32335247 — "GR32": 16-bit G and R = 32 bpp */
+
 /* ── logging ─────────────────────────────────────────────────── */
 static FILE *g_log_fp = NULL;
 static void log_init(void) {
@@ -1423,7 +1433,7 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         desc->fourcc     = VA_FOURCC_NV12;
         desc->num_layers = 1;
         desc->objects[0].size           = (uint32_t)(hs * vs * 3 / 2);
-        desc->layers[0].drm_format      = 0x3231564e; /* DRM_FORMAT_NV12 */
+        desc->layers[0].drm_format      = RK_DRM_FORMAT_NV12;
         desc->layers[0].num_planes      = 2;
         desc->layers[0].object_index[0] = 0;
         desc->layers[0].offset[0]       = 0;
@@ -1437,7 +1447,7 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         desc->fourcc     = VA_FOURCC_P010;
         desc->num_layers = 1;
         desc->objects[0].size           = (uint32_t)(hs * vs * 3);
-        desc->layers[0].drm_format      = 0x30313050; /* DRM_FORMAT_P010 */
+        desc->layers[0].drm_format      = RK_DRM_FORMAT_P010;
         desc->layers[0].num_planes      = 2;
         desc->layers[0].object_index[0] = 0;
         desc->layers[0].offset[0]       = 0;
@@ -1462,13 +1472,13 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         desc->fourcc                         = VA_FOURCC_P010;
         desc->objects[0].size                = (uint32_t)(hs * vs * 3);
         /* Y plane */
-        desc->layers[0].drm_format           = 0x20363152; /* DRM_FORMAT_R16    */
+        desc->layers[0].drm_format           = RK_DRM_FORMAT_R16;
         desc->layers[0].num_planes           = 1;
         desc->layers[0].object_index[0]      = 0;
         desc->layers[0].offset[0]            = 0;
         desc->layers[0].pitch[0]             = (uint32_t)(hs * 2);
         /* UV plane */
-        desc->layers[1].drm_format           = 0x32335247; /* DRM_FORMAT_GR1616 = fourcc(G,R,3,2). Was 0x36315247 ("GR16", not a fourcc): Mesa answered EGL_BAD_MATCH "unknown drm fourcc format" on every 10-bit UV plane — the whole of KI-3 "display blocked" */
+        desc->layers[1].drm_format           = RK_DRM_FORMAT_GR1616; /* was 0x36315247 ("GR16", not a fourcc) until v2.1.3 — the whole of KI-3 */
         desc->layers[1].num_planes           = 1;
         desc->layers[1].object_index[0]      = 0;
         desc->layers[1].offset[0]            = (uint32_t)(hs * vs * 2);
@@ -1484,13 +1494,13 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         desc->fourcc                         = VA_FOURCC_NV12;
         desc->objects[0].size                = (uint32_t)(hs * vs * 3 / 2);
         /* Y plane */
-        desc->layers[0].drm_format           = 0x20203852; /* DRM_FORMAT_R8   */
+        desc->layers[0].drm_format           = RK_DRM_FORMAT_R8;
         desc->layers[0].num_planes           = 1;
         desc->layers[0].object_index[0]      = 0;
         desc->layers[0].offset[0]            = 0;
         desc->layers[0].pitch[0]             = (uint32_t)hs;
         /* UV plane */
-        desc->layers[1].drm_format           = 0x38385247; /* DRM_FORMAT_GR88 */
+        desc->layers[1].drm_format           = RK_DRM_FORMAT_GR88;
         desc->layers[1].num_planes           = 1;
         desc->layers[1].object_index[0]      = 0;
         desc->layers[1].offset[0]            = (uint32_t)(hs * vs);

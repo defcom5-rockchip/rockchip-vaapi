@@ -45,25 +45,54 @@ Verified pixel-identical to software decode at 8-bit and 10-bit, with a full 12-
 4096×1714 Main10 feature playing through end to end. **HEVC Main (8-bit) is now advertised
 and hardware-decodes in both Firefox and Chrome.** Main10 stays unadvertised — see KI-3.
 
-## KI-3: 10-bit content (VP9 Profile 2, H.264 High10) is not advertised
+## KI-3: 10-bit zero-copy display — FIXED in v2.1.3 (a mistyped fourcc, never the GPU)
 
-**Status:** conversion fixed; display path blocked upstream · **Severity:** feature absent
+**Status:** fixed in v2.1.3 · **v2.0.0 – v2.1.2 are affected — update.**
 
-Two separate problems, one fixed:
+**What users saw:** 10-bit content (HEVC Main10, VP9 Profile 2, H.264 High10) never
+displayed through the zero-copy path. mpv `--hwdec=vaapi` and Firefox silently fell back
+to software decode; Chromium showed green. Earlier versions of this file blamed a
+"panfork 16-bit texture wall" and declared the display path blocked until Mesa ≥ 25.
+That diagnosis was wrong.
 
-1. **Layout (fixed, in the `deep-ink` branch):** MPP returns 10-bit frames as
-   packed NV15, which the driver exported labelled as P010 — different byte
-   layouts, hence corruption. The repack to true P010 is written and verified
-   bit-correct on hardware.
-2. **Display (blocked):** the GPU stack these BSP kernels ship with (panfork,
-   Mesa 23) advertises 16-bit texture and dmabuf formats it cannot actually
-   render — any 10-bit frame reaching GL shows as a solid blue field. This is
-   outside the driver; it clears with Mesa ≥ 25 / the Panthor driver, which
-   needs a newer kernel than the BSP 6.1 line.
+**Root cause:** the 10-bit `SEPARATE_LAYERS` export labelled the chroma plane with the
+fourcc `0x36315247`. That spells `"GR16"`, which is not a DRM format. `DRM_FORMAT_GR1616`
+is `fourcc('G','R','3','2')` = `0x32335247`. Mesa rejected every 10-bit UV plane with
+`EGL_BAD_MATCH: unknown drm fourcc format` — a message that only appears with
+`EGL_LOG_LEVEL=debug`. The luma plane (`R16`) was fine, so every consumer got a valid Y
+plane and a refused UV plane, and each handled that its own way (fallback or green).
 
-Because of (2), 10-bit stays unadvertised for now: correct software playback
-beats a blue screen. The copy-back path does work today if you want to test it
-(`mpv --hwdec=vaapi-copy` with `RKVA_ADVERTISE_ALL=1`).
+**Why it hid for three releases:**
+1. mpv's format probe passed — the driver's pre-decode placeholder surface exports as
+   8-bit (`R8`/`GR88`), so the probe never touched the 10-bit branch.
+2. mpv 0.38 also mis-renders *software-uploaded* 10-bit frames on this GPU stack (a
+   separate, real symptom), which made "16-bit textures are broken" plausible.
+3. Nobody captured Mesa's own error text. `EGL_LOG_LEVEL=debug` names the failing check
+   in one line. That is now a rule in AGENTS.md.
+
+**How it was found (2026-09-06):** a forum report of `mpv --hwdec=rkmpp
+--vf=scale_rkrga=force_yuv=auto` displaying P010 correctly on the same panfork stack.
+mpv's `dmabuf_interop_gl` splits that P010 into exactly the `R16` + `GR1616` EGLImages
+this driver exports — same GPU, same fourccs, same modifier — so the GPU was exonerated
+and the descriptor was the only variable left. Modifier and buffer-allocator variants
+changed nothing; the fourcc did.
+
+**Measured on RK3588S (Orange Pi 5B, BSP 6.1, panfork Mesa 23.0.5), 4K HEVC Main10:**
+
+| test | v2.1.2 | v2.1.3 |
+|---|---|---|
+| mpv `--hwdec=vaapi`, EGL import failures per 40 frames | 40 | **0** |
+| mpv VO format | `yuv420p10` (software fallback) | **`vaapi[p010]` zero-copy**, correct picture |
+| Firefox, Main10 | software fallback | **hardware, real time** (360 ten-bit surfaces in 35 s), correct picture |
+| 8-bit H.264 / HEVC zero-copy (regression) | correct | correct |
+
+**What is still gated:** Main10, High10 and VP9 Profile 2 remain behind
+`RKVA_ADVERTISE_ALL=1` until the Chromium re-test is eyeballed; the default menu will
+flip once it is. The `[tenbit-panfork-guard]` mpv profile (software 10-bit → 8-bit) is
+still shipped for the software-decode case.
+
+**Reproduce the failure on an old build:** `EGL_LOG_LEVEL=debug RKVA_ADVERTISE_ALL=1 mpv
+--hwdec=vaapi <main10 file> 2>&1 | grep "EGL user error"`.
 
 ---
 
