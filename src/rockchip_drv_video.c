@@ -73,7 +73,17 @@ static void log_init(void) {
 /* ── limits ──────────────────────────────────────────────────── */
 #define MAX_CONFIGS   16
 #define MAX_CONTEXTS   8
-#define MAX_SURFACES  64
+/* 128, up from 64: Chrome's Linux VA-API path (VaapiVideoDecoder +
+ * PlatformVideoFramePool) allocates one surface per output frame, sizes the
+ * pool at reference-frames + 1 + a renderer estimate, and holds frames while
+ * the compositor is busy; a 4K 10-bit stream exhausted 64 (forum report,
+ * 2026-09-07: "vaCreateSurfaces (allocate mode) failed"). Not higher: every
+ * surface carries a private MPP buffer (3 bytes/px, 19.7 MB at 4K) mapped
+ * through the Rockchip DRM IOMMU, whose I/O virtual space is 4 GB —
+ * measured 2026-09-06: ~200 4K surfaces -> rockchip_gem_iommu_map ENOSPC and
+ * decode failure; 128 keeps 4K under ~2.5 GB with room for MPP's own DPB.
+ * Slots cost nothing until a client asks for them. */
+#define MAX_SURFACES  128
 #define MAX_BUFFERS  256
 
 /* VA object ID namespaces */
@@ -392,6 +402,9 @@ static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
             if (!d->surfaces[i].used) break;
         }
         if (i == MAX_SURFACES) {
+            LOG("CreateSurfaces: POOL EXHAUSTED — client asked for surface #%d "
+                "while %d are live (MAX_SURFACES=%d); returning "
+                "VA_STATUS_ERROR_ALLOCATION_FAILED", s + 1, (int)MAX_SURFACES, (int)MAX_SURFACES);
             /* roll back — must free placeholder buffers before zeroing */
             for (int j = 0; j < allocated; j++) {
                 unsigned idx = ids[j] - SURFACE_ID_BASE;
@@ -439,7 +452,27 @@ static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
             } else {
                 if (buf) mpp_buffer_put(buf);
                 if (grp) mpp_buffer_group_put(grp);
-                LOG("CreateSurfaces: placeholder alloc failed, prime_fd=-1");
+                /* No buffer means no decode target and no export: fail the
+                 * whole request cleanly so the client falls back (software
+                 * decode) instead of driving a half-built pool into
+                 * corruption. Typical cause: DRM IOMMU I/O-virtual space
+                 * exhausted by too many large surfaces (dmesg:
+                 * rockchip_gem_iommu_map ENOSPC). */
+                LOG("CreateSurfaces: placeholder alloc FAILED for surface #%d "
+                    "(%ux%u, %u bytes) — returning VA_STATUS_ERROR_ALLOCATION_FAILED",
+                    s + 1, hs, vs, hs * vs * 3);
+                for (int j = 0; j < allocated; j++) {
+                    unsigned idx = ids[j] - SURFACE_ID_BASE;
+                    RKSurface *rb = &d->surfaces[idx];
+                    if (rb->prime_fd >= 0) close(rb->prime_fd);
+                    if (rb->priv_buf)   mpp_buffer_put(rb->priv_buf);
+                    if (rb->priv_group) mpp_buffer_group_put(rb->priv_group);
+                    pthread_mutex_destroy(&rb->lock);
+                    pthread_cond_destroy(&rb->cond);
+                    memset(rb, 0, sizeof(RKSurface));
+                }
+                memset(surf, 0, sizeof(RKSurface));
+                return VA_STATUS_ERROR_ALLOCATION_FAILED;
             }
         }
 
