@@ -86,10 +86,12 @@ changed nothing; the fourcc did.
 | Firefox, Main10 | software fallback | **hardware, real time** (360 ten-bit surfaces in 35 s), correct picture |
 | 8-bit H.264 / HEVC zero-copy (regression) | correct | correct |
 
-**What is still gated:** Main10, High10 and VP9 Profile 2 remain behind
-`RKVA_ADVERTISE_ALL=1` until the Chromium re-test is eyeballed; the default menu will
-flip once it is. The `[tenbit-panfork-guard]` mpv profile (software 10-bit → 8-bit) is
-still shipped for the software-decode case.
+**Menu:** Main10, High10 and VP9 Profile 2 are advertised by default from v2.1.3.
+`RKVA_HIDE_10BIT=1` restores the 8-bit-only menu for a client that still cannot present
+P010. (Pi Desktop's own Chromium never sees this menu — see KI-6.) The `[tenbit-panfork-guard]`
+mpv profile shipped in the image config is now believed unnecessary: software-decoded
+10-bit also displayed correctly in mpv 0.38 on 2026-09-06; it will be retired with the
+next image once re-measured.
 
 **Reproduce the failure on an old build:** `EGL_LOG_LEVEL=debug RKVA_ADVERTISE_ALL=1 mpv
 --hwdec=vaapi <main10 file> 2>&1 | grep "EGL user error"`.

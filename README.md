@@ -45,12 +45,14 @@ server-side transcode) instead of rendering a broken picture.
 | H.264 | Constrained Baseline, Main, High | ✅ hardware decode (see KI-1 for a B-frame edge case) |
 | VP8   | Version 0–3 | ✅ advertised |
 | VP9   | Profile 0 (8-bit) | ✅ hardware decode, including non-16-aligned widths |
-| H.264 | High10 | ✅ hardware decode + zero-copy display since v2.1.3 — behind `RKVA_ADVERTISE_ALL=1` until the Chromium re-test (see KI-3) |
+| H.264 | High10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
 | HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+), bit-exact vs software |
-| HEVC  | Main10 | ✅ hardware decode + zero-copy display since v2.1.3 (mpv, Firefox verified) — behind `RKVA_ADVERTISE_ALL=1` until the Chromium re-test |
-| VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display since v2.1.3 — same gate as Main10 |
+| HEVC  | Main10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 (mpv and Firefox verified; see KI-3 for the history) |
+| VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
 | AV1   | any | ❌ not implemented (VA-API supplies headerless tile data; MPP needs full OBU) |
 
+> **Menu switch:** `RKVA_HIDE_10BIT=1` hides the three 10-bit profiles again if a client cannot present P010.
+>
 > **Chromium note:** the `+rkmpp` Chromium from the liujianfeng1994 PPA (shipped on Pi Desktop) decodes through libv4l-rkmpp, not through this driver; see KI-6. Firefox and mpv use this driver.
 
 Earlier releases advertised HEVC, High10 and VP9 Profile 2. They never decoded

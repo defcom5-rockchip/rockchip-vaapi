@@ -42,15 +42,17 @@ Works in hardware, pixel-identical to software decode:
 - H.264 8-bit, **including B-frame streams** (High profile, 720p60 broadcast-style)
 - HEVC Main 8-bit and **Main10 10-bit**, including B-frames — a full 12-minute
   4096×1714 Main10 feature plays through on `vaapi-copy`, all 17,616 frames, no
-  put failures
-- VP9 Profile 0 (incl. non-16-aligned widths) and Profile 2 via copy-back
+  put failures; zero-copy `hwdec=vaapi` verified on 4K Main10 and VP9 P2 (v2.1.3)
+- Menu: all of the above advertised by default since v2.1.3; `RKVA_HIDE_10BIT=1`
+  hides the 10-bit trio
+- VP9 Profile 0 (incl. non-16-aligned widths) and Profile 2 (copy-back and zero-copy)
 
 Not available, and why:
 - **AV1** — not implemented; VA-API supplies headerless tile data, MPP needs full OBU.
-- **Zero-copy 10-bit display** — impossible on panfork Mesa 23: it advertises
-  16-bit GL formats it cannot render, so any 10-bit surface reaching GL shows
-  as a solid blue field. Copy-back (`--hwdec=vaapi-copy`) is correct and is what
-  the shipped mpv config uses. Clears at Mesa ≥25 / Panthor, not in this driver.
+- **Zero-copy 10-bit display** — WORKS since v2.1.3 (mpv `hwdec=vaapi`, Firefox).
+  Until then the export named the UV plane with a non-existent fourcc ("GR16") and
+  Mesa refused it; that was misdiagnosed as a panfork limitation for three releases.
+  KI-3 has the forensics. Copy-back (`vaapi-copy`) remains correct too.
 - **Some HEVC streams** index SPS-level RPS sets or use inter-RPS prediction;
   those tables are not in the VA-API struct. Detected and logged, not guessed.
 
@@ -59,13 +61,17 @@ Client notes:
   `media.hevc.enabled` pref, which defaults off on Linux. A `strings` grep for
   `VAProfileHEVC` in libxul proves nothing: Firefox references VA profiles as
   enums, and `VAProfileH264` is equally absent while H.264 demonstrably works.
-- **Chrome** hardware-decodes HEVC only with `--enable-features=PlatformHEVCDecoderSupport`,
-  and needs GPU compositing on — which reintroduces the ANGLE UI flicker on this
-  GPU stack. Firefox has no such trade-off.
+- **Chromium on Pi Desktop** (the `+rkmpp` PPA build) does NOT use this driver at
+  all: it decodes through libv4l-rkmpp (V4L2 plug-in → MPP). Verified 2026-09-06 with
+  the driver log armed. Its 10-bit path aborts the GPU process (KI-6). Stock VA-API
+  Chromium builds elsewhere do use this driver and need
+  `--enable-features=PlatformHEVCDecoderSupport` for HEVC.
 - **VLC 3.x** loads this driver but still software-decodes: its VA-API interop is
   X11-era and runs under XWayland here. Not a driver defect; nothing to fix here.
-- **mpv** is the reference client. `--hwdec=vaapi-copy` is the correct mode;
-  plain `hwdec=auto` makes mpv pick its own rkmpp path and bypass this driver.
+- **mpv** is the reference client. `--hwdec=vaapi` (zero-copy) and `--hwdec=vaapi-copy`
+  are both correct since v2.1.3; plain `hwdec=auto` makes mpv pick its own rkmpp path
+  and bypass this driver (bare NV15 → blue). Never judge a 10-bit result from a
+  `--no-config` run without checking the menu the client saw (`vainfo --display wayland`).
 
 ## Test rig
 - Never touch the system driver: `LIBVA_DRIVERS_PATH=<dir> LIBVA_DRIVER_NAME=rockchip`.
