@@ -73,7 +73,13 @@ static void log_init(void) {
 /* ── limits ──────────────────────────────────────────────────── */
 #define MAX_CONFIGS   16
 #define MAX_CONTEXTS   8
-#define MAX_SURFACES  64
+/* 256: Chrome's Linux VA-API path (VaapiVideoDecoder + PlatformVideoFramePool)
+ * allocates one surface per output frame, sizes the pool at
+ * reference-frames + 1 + a renderer estimate, and holds frames while the
+ * compositor is busy; a 4K 10-bit stream exhausted the old cap of 64
+ * (forum report, 2026-09-07: "vaCreateSurfaces (allocate mode) failed").
+ * Slots cost nothing until a client asks for them. */
+#define MAX_SURFACES  256
 #define MAX_BUFFERS  256
 
 /* VA object ID namespaces */
@@ -392,6 +398,9 @@ static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
             if (!d->surfaces[i].used) break;
         }
         if (i == MAX_SURFACES) {
+            LOG("CreateSurfaces: POOL EXHAUSTED — client asked for surface #%d "
+                "while %d are live (MAX_SURFACES=%d); returning "
+                "VA_STATUS_ERROR_ALLOCATION_FAILED", s + 1, (int)MAX_SURFACES, (int)MAX_SURFACES);
             /* roll back — must free placeholder buffers before zeroing */
             for (int j = 0; j < allocated; j++) {
                 unsigned idx = ids[j] - SURFACE_ID_BASE;
