@@ -148,36 +148,35 @@ decode errors and ffmpeg falls back.
 
 ---
 
-## KI-6: Chromium on Pi Desktop does not use this driver — and its own decode lane aborts on 10-bit
+## KI-6: Chromium on Pi Desktop does not use this driver — its own decode lane aborted on 10-bit (mitigated in the fork)
 
-**Status:** open, outside this driver · **Severity:** 10-bit HEVC/VP9 in Chromium crashes the GPU process
+**Status:** mitigated outside this driver (defcom5-libv4l-rkmpp v1.8.0-defcom5.1, 2026-09-07) · real 10-bit output in Chromium still open
 
-The Chromium shipped on Pi Desktop images (`chromium 132 …+rkmpp` from the
-liujianfeng1994 PPA) decodes video through **libv4l-rkmpp**, a V4L2 plug-in that talks to
-MPP directly. It never loads `rockchip_drv_video.so` (verified 2026-09-06: no driver log
-across an 8-bit and a 10-bit playback, while the session journal shows `libv4l2` and `mpp`
-initialising inside the Chromium process). 8-bit H.264/HEVC/VP9 play in hardware through
-that lane (HEVC needs `--enable-features=PlatformHEVCDecoderSupport`).
+The Chromium shipped on Pi Desktop images (`chromium 132 …+rkmpp` from the liujianfeng1994
+PPA) decodes video through **libv4l-rkmpp**, a V4L2 plug-in that talks to MPP directly. It
+never loads `rockchip_drv_video.so` (verified 2026-09-06: no driver log across an 8-bit and a
+10-bit playback, while the session journal shows `libv4l2` and `mpp` initialising inside the
+Chromium process). Nothing in this driver's profile menu affects it.
 
-On a 10-bit stream the plug-in aborts the whole GPU process:
-
+**What was broken:** the PPA's plug-in advertised HEVC Main 10, H.264 High 10 and VP9 Profile 2
+but outputs NV12 only, and aborted the whole GPU process on the first 10-bit frame:
 ```
 chromium: ../src/libv4l-rkmpp-dec.c:247: rkmpp_apply_info_change:
   Assertion `dec->video_info.mpp_format == MPP_FMT_YUV420SP' failed.
 GPU process exited unexpectedly: exit_code=6
 ```
+(upstream issue #21, open since 2024).
 
-The page flashes white and black and shows no image. This has nothing to do with the
-VA-API profile menu; advertising or hiding Main10 here changes nothing for that Chromium.
+**Mitigation, shipped in the images:** [defcom5-libv4l-rkmpp](https://github.com/defcom5-rockchip/defcom5-libv4l-rkmpp)
+(fork of upstream master `c5bc0ae`) hides the 10-bit profiles so Chromium reports them
+unsupported and falls back (software VP9; a media server transcodes HEVC), and replaces the
+assert with error-flagged frames. Measured on RK3588S with `PlatformHEVCDecoderSupport` on:
+8-bit HEVC 1080p in hardware (1543 frames / 25 s), 8-bit H.264 in hardware, 10-bit HEVC 4K and
+VP9 P2 4K **0 GPU crashes** (was 1 per attempt).
 
-**Fix path (not in this repository):** patch libv4l-rkmpp to accept 10-bit output — either
-ask MPP for 8-bit NV12 output on 10-bit streams (`MPP_DEC_SET_OUTPUT_FORMAT`, if the
-RK3588 decoder supports the down-conversion) or convert NV15 to NV12 with RGA inside the
-plug-in. Tracked as a Pi Desktop item.
-
-**Stock Chromium builds that do use VA-API** (Debian/Ubuntu/Armbian with
-`VaapiVideoDecoder`) go through this driver's export path and therefore received the
-same GR1616 fix as Firefox in v2.1.3. Not verified on hardware here — reports welcome.
+**Still open:** hardware 10-bit in Chromium needs NV15 → NV12 on RGA3 inside the plug-in (the
+RK3588 decoder cannot down-convert itself). Stock VA-API Chromium builds elsewhere go through
+this driver instead and got the v2.1.3/v2.1.4 fixes.
 
 ---
 
