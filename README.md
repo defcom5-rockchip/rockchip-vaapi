@@ -51,6 +51,8 @@ server-side transcode) instead of rendering a broken picture.
 | VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display since v2.1.3 — same gate as Main10 |
 | AV1   | any | ❌ not implemented (VA-API supplies headerless tile data; MPP needs full OBU) |
 
+> **Chromium note:** the `+rkmpp` Chromium from the liujianfeng1994 PPA (shipped on Pi Desktop) decodes through libv4l-rkmpp, not through this driver; see KI-6. Firefox and mpv use this driver.
+
 Earlier releases advertised HEVC, High10 and VP9 Profile 2. They never decoded
 correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story and progress.
 

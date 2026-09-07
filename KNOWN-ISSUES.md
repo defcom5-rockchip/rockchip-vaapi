@@ -119,6 +119,39 @@ guessing. The planned fix rebuilds the picture's RPS from `ReferenceFrames` and 
 the slice header with an explicit inline set. Long-term SPS reference sets and custom
 scaling lists are likewise not yet handled (defaults are used).
 
+## KI-6: Chromium on Pi Desktop does not use this driver — and its own decode lane aborts on 10-bit
+
+**Status:** open, outside this driver · **Severity:** 10-bit HEVC/VP9 in Chromium crashes the GPU process
+
+The Chromium shipped on Pi Desktop images (`chromium 132 …+rkmpp` from the
+liujianfeng1994 PPA) decodes video through **libv4l-rkmpp**, a V4L2 plug-in that talks to
+MPP directly. It never loads `rockchip_drv_video.so` (verified 2026-09-06: no driver log
+across an 8-bit and a 10-bit playback, while the session journal shows `libv4l2` and `mpp`
+initialising inside the Chromium process). 8-bit H.264/HEVC/VP9 play in hardware through
+that lane (HEVC needs `--enable-features=PlatformHEVCDecoderSupport`).
+
+On a 10-bit stream the plug-in aborts the whole GPU process:
+
+```
+chromium: ../src/libv4l-rkmpp-dec.c:247: rkmpp_apply_info_change:
+  Assertion `dec->video_info.mpp_format == MPP_FMT_YUV420SP' failed.
+GPU process exited unexpectedly: exit_code=6
+```
+
+The page flashes white and black and shows no image. This has nothing to do with the
+VA-API profile menu; advertising or hiding Main10 here changes nothing for that Chromium.
+
+**Fix path (not in this repository):** patch libv4l-rkmpp to accept 10-bit output — either
+ask MPP for 8-bit NV12 output on 10-bit streams (`MPP_DEC_SET_OUTPUT_FORMAT`, if the
+RK3588 decoder supports the down-conversion) or convert NV15 to NV12 with RGA inside the
+plug-in. Tracked as a Pi Desktop item.
+
+**Stock Chromium builds that do use VA-API** (Debian/Ubuntu/Armbian with
+`VaapiVideoDecoder`) go through this driver's export path and therefore received the
+same GR1616 fix as Firefox in v2.1.3. Not verified on hardware here — reports welcome.
+
+---
+
 ## Reporting
 
 Open an issue with: board model, kernel (`uname -a`), distro, driver version
