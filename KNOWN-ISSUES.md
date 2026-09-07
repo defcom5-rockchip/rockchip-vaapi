@@ -121,6 +121,33 @@ guessing. The planned fix rebuilds the picture's RPS from `ReferenceFrames` and 
 the slice header with an explicit inline set. Long-term SPS reference sets and custom
 scaling lists are likewise not yet handled (defaults are used).
 
+## KI-7: surface pool exhaustion on 4K in Chrome — FIXED in v2.1.4
+
+**Status:** fixed in v2.1.4 · **v2.1.3 and earlier affected** (Chrome, 4K; other clients rarely)
+
+**What users saw (forum report, 2026-09-07, google-chrome with the VA-API decoder, 4K 10-bit):**
+```
+vaapi_wrapper.cc: vaCreateSurfaces (allocate mode) failed, VA error: resource allocation failed
+```
+five times, then garbled video, then a green freeze.
+
+**Root cause:** the driver kept a fixed pool of 64 surfaces. Chrome's Linux VA-API decoder
+allocates one VA surface per output frame, sizes its frame pool at reference frames + 1 + a
+renderer estimate, and holds frames while the compositor is busy; a 4K stream can exceed 64.
+Worse, when a surface's private buffer could not be allocated the driver returned success
+with an empty surface, so the client decoded into a half-built pool.
+
+**Fix:** pool raised to 128, exhaustion logged loudly, and any allocation failure now rolls
+back and returns `VA_STATUS_ERROR_ALLOCATION_FAILED`, so the client falls back to software
+instead of corrupting. **Why not more than 128:** every surface carries a private
+3-bytes-per-pixel buffer (19.7 MB at 4K) mapped through the Rockchip DRM IOMMU, whose
+I/O-virtual space is 4 GB; measured on RK3588S, ~200 live 4K surfaces hit
+`rockchip_gem_iommu_map: out of I/O virtual memory` and decode failed. 128 keeps 4K near
+2.5 GB. Receipts: 89 live 4K surfaces clean; a 229-surface request fails cleanly with zero
+decode errors and ffmpeg falls back.
+
+---
+
 ## KI-6: Chromium on Pi Desktop does not use this driver — and its own decode lane aborts on 10-bit
 
 **Status:** open, outside this driver · **Severity:** 10-bit HEVC/VP9 in Chromium crashes the GPU process
