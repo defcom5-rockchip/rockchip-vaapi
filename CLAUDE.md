@@ -66,6 +66,12 @@ Client notes:
   the driver log armed. Its 10-bit path aborts the GPU process (KI-6). Stock VA-API
   Chromium builds elsewhere do use this driver and need
   `--enable-features=PlatformHEVCDecoderSupport` for HEVC.
+- **Jellyfin web** gates 10-bit direct play on `canPlayType("hvc1.2.4.L123/L153")` and
+  MediaCapabilities. Measured 2026-09-07: Firefox + this driver → *probably* / supported,
+  smooth, power-efficient (10-bit direct play in hardware); the image's Chromium → *no*
+  (transcode). Its 8-bit probe `hvc1.1.L120` is malformed and fails everywhere; the
+  `hvc1.1.0.L120` fallback passes. Re-measure with `~/probe/canplay.html` on the test rig
+  before changing anything that touches the profile menu.
 - **VLC 3.x** loads this driver but still software-decodes: its VA-API interop is
   X11-era and runs under XWayland here. Not a driver defect; nothing to fix here.
 - **mpv** is the reference client. `--hwdec=vaapi` (zero-copy) and `--hwdec=vaapi-copy`
