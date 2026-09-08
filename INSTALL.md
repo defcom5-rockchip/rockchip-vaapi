@@ -196,3 +196,11 @@ sudo fdtput -t x /boot/dtb/rockchip/rk3588-orangepi-5-plus.dtb \
 ```
 
 Then reboot and verify `grep CmaTotal /proc/meminfo` → `524288 kB`.
+
+## Panthor / Panfrost GPU stacks
+
+libva derives the VA driver name from the render node's kernel driver. On images whose GPU runs on the mainline `panthor` or `panfrost` driver (Armbian vendor kernels with the Panthor backport, kisak Mesa), that name is not `rockchip`. From v2.1.5 the package ships `panthor_drv_video.so` and `panfrost_drv_video.so` symlinks so auto-detection works; on older versions export `LIBVA_DRIVER_NAME=rockchip` (e.g. in `/etc/environment`).
+
+## Checking an export before decode
+
+`cc tests/va-export-before-decode.c -o va-export-before-decode -lva -lva-drm && LIBVA_DRIVER_NAME=rockchip ./va-export-before-decode` — a 10-bit surface must export as `P010` / `R16` + `GR1616` before any frame is decoded (KI-8).

@@ -180,6 +180,46 @@ this driver instead and got the v2.1.3/v2.1.4 fixes.
 
 ---
 
+## KI-8: undecoded surfaces were described as 8-bit — Chrome's 10-bit green — FIXED in v2.1.5
+
+**Status:** fixed in v2.1.5 · **v2.1.4 and earlier affected** (Chromium with the VA-API decoder, mpv 0.36)
+
+**What users saw:** Chromium (VA-API builds) playing 10-bit HEVC or VP9 Profile 2: garbled
+frames, then a green screen, with `vaCreateSurfaces (allocate mode) failed` in its log. mpv
+0.36 with `--hwdec=vaapi`: silent fallback to software on 10-bit.
+
+**Root cause:** Chrome's decoder creates a surface, **exports it, and only then decodes into
+it**. The driver decided "10-bit or 8-bit" from the last decoded frame, which did not exist
+yet, so every export described a 10-bit surface as 8-bit NV12 (`R8`/`GR88`, byte pitch =
+width). Chrome imported P010 pixels through that description. A tester's driver log showed it
+exactly: 11,983 `CreateSurfaces2` calls, zero `10bit=1` exports. mpv 0.36's format probe does
+the same export-before-decode and rejected the mismatch; Firefox and mpv 0.38 happened to
+export after decode or tolerate the probe.
+
+**Fix:** the surface remembers the bit depth it was **created** with (RT format
+`VA_RT_FORMAT_YUV420_10` or a `P010` pixel-format attribute) and every description of it
+(export, derive, get-image) follows that until a frame has been decoded. Verified with a
+small libva test (`tests/va-export-before-decode.c`): a 10-bit surface now exports as
+`P010` / `R16` + `GR1616`, pitch 2×width, before any decode; 8-bit surfaces unchanged.
+Firefox regression: 201 ten-bit exports, no mismatch warnings.
+
+---
+
+## KI-9: libva cannot find the driver on Panthor / Panfrost GPU stacks without help — shipped fix in v2.1.5
+
+**Status:** worked around in the package · **affects** images whose GPU is driven by the
+mainline `panthor` (or `panfrost`) kernel driver with Mesa ≥ 24, e.g. Armbian vendor kernels
+with the Panthor backport and a kisak Mesa
+
+libva derives the VA driver name from the render node's kernel driver, so on those images it
+looks for `panthor_drv_video.so` (or `panfrost_…`) and gives up, and mpv, vainfo and
+GStreamer fall back to software while Firefox, which opens a different node, still works.
+From v2.1.5 the package ships `panthor_drv_video.so` and `panfrost_drv_video.so` as symlinks
+to the driver, so auto-detection succeeds. The equivalent manual fix on any version is
+`LIBVA_DRIVER_NAME=rockchip` in the environment (Pi Desktop sets it system-wide).
+
+---
+
 ## Reporting
 
 Open an issue with: board model, kernel (`uname -a`), distro, driver version
