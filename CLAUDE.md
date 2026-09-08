@@ -37,6 +37,11 @@ Releases are triggered by the human maintainer, never autonomously.
 - **Never write a DRM fourcc as a hex literal, and never blame the GPU stack without Mesa's own error text.** KI-3 lived for three releases because `DRM_FORMAT_GR1616` was typed as `0x36315247` ("GR16", not a format) and nobody ran the failing client with `EGL_LOG_LEVEL=debug`, which names the rejected check in one line. Fourccs go through `RK_FOURCC()`; a "blocked upstream" claim needs the exact refusing function quoted.
 - **A probe that passes is not a frame that displays.** The pre-decode placeholder exports as 8-bit, so mpv's VA-API format probe cannot exercise the 10-bit branch. Prove a path with real decoded frames (import-failure count = 0 in the same run that shows `hwdec-current`).
 
+- **Read the inherited driver's own limitations list before debugging its symptoms.**
+  Upstream's `docs/DEVELOPMENT.md` (April 2026) listed the hardcoded PPS `num_ref_idx`
+  default as a known limitation; the fork rediscovered it as KI-1 months later at a cost of
+  days. When a symptom appears, grep the upstream docs for the mechanism first.
+
 ## Codec state (2026-09-06, all hardware-verified on RK3588S)
 Works in hardware, pixel-identical to software decode:
 - H.264 8-bit, **including B-frame streams** (High profile, 720p60 broadcast-style)

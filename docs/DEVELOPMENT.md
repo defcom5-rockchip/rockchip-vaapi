@@ -1,5 +1,25 @@
 # Developer documentation — rockchip-vaapi
 
+> **defcom5 fork status (2026-09-07, v2.1.4).** This file is upstream's design document,
+> kept verbatim below because the architecture it describes still holds. The fork has
+> moved on in these places — read [KNOWN-ISSUES.md](../KNOWN-ISSUES.md) and
+> [AGENTS.md](../AGENTS.md) for the current, hardware-verified state:
+>
+> | upstream text below says | the fork today |
+> |---|---|
+> | `num_ref_idx_l0/l1_default` hardcoded to 0 ("may require this to match the stream") | **Was KI-1.** Learned from override-free slices and re-emitted; fixed in v2.1.2 (`h264_peek_ref_override`). |
+> | HEVC/VP9/AV1 paths are stubs | HEVC has a real VPS/SPS/PPS assembler (`src/hevc.c`), Main and Main10 advertised, bit-exact; VP9 P0/P2 decode; AV1 still not possible (headerless tile data). |
+> | export = NV12 as R8 + GR88 | 8-bit unchanged; 10-bit exports true P010 (NV15 repacked) as R16 + GR1616 or one composed P010 layer. Fourccs are built with `RK_FOURCC()` after the "GR16" typo that was KI-3. |
+> | 64 surfaces / 8 contexts | 128 surfaces (Chrome's per-frame pool at 4K); the DRM IOMMU's 4 GB I/O space bounds it (KI-7). |
+> | `vaDeriveImage` not mentioned | Implemented (aliases the surface buffer, `borrowed` flag); copy-back clients work. |
+> | `priv_buf` in "system dma-heap" | Allocated with `MPP_BUFFER_TYPE_DRM` (Rockchip GEM through the DRM IOMMU); still not CMA. |
+> | Firefox-only story | Firefox, mpv, GStreamer and VA-API Chromium builds. The `+rkmpp` Chromium builds do not use this driver at all (KI-6). |
+>
+> Lesson recorded in AGENTS.md: upstream's *Known limitations* list below named the
+> B-frame reference-count bug in April 2026; it cost this fork days to rediscover in
+> September. Read the limitations section of an inherited driver first.
+
+
 **Author:** Eduardo García-Mádico Portabella — EGP Sistemas
 **Contact:** woodyst@gmail.com
 
@@ -323,19 +343,17 @@ patching Firefox's sandbox policy).
 
 ---
 
-## Known limitations
+## Known limitations (upstream, April 2026 — annotated by the fork)
 
-- H.264 SPS reconstruction uses `level_idc=51` (5.1) unconditionally. The
-  actual level is not exposed by `VAPictureParameterBufferH264`; 5.1 is safe
-  for all content up to 4K@60fps.
-- `num_ref_idx_l0/l1_default` in PPS is hardcoded to 0 (= 1 reference).
-  Multi-reference B-frame content may require this to match the stream.
-- Maximum 64 surfaces / 8 concurrent decode contexts. Increase `MAX_SURFACES`
-  and `MAX_CONTEXTS` if needed.
-- Only H.264 header reconstruction is implemented. HEVC/VP9/AV1 decode paths
-  call `do_h264_decode` as a stub; full implementation is pending.
-
----
+- H.264 SPS reconstruction uses `level_idc=51` (5.1) unconditionally. *(Still true; harmless
+  to MPP, players take the level from the container.)*
+- `num_ref_idx_l0/l1_default` in PPS is hardcoded to 0 (= 1 reference). Multi-reference
+  B-frame content may require this to match the stream. ***Fixed in the fork (v2.1.2): this
+  was exactly the drift/ghosting on B-frame streams (KI-1).***
+- Maximum 64 surfaces / 8 concurrent decode contexts. ***Fork: 128 surfaces (v2.1.4).***
+- Only H.264 header reconstruction is implemented. HEVC/VP9/AV1 decode paths call
+  `do_h264_decode` as a stub. ***Fork: HEVC assembler real since v2.1.0; VP9 decodes; AV1
+  remains impossible over VA-API's headerless tile data.***
 
 ## AI-assisted development notice
 
