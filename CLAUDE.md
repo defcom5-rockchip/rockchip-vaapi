@@ -42,6 +42,14 @@ Releases are triggered by the human maintainer, never autonomously.
   default as a known limitation; the fork rediscovered it as KI-1 months later at a cost of
   days. When a symptom appears, grep the upstream docs for the mechanism first.
 
+- **A surface's description must be right from the moment it is created, not from its
+  first decode.** Chrome exports a surface before decoding into it; deciding the bit depth
+  from the last decoded frame described every 10-bit surface as 8-bit (KI-8, three releases).
+  `rt_10bit` + `surf_is_10bit()` are the rule; `tests/va-export-before-decode.c` is the check —
+  run it against any change to CreateSurfaces / ExportSurfaceHandle / DeriveImage.
+- **libva names the driver after the render node's kernel driver.** On Panthor/Panfrost
+  stacks that is not "rockchip"; the deb ships symlinks (KI-9). Keep them when repackaging.
+
 ## Codec state (2026-09-06, all hardware-verified on RK3588S)
 Works in hardware, pixel-identical to software decode:
 - H.264 8-bit, **including B-frame streams** (High profile, 720p60 broadcast-style)

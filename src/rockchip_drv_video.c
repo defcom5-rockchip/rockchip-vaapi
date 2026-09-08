@@ -134,6 +134,13 @@ typedef struct {
     bool         used;
     int          width, height;
 
+    /* Bit depth the CLIENT asked for at vaCreateSurfaces (RT format / pixel-format
+     * attribute). Until a frame has been decoded, every description of this surface
+     * (ExportSurfaceHandle, DeriveImage, GetImage) must follow it: Chrome exports a
+     * surface BEFORE decoding into it, and deciding from the (not yet existing) frame
+     * described every 10-bit surface as 8-bit NV12 — garbled, then green (KI-8). */
+    bool         rt_10bit;
+
     /* filled after decode */
     MppFrame     frame;          /* always NULL (kept for ABI compat) */
     int          prime_fd;       /* dup'd fd to priv_buf, stable for surface lifetime */
@@ -155,6 +162,12 @@ typedef struct {
     pthread_mutex_t  lock;
     pthread_cond_t   cond;
 } RKSurface;
+
+/* The surface's bit depth as the client must see it: the decoded frame's format once
+ * one exists, the created format before that (see rt_10bit). */
+static inline bool surf_is_10bit(const RKSurface *s) {
+    return s->decoded ? MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt) : s->rt_10bit;
+}
 
 typedef struct {
     bool           used;
@@ -389,11 +402,10 @@ static VAStatus rk_QueryConfigAttributes(VADriverContextP ctx,
 }
 
 /* vaCreateSurfaces (old API, redirected) */
-static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
-                                   int width, int height, int format,
-                                   int n, VASurfaceID *ids) {
+static VAStatus create_surfaces_impl(VADriverContextP ctx,
+                                     int width, int height, bool rt_10bit,
+                                     int n, VASurfaceID *ids) {
     RKDriver *d = drv_from_ctx(ctx);
-    (void)format;
 
     int allocated = 0;
     for (int s = 0; s < n; s++) {
@@ -423,6 +435,7 @@ static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
         surf->used     = true;
         surf->width    = width;
         surf->height   = height;
+        surf->rt_10bit = rt_10bit;
         surf->prime_fd = -1;
 
         /* Pre-allocate placeholder DMA-BUF so ExportSurfaceHandle succeeds
@@ -442,8 +455,8 @@ static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
                     surf->prime_fd   = dup_fd;
                     surf->hstride    = (int)hs;
                     surf->vstride    = (int)vs;
-                    LOG("CreateSurfaces: surface %ux%u placeholder prime_fd=%d",
-                        (unsigned)width, (unsigned)height, surf->prime_fd);
+                    LOG("CreateSurfaces: surface %ux%u placeholder prime_fd=%d rt10=%d",
+                        (unsigned)width, (unsigned)height, surf->prime_fd, rt_10bit);
                 } else {
                     LOG("CreateSurfaces: mpp_buffer_get_fd failed (raw_fd=%d), no placeholder", raw_fd);
                     mpp_buffer_put(buf);
@@ -517,8 +530,25 @@ static VAStatus rk_CreateSurfaces2(VADriverContextP ctx,
             attribs[i].value.type == VAGenericValueTypeInteger
                 ? (unsigned)attribs[i].value.value.i : 0u);
     }
-    return rk_CreateSurfaces(ctx, (int)width, (int)height, (int)format,
-                              (int)n, ids);
+    /* 10-bit if the RT format says so (VA_RT_FORMAT_YUV420_10 = 0x100) or the client
+     * pinned the pixel format to P010; an explicit NV12 pixel format wins over the RT
+     * format bit (ffmpeg creates 8-bit pools with RT 0x1, Chrome with 0x100 + no fourcc). */
+    bool ten = (format & 0x100u) != 0;
+    for (unsigned i = 0; i < n_attribs; i++) {
+        if (attribs[i].type == VASurfaceAttribPixelFormat &&
+            attribs[i].value.type == VAGenericValueTypeInteger) {
+            unsigned fcc = (unsigned)attribs[i].value.value.i;
+            if (fcc == VA_FOURCC_P010) ten = true;
+            else if (fcc == VA_FOURCC_NV12) ten = false;
+        }
+    }
+    return create_surfaces_impl(ctx, (int)width, (int)height, ten, (int)n, ids);
+}
+
+static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
+                                   int width, int height, int format,
+                                   int n, VASurfaceID *ids) {
+    return create_surfaces_impl(ctx, width, height, (format & 0x100) != 0, n, ids);
 }
 
 static VAStatus rk_CreateContext(VADriverContextP ctx,
@@ -935,6 +965,10 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     pthread_mutex_lock(&s->lock);
     s->frame  = NULL;
     s->fmt    = ffmt;
+    if (MPP_FRAME_FMT_IS_YUV_10BIT(ffmt) != s->rt_10bit)
+        LOG("assign_mpp_frame: WARNING surface=0x%x created as %d-bit but decoded frame is %d-bit — "
+            "a client that exported before decode holds a stale descriptor",
+            sid, s->rt_10bit ? 10 : 8, MPP_FRAME_FMT_IS_YUV_10BIT(ffmt) ? 10 : 8);
     if (fwidth  > 0) s->width   = fwidth;
     if (fheight > 0) s->height  = fheight;
     /* hstride/vstride are deliberately NOT updated from the MPP frame: they
@@ -1444,7 +1478,7 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
     int vs       = s->vstride ? s->vstride : s->height;
     bool decoded = s->decoded;
     bool is_placeholder = (s->priv_buf != NULL);
-    bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt);
+    bool is_10bit = surf_is_10bit(s);
     pthread_mutex_unlock(&s->lock);
 
     if (fd < 0) {
@@ -1458,8 +1492,8 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
 
-    LOG("ExportSurfaceHandle: surface=0x%x %dx%d stride=%dx%d export_fd=%d decoded=%d placeholder=%d 10bit=%d",
-        id, s->width, s->height, hs, vs, export_fd, decoded, is_placeholder, is_10bit);
+    LOG("ExportSurfaceHandle: surface=0x%x %dx%d stride=%dx%d export_fd=%d decoded=%d placeholder=%d 10bit=%d rt10=%d",
+        id, s->width, s->height, hs, vs, export_fd, decoded, is_placeholder, is_10bit, s->rt_10bit);
 
     VADRMPRIMESurfaceDescriptor *desc = descriptor;
     memset(desc, 0, sizeof(*desc));
@@ -1613,7 +1647,7 @@ static VAStatus rk_DeriveImage(VADriverContextP ctx,
     void *ptr = mpp_buffer_get_ptr(s->priv_buf);
     if (!ptr) return VA_STATUS_ERROR_INVALID_SURFACE;
 
-    bool i10 = MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt);
+    bool i10 = surf_is_10bit(s);
     int  bpp = i10 ? 2 : 1;
     int  hs  = (s->hstride ? s->hstride : s->width) * bpp;   /* bytes per row */
     int  vs  = s->vstride ? s->vstride : s->height;
@@ -1674,7 +1708,7 @@ static VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
 
     int hs  = s->hstride ? s->hstride : s->width;
     int vs  = s->vstride ? s->vstride : s->height;
-    bool i10 = MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt);
+    bool i10 = surf_is_10bit(s);
     int bpp  = i10 ? 2 : 1;
     /* image stride matches rk_CreateImage: (width+15)&~15 */
     int img_hs = (int)(((unsigned int)s->width + 15u) & ~15u) * bpp;
@@ -1944,7 +1978,7 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
     ctx->max_image_formats    = 4;
     ctx->max_subpic_formats   = 4;
     ctx->max_display_attributes = 4;
-    ctx->str_vendor           = "Rockchip MPP VA-API Driver 2.1.4 (defcom5)";
+    ctx->str_vendor           = "Rockchip MPP VA-API Driver 2.1.5 (defcom5)";
 
     struct VADriverVTable *v = ctx->vtable;
     v->vaTerminate                = rk_Terminate;
