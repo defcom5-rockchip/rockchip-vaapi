@@ -66,6 +66,21 @@ static void rga_fence_done(int fence)
     if (fence >= 0 && fcntl(fence, F_GETFD) != -1)
         close(fence);
 }
+/* Only the two RGA3 cores sit behind an IOMMU on the RK3588 (rk3588s.dtsi:
+ * rga3_core0/rga3_core1 have "iommus", rga2 has none).  A job the kernel
+ * schedules onto RGA2 with an MPP dma-buf therefore fails to map -- dmesg
+ * shows "scheduler core[4] unsupported mm_flag[0x0]" and "map dma buffer
+ * error" -- so pin every job to the RGA3 cores instead of letting the
+ * scheduler pick.  RGA3 in turn only accepts aligned pixel strides, so
+ * check those first and leave anything else to the CPU path. */
+#define RGA3_CORES 0x3   /* RGA3_SCHEDULER_CORE0 | RGA3_SCHEDULER_CORE1 */
+static inline bool rga3_stride_ok(int wstride_bytes, int hstride, bool ten_bit)
+{
+    /* wstride is a byte pitch here: 8-bit NV12 needs 16-byte, 10-bit 64-byte
+     * alignment (the same rule ffmpeg-rockchip applies in rkrga_common.c). */
+    return (hstride % 2) == 0 &&
+           (ten_bit ? (wstride_bytes % 64) == 0 : (wstride_bytes % 16) == 0);
+}
 static int rga_legacy_ready = 0;   /* 0 = untried, 1 = ok, -1 = failed */
 static inline bool rga_legacy_init(void)
 {
@@ -933,11 +948,12 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
            makes the RGA fail to map the buffer ("src channel map job buffer
            failed") and we would rather take the CPU path than that. */
         if (sfd > 0 && dfd > 0 && mpp_buffer_get_size(buf) >= need_src &&
-            mpp_buffer_get_size(s->priv_buf) >= need_dst) {
+            mpp_buffer_get_size(s->priv_buf) >= need_dst &&
+            rga3_stride_ok(src_hs, src_vs, false) && rga3_stride_ok(dst_hs, dst_vs, false)) {
             rga_info_t rs = {0}, rd = {0};
             rs.fd = sfd; rs.mmuFlag = 1;
             rga_set_rect(&rs.rect, 0, 0, copy_w, copy_h, src_hs, src_vs, RK_FORMAT_YCbCr_420_SP);
-            rd.fd = dfd; rd.mmuFlag = 1;
+            rd.fd = dfd; rd.mmuFlag = 1; rd.core = RGA3_CORES;
             rga_set_rect(&rd.rect, 0, 0, copy_w, copy_h, dst_hs, dst_vs, RK_FORMAT_YCbCr_420_SP);
             int fence = rga_read_fence(dfd);
             rd.in_fence_fd = fence;
@@ -969,12 +985,13 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
             size_t need_src = (size_t)src_bs * src_vs * 3 / 2;
             size_t need_dst = (size_t)dst_hs * 2 * dst_vs * 3 / 2;
             if (rga_legacy_init() && sfd > 0 && dfd > 0 &&
-                mpp_buffer_get_size(buf) >= need_src && mpp_buffer_get_size(s->priv_buf) >= need_dst) {
+                mpp_buffer_get_size(buf) >= need_src && mpp_buffer_get_size(s->priv_buf) >= need_dst &&
+                rga3_stride_ok(src_bs, src_vs, true) && rga3_stride_ok(dst_hs * 2, dst_vs, true)) {
                 rga_info_t rs = {0}, rd = {0};
                 rs.fd = sfd; rs.mmuFlag = 1;
                 rga_set_rect(&rs.rect, 0, 0, copy_w, copy_h, src_bs, src_vs,
                              RK_FORMAT_YCbCr_420_SP_10B);
-                rd.fd = dfd; rd.mmuFlag = 1;
+                rd.fd = dfd; rd.mmuFlag = 1; rd.core = RGA3_CORES;
                 rd.is_10b_compact = 1; rd.is_10b_endian = 1;
                 rga_set_rect(&rd.rect, 0, 0, copy_w, copy_h, dst_hs * 2, dst_vs,
                              RK_FORMAT_YCbCr_420_SP_10B);
