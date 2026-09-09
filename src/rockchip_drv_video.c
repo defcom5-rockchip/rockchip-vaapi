@@ -879,11 +879,19 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
        memcpy moves 12.4MB per frame (~6ms, about a third of the 16.7ms budget
        at 60fps) on the decode path, which shows up as dropped frames.
        memcpy stays the fallback. */
-    /* RKVA_RGA_COPY=0 turns every RGA copy off (8-bit imcopy and the 10-bit
-       NV15->P010 lane) so a report can be A/B-ed against the CPU paths. */
+    /* RKVA_RGA_COPY: "0" turns every RGA copy off (8-bit imcopy and the
+       10-bit NV15->P010 lane); "1" also enables the 8-bit imcopy.  Default:
+       8-bit copies stay on the CPU (as in 2.1.5), 10-bit uses the RGA lane.
+       Rationale: the RGA does not take part in the GPU's implicit fencing on
+       these kernels, so a fast RGA rewrite of a buffer the compositor may
+       still be reading can tear; the 6 ms memcpy rarely collided, the 1 ms
+       blit can.  Reported as intermittent artifacts in Chrome after long
+       8-bit VP9 sessions with 2.2.0-rc1.  Until the copy is fenced, 8-bit
+       stays opt-in. */
     const char *rga_sw = getenv("RKVA_RGA_COPY");
-    bool rga_off = (rga_sw && rga_sw[0] == '0');
-    if (!rga_off && !i10 && buf && s->priv_buf) {
+    bool rga_off    = (rga_sw && rga_sw[0] == '0');
+    bool rga_8bit   = (rga_sw && rga_sw[0] == '1');
+    if (rga_8bit && !rga_off && !i10 && buf && s->priv_buf) {
         int sfd = mpp_buffer_get_fd(buf);
         int dfd = mpp_buffer_get_fd(s->priv_buf);
         if (sfd > 0 && dfd > 0) {
