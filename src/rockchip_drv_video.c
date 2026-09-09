@@ -40,6 +40,39 @@
 #include <rga/drmrga.h>
 #include <rga/RgaApi.h>
 #include <rga/RgaUtils.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <linux/dma-buf.h>
+#ifndef DMA_BUF_IOCTL_EXPORT_SYNC_FILE
+struct dma_buf_export_sync_file { __u32 flags; __s32 fd; };
+#define DMA_BUF_IOCTL_EXPORT_SYNC_FILE _IOWR(DMA_BUF_BASE, 2, struct dma_buf_export_sync_file)
+#endif
+/* The RGA does not take part in dma-buf implicit fencing.  Before it rewrites
+ * a buffer the compositor may still be reading, export that buffer's READ
+ * fences as a sync_file and hand it to the RGA job as in_fence_fd; the RGA
+ * then waits for the GPU to finish with the buffer.  Kernel 6.1 supports the
+ * ioctl (verified on the BSP kernel); where the GPU driver sets no fences the
+ * sync_file is already signalled and this costs nothing.  -1 = no fence. */
+static int rga_read_fence(int dmabuf_fd)
+{
+    struct dma_buf_export_sync_file ex = { .flags = DMA_BUF_SYNC_READ, .fd = -1 };
+    if (dmabuf_fd < 0 || ioctl(dmabuf_fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) != 0)
+        return -1;
+    return ex.fd;
+}
+static void rga_fence_done(int fence)
+{
+    /* librga may or may not have closed it for us; only close what is still ours. */
+    if (fence >= 0 && fcntl(fence, F_GETFD) != -1)
+        close(fence);
+}
+static int rga_legacy_ready = 0;   /* 0 = untried, 1 = ok, -1 = failed */
+static inline bool rga_legacy_init(void)
+{
+    if (!rga_legacy_ready)
+        rga_legacy_ready = (c_RkRgaInit() == 0) ? 1 : -1;
+    return rga_legacy_ready > 0;
+}
 #endif
 #include <fcntl.h>
 #include <pthread.h>
@@ -891,16 +924,26 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     const char *rga_sw = getenv("RKVA_RGA_COPY");
     bool rga_off    = (rga_sw && rga_sw[0] == '0');
     bool rga_8bit   = (rga_sw && rga_sw[0] == '1');
-    if (rga_8bit && !rga_off && !i10 && buf && s->priv_buf) {
+    if (rga_8bit && !rga_off && !i10 && buf && s->priv_buf && rga_legacy_init()) {
         int sfd = mpp_buffer_get_fd(buf);
         int dfd = mpp_buffer_get_fd(s->priv_buf);
-        if (sfd > 0 && dfd > 0) {
-            rga_buffer_t rs = wrapbuffer_fd_t(sfd, copy_w, copy_h, src_hs, src_vs,
-                                              RK_FORMAT_YCbCr_420_SP);
-            rga_buffer_t rd = wrapbuffer_fd_t(dfd, copy_w, copy_h, dst_hs, dst_vs,
-                                              RK_FORMAT_YCbCr_420_SP);
-            if (imcopy_t(rs, rd, 1) == IM_STATUS_SUCCESS)
-                copied = 2;   /* 2 = RGA hardware blit */
+        size_t need_src = (size_t)src_hs * src_vs * 3 / 2;
+        size_t need_dst = (size_t)dst_hs * dst_vs * 3 / 2;
+        /* Only describe what the buffers really hold: an over-described rect
+           makes the RGA fail to map the buffer ("src channel map job buffer
+           failed") and we would rather take the CPU path than that. */
+        if (sfd > 0 && dfd > 0 && mpp_buffer_get_size(buf) >= need_src &&
+            mpp_buffer_get_size(s->priv_buf) >= need_dst) {
+            rga_info_t rs = {0}, rd = {0};
+            rs.fd = sfd; rs.mmuFlag = 1;
+            rga_set_rect(&rs.rect, 0, 0, copy_w, copy_h, src_hs, src_vs, RK_FORMAT_YCbCr_420_SP);
+            rd.fd = dfd; rd.mmuFlag = 1;
+            rga_set_rect(&rd.rect, 0, 0, copy_w, copy_h, dst_hs, dst_vs, RK_FORMAT_YCbCr_420_SP);
+            int fence = rga_read_fence(dfd);
+            rd.in_fence_fd = fence;
+            if (c_RkRgaBlit(&rs, &rd, NULL) == 0)
+                copied = 2;   /* 2 = RGA hardware blit (fenced) */
+            rga_fence_done(fence);
         }
     }
 #endif
@@ -918,15 +961,15 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     if (!copied && !rga_off && i10 && buf && s->priv_buf) {
         const char *sw = getenv("RKVA_RGA_P010");
         if (!(sw && sw[0] == '0')) {
-            static int rga_legacy_ready = 0;       /* 0 = untried, 1 = ok, -1 = failed */
-            if (!rga_legacy_ready)
-                rga_legacy_ready = (c_RkRgaInit() == 0) ? 1 : -1;
             int sfd = mpp_buffer_get_fd(buf);
             int dfd = mpp_buffer_get_fd(s->priv_buf);
-            if (rga_legacy_ready > 0 && sfd > 0 && dfd > 0) {
-                int src_bs = src_hs;
-                int min_bs = (copy_w * 10 + 7) / 8;
-                if (src_bs < min_bs) src_bs = ((src_hs * 10 + 7) / 8 + 63) & ~63;
+            int src_bs = src_hs;
+            int min_bs = (copy_w * 10 + 7) / 8;
+            if (src_bs < min_bs) src_bs = ((src_hs * 10 + 7) / 8 + 63) & ~63;
+            size_t need_src = (size_t)src_bs * src_vs * 3 / 2;
+            size_t need_dst = (size_t)dst_hs * 2 * dst_vs * 3 / 2;
+            if (rga_legacy_init() && sfd > 0 && dfd > 0 &&
+                mpp_buffer_get_size(buf) >= need_src && mpp_buffer_get_size(s->priv_buf) >= need_dst) {
                 rga_info_t rs = {0}, rd = {0};
                 rs.fd = sfd; rs.mmuFlag = 1;
                 rga_set_rect(&rs.rect, 0, 0, copy_w, copy_h, src_bs, src_vs,
@@ -935,7 +978,10 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
                 rd.is_10b_compact = 1; rd.is_10b_endian = 1;
                 rga_set_rect(&rd.rect, 0, 0, copy_w, copy_h, dst_hs * 2, dst_vs,
                              RK_FORMAT_YCbCr_420_SP_10B);
+                int fence = rga_read_fence(dfd);
+                rd.in_fence_fd = fence;
                 int ret = c_RkRgaBlit(&rs, &rd, NULL);
+                rga_fence_done(fence);
                 if (ret == 0) {
                     copied = 4;   /* 4 = RGA NV15->P010 hardware blit */
                     /* Same debug valve as the CPU repack: dump ONE P010 frame
