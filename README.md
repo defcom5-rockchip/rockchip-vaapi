@@ -201,7 +201,7 @@ true P010 in hardware (same `RK_FORMAT_YCbCr_420_SP_10B` on both sides,
 verified bit-exact against the previous CPU repack on 4K HDR10 content.
 At 3840x2160 the blit takes about 3.8 ms on one RGA3 core and removes about
 5 s of CPU time per 20 s of 4K60 playback from the decoding process.
-`RKVA_RGA_P010=0` forces the CPU repack. The 8-bit NV12 copy has used RGA
+`RKVA_RGA_P010=0` forces the CPU repack for 10-bit; `RKVA_RGA_COPY=0` turns every RGA copy off (8-bit and 10-bit) for A/B tests against the CPU paths. The 8-bit NV12 copy has used RGA
 (`imcopy`) whenever the driver is built with `librga-dev` present; 2.2.0 is
 the first release built that way, so `librga2` is now a runtime dependency.
 

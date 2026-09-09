@@ -879,7 +879,11 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
        memcpy moves 12.4MB per frame (~6ms, about a third of the 16.7ms budget
        at 60fps) on the decode path, which shows up as dropped frames.
        memcpy stays the fallback. */
-    if (!i10 && buf && s->priv_buf) {
+    /* RKVA_RGA_COPY=0 turns every RGA copy off (8-bit imcopy and the 10-bit
+       NV15->P010 lane) so a report can be A/B-ed against the CPU paths. */
+    const char *rga_sw = getenv("RKVA_RGA_COPY");
+    bool rga_off = (rga_sw && rga_sw[0] == '0');
+    if (!rga_off && !i10 && buf && s->priv_buf) {
         int sfd = mpp_buffer_get_fd(buf);
         int dfd = mpp_buffer_get_fd(s->priv_buf);
         if (sfd > 0 && dfd > 0) {
@@ -903,7 +907,7 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
        bit-exact against nv15_row_to_p010() on RK3588 (3840x2160 and 1920x1080:
        0 mismatches; 3.8 ms/frame at 4K vs the CPU on the decode thread).
        RKVA_RGA_P010=0 forces the CPU repack. */
-    if (!copied && i10 && buf && s->priv_buf) {
+    if (!copied && !rga_off && i10 && buf && s->priv_buf) {
         const char *sw = getenv("RKVA_RGA_P010");
         if (!(sw && sw[0] == '0')) {
             static int rga_legacy_ready = 0;       /* 0 = untried, 1 = ok, -1 = failed */
@@ -2019,7 +2023,7 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
     ctx->max_image_formats    = 4;
     ctx->max_subpic_formats   = 4;
     ctx->max_display_attributes = 4;
-    ctx->str_vendor           = "Rockchip MPP VA-API Driver 2.2.0-rc1 (defcom5)";
+    ctx->str_vendor           = "Rockchip MPP VA-API Driver 2.2.0-rc2 (defcom5)";
 
     struct VADriverVTable *v = ctx->vtable;
     v->vaTerminate                = rk_Terminate;
