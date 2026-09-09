@@ -180,3 +180,17 @@ This is a fork, and the lineage matters:
 
 Rockchip MPP, libva and the other libraries this links against carry their own
 licenses and are not redistributed here.
+
+## RGA export lane (10-bit)
+
+Since 2.2.0 the per-frame copy into the exported surface uses the RK3588's
+RGA3 2D engine for 10-bit streams too: MPP's packed NV15 is converted to
+true P010 in hardware (same `RK_FORMAT_YCbCr_420_SP_10B` on both sides,
+`is_10b_compact = is_10b_endian = 1` on the P010 side, byte-pitch strides),
+verified bit-exact against the previous CPU repack on 4K HDR10 content.
+At 3840x2160 the blit takes about 3.8 ms on one RGA3 core and removes about
+5 s of CPU time per 20 s of 4K60 playback from the decoding process.
+`RKVA_RGA_P010=0` forces the CPU repack. The 8-bit NV12 copy has used RGA
+(`imcopy`) whenever the driver is built with `librga-dev` present; 2.2.0 is
+the first release built that way, so `librga2` is now a runtime dependency.
+

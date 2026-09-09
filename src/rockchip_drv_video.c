@@ -37,6 +37,9 @@
 #ifdef HAVE_RGA
 #include <rga/im2d.h>
 #include <rga/rga.h>
+#include <rga/drmrga.h>
+#include <rga/RgaApi.h>
+#include <rga/RgaUtils.h>
 #endif
 #include <fcntl.h>
 #include <pthread.h>
@@ -875,7 +878,7 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
        strided NV12->NV12 in hardware, dma-buf to dma-buf.  At 4K the CPU
        memcpy moves 12.4MB per frame (~6ms, about a third of the 16.7ms budget
        at 60fps) on the decode path, which shows up as dropped frames.
-       10-bit/P010 keeps the CPU path; memcpy stays the fallback. */
+       memcpy stays the fallback. */
     if (!i10 && buf && s->priv_buf) {
         int sfd = mpp_buffer_get_fd(buf);
         int dfd = mpp_buffer_get_fd(s->priv_buf);
@@ -886,6 +889,63 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
                                               RK_FORMAT_YCbCr_420_SP);
             if (imcopy_t(rs, rd, 1) == IM_STATUS_SUCCESS)
                 copied = 2;   /* 2 = RGA hardware blit */
+        }
+    }
+#endif
+#ifdef HAVE_RGA
+    /* 10-bit: NV15 -> P010 on RGA3 instead of the CPU repack below.  RGA3
+       writes true P010 when the destination is described as the SAME format
+       as the packed source (RK_FORMAT_YCbCr_420_SP_10B) with the legacy
+       rga_info_t 10-bit flags set (is_10b_compact = is_10b_endian = 1) --
+       librga's RK_FORMAT_P010 is rejected by the hardware, which is how this
+       was once misread as "closed by silicon".  Strides are BYTE pitches on
+       both sides (packed 10-bit plane, and 2 bytes per P010 sample).  Verified
+       bit-exact against nv15_row_to_p010() on RK3588 (3840x2160 and 1920x1080:
+       0 mismatches; 3.8 ms/frame at 4K vs the CPU on the decode thread).
+       RKVA_RGA_P010=0 forces the CPU repack. */
+    if (!copied && i10 && buf && s->priv_buf) {
+        const char *sw = getenv("RKVA_RGA_P010");
+        if (!(sw && sw[0] == '0')) {
+            static int rga_legacy_ready = 0;       /* 0 = untried, 1 = ok, -1 = failed */
+            if (!rga_legacy_ready)
+                rga_legacy_ready = (c_RkRgaInit() == 0) ? 1 : -1;
+            int sfd = mpp_buffer_get_fd(buf);
+            int dfd = mpp_buffer_get_fd(s->priv_buf);
+            if (rga_legacy_ready > 0 && sfd > 0 && dfd > 0) {
+                int src_bs = src_hs;
+                int min_bs = (copy_w * 10 + 7) / 8;
+                if (src_bs < min_bs) src_bs = ((src_hs * 10 + 7) / 8 + 63) & ~63;
+                rga_info_t rs = {0}, rd = {0};
+                rs.fd = sfd; rs.mmuFlag = 1;
+                rga_set_rect(&rs.rect, 0, 0, copy_w, copy_h, src_bs, src_vs,
+                             RK_FORMAT_YCbCr_420_SP_10B);
+                rd.fd = dfd; rd.mmuFlag = 1;
+                rd.is_10b_compact = 1; rd.is_10b_endian = 1;
+                rga_set_rect(&rd.rect, 0, 0, copy_w, copy_h, dst_hs * 2, dst_vs,
+                             RK_FORMAT_YCbCr_420_SP_10B);
+                int ret = c_RkRgaBlit(&rs, &rd, NULL);
+                if (ret == 0) {
+                    copied = 4;   /* 4 = RGA NV15->P010 hardware blit */
+                    /* Same debug valve as the CPU repack: dump ONE P010 frame
+                       (RKVA_DUMP=<file>) so the two lanes can be cmp'd. */
+                    static int dumped_rga = 0;
+                    const char *dump = getenv("RKVA_DUMP");
+                    if (dump && !dumped_rga && dst) {
+                        FILE *df = fopen(dump, "wb");
+                        if (df) {
+                            const uint8_t *dp = (const uint8_t *)dst;
+                            fwrite(dp, 1, (size_t)dst_hs * 2 * dst_vs, df);
+                            fwrite(dp + (size_t)dst_hs * 2 * dst_vs, 1, (size_t)dst_hs * 2 * (dst_vs / 2), df);
+                            fclose(df);
+                            dumped_rga = 1;
+                            LOG("rga: dumped P010 frame %dx%d stride=%d to %s", copy_w, copy_h, dst_hs, dump);
+                        }
+                    }
+                } else {
+                    static int warned = 0;
+                    if (!warned) { LOG("RGA NV15->P010 blit failed ret=%d, falling back to CPU repack", ret); warned = 1; }
+                }
+            }
         }
     }
 #endif
