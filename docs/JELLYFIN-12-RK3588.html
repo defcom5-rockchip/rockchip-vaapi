@@ -64,6 +64,21 @@ footer{margin-top:50px;padding-top:18px;border-top:1px solid var(--line);color:v
   <div class="card"><h3>Client direct play</h3><p>Firefox, Chromium, mpv on the board. Needs this driver (<code>rockchip-vaapi</code>), libva, and the browser's own decode path.</p></div>
 </div>
 
+<h2><span class="n">0</span>Kernel first, distribution second</h2>
+<p>Everything hardware-related below hangs on one thing: the board must run a <strong>Rockchip vendor 6.1 kernel</strong> (the BSP kernel that Pi Desktop, Armbian's "vendor" images, and the Orange Pi / Radxa images ship). That kernel exposes <code>/dev/mpp_service</code> (the VPU) and <code>/dev/rga</code> (the 2D engine), and both <code>jellyfin-ffmpeg</code> and this driver talk to those. On a <strong>mainline kernel</strong> neither device exists: Jellyfin still installs and runs, but transcodes are software and browsers decode in software. This guide does not cover that case.</p>
+<pre><code>uname -r                      # 6.1.x with rockchip/vendor in the name = vendor kernel; 6.12+ = mainline
+ls -la /dev/mpp_service /dev/rga /dev/dri/renderD128</code></pre>
+<p>The distribution only changes the apt source lines. Jellyfin 12 is published for:</p>
+<div class="tw"><table>
+<thead><tr><th>distribution</th><th><code>URIs:</code></th><th><code>Suites:</code></th></tr></thead>
+<tbody>
+<tr><td>Ubuntu 24.04 (Pi Desktop, Armbian noble)</td><td><code>https://repo.jellyfin.org/ubuntu</code></td><td><code>noble</code></td></tr>
+<tr><td>Ubuntu 22.04</td><td><code>https://repo.jellyfin.org/ubuntu</code></td><td><code>jammy</code></td></tr>
+<tr><td>Debian 13 trixie (Armbian trixie)</td><td><code>https://repo.jellyfin.org/debian</code></td><td><code>trixie</code></td></tr>
+<tr><td>Debian 12 bookworm (Armbian bookworm)</td><td><code>https://repo.jellyfin.org/debian</code></td><td><code>bookworm</code></td></tr>
+</tbody></table></div>
+<p>Focal and Bullseye are no longer built. Package names, permissions, dashboard settings and the client story are identical across all four.</p>
+
 <h2><span class="n">1</span>Install the server</h2>
 <p>Jellyfin's own Ubuntu 24.04 / Debian arm64 packages ship an FFmpeg built with the Rockchip lanes (<code>--enable-rkmpp --enable-rkrga --enable-opencl</code>). Nothing has to be compiled.</p>
 <pre><code>sudo install -d -m 0755 /etc/apt/keyrings
@@ -78,7 +93,7 @@ Signed-By: /etc/apt/keyrings/jellyfin.gpg
 SRC
 sudo apt update
 sudo apt install jellyfin          # jellyfin-server, jellyfin-web, jellyfin-ffmpeg8</code></pre>
-<p>On Debian use <code>debian</code> and your codename instead of <code>ubuntu</code>/<code>noble</code>. Jellyfin 12 no longer builds for Focal or Bullseye.</p>
+<p>Swap the <code>URIs:</code> and <code>Suites:</code> lines per the table in section 0.</p>
 <pre><code>/usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -decoders | grep rkmpp   # av1 h264 hevc vp8 vp9 mpeg2 …
 /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -encoders | grep rkmpp   # h264_rkmpp hevc_rkmpp mjpeg_rkmpp
 /usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -filters  | grep rkrga   # scale_rkrga vpp_rkrga overlay_rkrga</code></pre>
@@ -130,7 +145,7 @@ sudo -u jellyfin sh -c "cd /var/lib/jellyfin &amp;&amp; exec $FF -nostdin -hide_
 </tbody></table></div>
 <ul>
   <li><code>rockchip-vaapi-driver</code> 2.1.5 or later. 2.2.0-rc1 adds the RGA export lane (10-bit surfaces converted to P010 in hardware, about five times less CPU at 4K60) and needs <code>librga2</code>.</li>
-  <li>libva finds the driver by the render node's kernel driver name; the package ships <code>panthor_drv_video.so</code> and <code>panfrost_drv_video.so</code> symlinks, so no <code>LIBVA_DRIVER_NAME</code> is needed. If a distribution names things differently, <code>LIBVA_DRIVER_NAME=rockchip</code> does the same.</li>
+  <li>libva finds the driver by the render node's kernel driver name; the package ships <code>panthor_drv_video.so</code> and <code>panfrost_drv_video.so</code> symlinks, so no <code>LIBVA_DRIVER_NAME</code> is needed on those stacks. On a vendor kernel whose GPU driver is the ARM <code>mali</code> kbase (libmali desktops), libva looks for <code>mali_drv_video.so</code> instead: set <code>LIBVA_DRIVER_NAME=rockchip</code> system-wide (<code>/etc/environment</code>) or add that symlink next to the others.</li>
   <li>The BSP kernel must expose <code>/dev/mpp_service</code>, and the user must be in <code>video</code>.</li>
 </ul>
 <p>Quick proof the browser really decodes in hardware: play a 10-bit file in Firefox and watch <code>top</code>. Hardware decode leaves the CPU idle; software decode of 4K HEVC pins several cores.</p>

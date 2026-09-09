@@ -12,6 +12,31 @@ Two different pieces of hardware acceleration are involved, and it helps to keep
 | **Server transcoding** (`jellyfin-ffmpeg`) | Jellyfin when a client cannot direct-play | MPP decode/encode, RGA scaling, OpenCL tone-mapping — all inside `jellyfin-ffmpeg`; no VA-API involved |
 | **Client direct play** (Firefox, Chromium, mpv on the board) | the player in the browser | this driver (`rockchip-vaapi`), libva, and the browser's own decode path |
 
+## 0. Kernel first, distribution second
+
+Everything hardware-related below hangs on one thing: the board must run a **Rockchip vendor 6.1 kernel** (the BSP
+kernel that Pi Desktop, Armbian's "vendor" images, and the Orange Pi / Radxa images ship). That kernel exposes
+`/dev/mpp_service` (the VPU) and `/dev/rga` (the 2D engine), and both `jellyfin-ffmpeg` and this driver talk to those.
+On a **mainline kernel** neither device exists: Jellyfin still installs and runs, but transcodes are software, and
+browsers decode in software — this guide does not cover that case.
+
+```bash
+uname -r                      # 6.1.x with rockchip/vendor in the name = vendor kernel; 6.12+ = mainline
+ls -la /dev/mpp_service /dev/rga /dev/dri/renderD128
+```
+
+The distribution only changes the apt source lines. Jellyfin 12 is published for:
+
+| distribution | `URIs:` | `Suites:` |
+|---|---|---|
+| Ubuntu 24.04 (Pi Desktop, Armbian noble) | `https://repo.jellyfin.org/ubuntu` | `noble` |
+| Ubuntu 22.04 | `https://repo.jellyfin.org/ubuntu` | `jammy` |
+| Debian 13 trixie (Armbian trixie) | `https://repo.jellyfin.org/debian` | `trixie` |
+| Debian 12 bookworm (Armbian bookworm) | `https://repo.jellyfin.org/debian` | `bookworm` |
+
+(Focal and Bullseye are no longer built.) Package names, permissions, dashboard settings and the client story are
+identical across all four.
+
 ## 1. Install the server
 
 Jellyfin publishes Ubuntu 24.04 / Debian arm64 packages with an FFmpeg that already carries the Rockchip lanes
@@ -32,7 +57,7 @@ sudo apt update
 sudo apt install jellyfin          # pulls jellyfin-server, jellyfin-web, jellyfin-ffmpeg8
 ```
 
-(On Debian replace `ubuntu`/`noble` with `debian`/your codename. Jellyfin 12 no longer builds for Focal or Bullseye.)
+(Swap the `URIs:` and `Suites:` lines per the table in section 0.)
 
 Check what you got:
 
@@ -115,8 +140,9 @@ Driver requirements for the client side:
 - `rockchip-vaapi-driver` 2.1.5 or later (2.2.0-rc1 adds the RGA export lane: 10-bit surfaces converted to P010 in
   hardware, about five times less CPU at 4K60; needs `librga2`).
 - libva finds the driver by the render node's kernel driver name; the package ships `panthor_drv_video.so` and
-  `panfrost_drv_video.so` symlinks so no `LIBVA_DRIVER_NAME` is needed. If a distribution names things differently,
-  `LIBVA_DRIVER_NAME=rockchip` in the environment does the same.
+  `panfrost_drv_video.so` symlinks so no `LIBVA_DRIVER_NAME` is needed on those stacks. On a vendor kernel whose GPU
+  driver is the ARM `mali` kbase (libmali desktops), libva looks for `mali_drv_video.so` instead: either set
+  `LIBVA_DRIVER_NAME=rockchip` system-wide (`/etc/environment`) or add that symlink next to the others.
 - The BSP kernel must expose `/dev/mpp_service` and the user must be in `video`.
 
 Quick check that the browser is really decoding in hardware: play a 10-bit file in Firefox, then
