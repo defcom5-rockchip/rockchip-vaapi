@@ -37,6 +37,12 @@ The distribution only changes the apt source lines. Jellyfin 12 is published for
 (Focal and Bullseye are no longer built.) Package names, permissions, dashboard settings and the client story are
 identical across all four.
 
+Within the vendor-kernel family the builds differ (Pi Desktop runs a 6.1.75 fork, Armbian's `rk-6.1-rkr7.2` is a
+newer Rockchip drop) and, more visibly, the **GPU driver** differs: Pi Desktop's kernel uses the ARM kbase driver with
+panfork Mesa on top, Armbian's vendor kernel carries a Panthor backport with stock Mesa. Neither changes the VPU/RGA
+side, so server transcoding and this driver behave the same; it only changes which libva driver name gets looked up
+(section 5) and which OpenCL library provides tone mapping (section 3).
+
 ## 1. Install the server
 
 Jellyfin publishes Ubuntu 24.04 / Debian arm64 packages with an FFmpeg that already carries the Rockchip lanes

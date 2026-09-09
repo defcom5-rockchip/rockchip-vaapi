@@ -78,6 +78,7 @@ ls -la /dev/mpp_service /dev/rga /dev/dri/renderD128</code></pre>
 <tr><td>Debian 12 bookworm (Armbian bookworm)</td><td><code>https://repo.jellyfin.org/debian</code></td><td><code>bookworm</code></td></tr>
 </tbody></table></div>
 <p>Focal and Bullseye are no longer built. Package names, permissions, dashboard settings and the client story are identical across all four.</p>
+<p>Within the vendor-kernel family the builds differ (Pi Desktop runs a 6.1.75 fork, Armbian's <code>rk-6.1-rkr7.2</code> is a newer Rockchip drop) and, more visibly, the <strong>GPU driver</strong> differs: Pi Desktop's kernel uses the ARM kbase driver with panfork Mesa on top, Armbian's vendor kernel carries a Panthor backport with stock Mesa. Neither changes the VPU/RGA side, so server transcoding and this driver behave the same; it only changes which libva driver name gets looked up (section 5) and which OpenCL library provides tone mapping (section 3).</p>
 
 <h2><span class="n">1</span>Install the server</h2>
 <p>Jellyfin's own Ubuntu 24.04 / Debian arm64 packages ship an FFmpeg built with the Rockchip lanes (<code>--enable-rkmpp --enable-rkrga --enable-opencl</code>). Nothing has to be compiled.</p>
