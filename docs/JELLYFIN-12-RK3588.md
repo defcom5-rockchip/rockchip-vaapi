@@ -129,6 +129,19 @@ cannot open it every OpenCL program fails with `Failed to build program: -43` (t
 `error: Failed to open directory: ./`). That is a test-harness mistake, not a broken blob — the service itself always
 runs from `/var/lib/jellyfin`.
 
+### Sustained transcoding: measured, not assumed
+
+A feature-length transcode is a much longer run than a benchmark. Measured on this bench, a continuous
+**28-minute** transcode of 4K60 HEVC Main 10 HDR down to 1080p H.264 SDR — hardware decode, RGA scale,
+OpenCL tone-map, hardware encode — held both engines at a steady 60 fps for the whole run, at 38–40 °C,
+with no decoder errors of any kind.
+
+That matters because there is a known Rockchip decoder fault (`rkvdec2` timeout storms, reported upstream as
+rockchip-linux/mpp#972) which garbles playback after roughly 17 minutes of continuous 4K60 decoding. It needs
+two things a server never does: **VP9** content, and a client holding the decoded frames on screen. Server-side
+transcoding is headless and library content is almost always H.264 or HEVC, so Jellyfin's own workload is clear
+of it on both counts. A browser on this board direct-playing a long 4K60 **VP9** file is the case that is affected.
+
 ## 5. Client side: direct play in the browser through this driver
 
 Jellyfin web decides per file whether the browser can direct-play it; anything it cannot, the server transcodes
