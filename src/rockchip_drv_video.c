@@ -617,6 +617,13 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
     MppCodingType coding = profile_to_coding(cfg->profile);
     if (coding == MPP_VIDEO_CodingUnused)
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
+#ifdef HAVE_RGA
+    /* librga initialises itself implicitly inside the first API call a process
+     * makes, and that cost has been reported as a 100 ms+ stall (librga#152).
+     * Pay it here, when a decoder is being created, rather than on the decode
+     * thread inside the first frame's copy. */
+    rga_legacy_init();
+#endif
 
     for (unsigned i = 0; i < MAX_CONTEXTS; i++) {
         if (d->contexts[i].used) continue;
