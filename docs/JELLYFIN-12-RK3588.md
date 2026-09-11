@@ -136,11 +136,36 @@ A feature-length transcode is a much longer run than a benchmark. Measured on th
 OpenCL tone-map, hardware encode — held both engines at a steady 60 fps for the whole run, at 38–40 °C,
 with no decoder errors of any kind.
 
-That matters because there is a known Rockchip decoder fault (`rkvdec2` timeout storms, reported upstream as
-rockchip-linux/mpp#972) which garbles playback after roughly 17 minutes of continuous 4K60 decoding. It needs
-two things a server never does: **VP9** content, and a client holding the decoded frames on screen. Server-side
-transcoding is headless and library content is almost always H.264 or HEVC, so Jellyfin's own workload is clear
-of it on both counts. A browser on this board direct-playing a long 4K60 **VP9** file is the case that is affected.
+That run was HEVC, which is not affected by the decoder fault described below — so read it as a thermal and
+throughput result, not as evidence that transcoding is immune.
+
+### The 10-bit VP9 decoder fault, and when it applies here
+
+There is a decoder fault on RK3588 that corrupts playback after roughly **65,536 decoded frames in one
+session** — about 18 minutes at 60 fps, 45 minutes at 24 fps — with `rkvdec2` reset storms in `dmesg`. It
+applies to **10-bit VP9 (Profile 2)** with both decoder cores active. 8-bit VP9 and HEVC Main10 are
+unaffected, verified past 70,000 frames each.
+
+**It does not need a display.** An earlier version of this guide said the fault required a client holding
+decoded frames on screen, and that a headless server was therefore immune. That was wrong: it reproduces with
+Rockchip's own headless `mpi_dec_test`, and with `jellyfin-ffmpeg` decoding to `-f null`.
+
+What that means for a Jellyfin server: a transcode is one continuous decode session, so **transcoding a
+feature-length 10-bit VP9 title will cross the threshold partway through** (a 2-hour 24 fps film is 172,800
+frames). The practical saving grace is content, not architecture — libraries are overwhelmingly H.264 and
+HEVC, and 10-bit VP9 files are rare outside downloaded YouTube HDR. Where it does bite, it bites the server
+as readily as a browser.
+
+The cause is not this driver and not upstream MPP. It is a patch carried by the `nyanmisaka/mpp` fork that
+`jellyfin-ffmpeg` and the `liujianfeng1994` PPA build from — a revert of upstream's
+`fix[hal_vp9d]: not support fast mode for rk3588`, which re-enables two parallel VP9 HAL tasks on a SoC where
+upstream disabled them. Reported at https://github.com/jellyfin/jellyfin-ffmpeg/issues/765 (background:
+rockchip-linux/mpp#972, closed — upstream is not at fault).
+
+Until the packaged library is rebuilt, disabling the second decoder core avoids it at a cost of roughly
+10-17% decode throughput, which is well clear of real-time:
+
+    echo 1 > /proc/mpp_service/rkvdec-core1/disable_work
 
 ## 5. Client side: direct play in the browser through this driver
 
