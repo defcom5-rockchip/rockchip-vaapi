@@ -220,6 +220,38 @@ to the driver, so auto-detection succeeds. The equivalent manual fix on any vers
 
 ---
 
+## KI-10: garbled 10-bit VP9 after ~18 minutes is not this driver — a downstream MPP patch
+
+**Status:** external, root cause identified · **Severity:** playback corrupts until the player is restarted
+
+Long 10-bit VP9 playback (VP9 **Profile 2**) breaks after roughly **65,536 decoded frames in one session** —
+about 18 minutes at 60 fps, 45 minutes at 24 fps. The picture corrupts and `dmesg` fills with
+`mpp_rkvdec2 ...rkvdec-core: resetting for err 0x23` at roughly 24 resets per second.
+
+**This driver is not involved.** It reproduces with Rockchip's own `mpi_dec_test` — no VA-API, no display,
+no dma-buf export — and with `jellyfin-ffmpeg` decoding directly.
+
+The cause is a patch in the `nyanmisaka/mpp` fork that `jellyfin-ffmpeg` and the
+`liujianfeng1994/rockchip-multimedia` PPA both build from: `15c29e0fa`, a revert of upstream's
+`fix[hal_vp9d]: not support fast mode for rk3588`. Upstream sets `support_fast_mode = 0` for RK3588; the
+revert restores `hal_task_count = 2`, so both rkvdec cores decode VP9 in parallel. Reverting that one commit
+on the fork tip runs clean past 73,000 frames. Upstream MPP is unaffected at every point tested, including
+the exact commit the fork branches from.
+
+**Not affected:** 8-bit VP9 (Profile 0) at any length, and HEVC Main10 — verified clean past 70,000 frames on
+the same affected library. Anything that recreates the decoder resets the count, so short clips and browser
+streaming (which rebuilds the decoder on quality changes) rarely show it.
+
+**Workaround** until the packaged library is rebuilt — costs ~10-17% decode throughput, which is well clear
+of real-time:
+
+    echo 1 > /proc/mpp_service/rkvdec-core1/disable_work
+
+Reported at https://github.com/jellyfin/jellyfin-ffmpeg/issues/765 · background at
+https://github.com/rockchip-linux/mpp/issues/972 (closed: upstream not at fault).
+
+---
+
 ## Reporting
 
 Open an issue with: board model, kernel (`uname -a`), distro, driver version
