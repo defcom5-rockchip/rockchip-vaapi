@@ -152,8 +152,7 @@ decode errors and ffmpeg falls back.
 
 **Status:** mitigated outside this driver (defcom5-libv4l-rkmpp v1.8.0-defcom5.1, 2026-09-07) · real 10-bit output in Chromium still open
 
-The Chromium shipped on Pi Desktop images (`chromium 132 …+rkmpp` from the liujianfeng1994
-PPA) decodes video through **libv4l-rkmpp**, a V4L2 plug-in that talks to MPP directly. It
+The `+rkmpp` Chromium shipped on Pi Desktop images (`chromium 132 …+rkmpp`) decodes video through **libv4l-rkmpp**, a V4L2 plug-in that talks to MPP directly. It
 never loads `rockchip_drv_video.so` (verified 2026-09-06: no driver log across an 8-bit and a
 10-bit playback, while the session journal shows `libv4l2` and `mpp` initialising inside the
 Chromium process). Nothing in this driver's profile menu affects it.
@@ -220,7 +219,7 @@ to the driver, so auto-detection succeeds. The equivalent manual fix on any vers
 
 ---
 
-## KI-10: garbled 10-bit VP9 after ~18 minutes is not this driver — a downstream MPP patch
+## KI-10: garbled 10-bit VP9 after ~18 minutes — update your MPP library
 
 **Status:** external, root cause identified · **Severity:** playback corrupts until the player is restarted
 
@@ -228,27 +227,23 @@ Long 10-bit VP9 playback (VP9 **Profile 2**) breaks after roughly **65,536 decod
 about 18 minutes at 60 fps, 45 minutes at 24 fps. The picture corrupts and `dmesg` fills with
 `mpp_rkvdec2 ...rkvdec-core: resetting for err 0x23` at roughly 24 resets per second.
 
-**This driver is not involved.** It reproduces with Rockchip's own `mpi_dec_test` — no VA-API, no display,
-no dma-buf export — and with `jellyfin-ffmpeg` decoding directly.
+**This driver is not involved.** It reproduces with Rockchip's own headless `mpi_dec_test` — no VA-API, no
+display, no dma-buf export.
 
-The cause is a patch in the `nyanmisaka/mpp` fork that `jellyfin-ffmpeg` and the
-`liujianfeng1994/rockchip-multimedia` PPA both build from: `15c29e0fa`, a revert of upstream's
-`fix[hal_vp9d]: not support fast mode for rk3588`. Upstream sets `support_fast_mode = 0` for RK3588; the
-revert restores `hal_task_count = 2`, so both rkvdec cores decode VP9 in parallel. Reverting that one commit
-on the fork tip runs clean past 73,000 frames. Upstream MPP is unaffected at every point tested, including
-the exact commit the fork branches from.
+The fault is in the `librockchip_mpp` your system is using. Several downstream builds carry a patch that
+reverts upstream's `fix[hal_vp9d]: not support fast mode for rk3588`, re-enabling two parallel VP9 HAL tasks
+on a SoC where upstream deliberately disables them. Upstream MPP is unaffected at every point tested,
+including the exact commit those builds branch from — reverting that one patch runs clean past 73,000 frames.
 
-**Not affected:** 8-bit VP9 (Profile 0) at any length, and HEVC Main10 — verified clean past 70,000 frames on
-the same affected library. Anything that recreates the decoder resets the count, so short clips and browser
-streaming (which rebuilds the decoder on quality changes) rarely show it.
+**Fix:** use an MPP built from upstream — https://github.com/rockchip-linux/mpp
 
-**Workaround** until the packaged library is rebuilt — costs ~10-17% decode throughput, which is well clear
-of real-time:
+**Not affected:** 8-bit VP9 (Profile 0) at any length, and HEVC Main10 — both verified clean past 70,000
+frames on the same affected library. Anything that recreates the decoder resets the count, so short clips and
+browser streaming (which rebuilds the decoder on quality changes) rarely show it.
+
+**Workaround** if you cannot change the library — costs ~10-17% decode throughput, well clear of real-time:
 
     echo 1 > /proc/mpp_service/rkvdec-core1/disable_work
-
-Reported at https://github.com/jellyfin/jellyfin-ffmpeg/issues/765 · background at
-https://github.com/rockchip-linux/mpp/issues/972 (closed: upstream not at fault).
 
 ---
 

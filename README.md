@@ -57,7 +57,7 @@ server-side transcode) instead of rendering a broken picture.
 >
 > **Jellyfin web (measured 2026-09-07 on Pi Desktop):** Jellyfin decides direct play by `canPlayType`. Firefox with this driver answers *probably* for HEVC Main10 (`hvc1.2.4.L153`), VP9 Profile 2 and Matroska, and MediaCapabilities reports 4K Main10 as supported, smooth and power-efficient — so Jellyfin **direct-plays 10-bit in hardware in Firefox**. The image's Chromium answers *no* to Main10/VP9 P2 (and yes to 8-bit HEVC in hardware), so Jellyfin transcodes 10-bit there instead of crashing.
 >
-> **Chromium note:** the `+rkmpp` Chromium from the liujianfeng1994 PPA (shipped on Pi Desktop) decodes through libv4l-rkmpp, not through this driver; see KI-6. Firefox and mpv use this driver.
+> **Chromium note:** the `+rkmpp` Chromium shipped on Pi Desktop decodes through libv4l-rkmpp, not through this driver; see KI-6. Firefox and mpv use this driver.
 
 Earlier releases advertised HEVC, High10 and VP9 Profile 2. They never decoded
 correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story and progress.
