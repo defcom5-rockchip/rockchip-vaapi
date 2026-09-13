@@ -235,7 +235,25 @@ reverts upstream's `fix[hal_vp9d]: not support fast mode for rk3588`, re-enablin
 on a SoC where upstream deliberately disables them. Upstream MPP is unaffected at every point tested,
 including the exact commit those builds branch from — reverting that one patch runs clean past 73,000 frames.
 
-**Fix:** use an MPP built from upstream — https://github.com/rockchip-linux/mpp
+**Fix:** use an MPP built from upstream — https://github.com/rockchip-linux/mpp — or apply this one-line
+change to whatever build you have. It is `mpp/hal/rkdec/vp9d/hal_vp9d_api.c`, in the branch that selects the
+`vdpu34x`/`vdpu38x` HAL, restoring what upstream does on this SoC:
+
+```diff
+     } else if (hw_id == HWID_VDPU34X || hw_id == HWID_VDPU38X) {
+         p->api = &hal_vp9d_vdpu34x;
+         cfg->support_fast_mode = 1;
+         if (mpp_get_soc_type() == ROCKCHIP_SOC_RK3588)
+-            cfg->cfg->status.hal_task_count = 2;
++            cfg->support_fast_mode = 0;
+     } else {
+```
+
+Measured on an Orange Pi 5B (RK3588S), both decoder cores verified evenly loaded via per-core
+`/proc/interrupts` deltas: the unpatched build storms at ~64,700 frames; with this change it ran 116,787
+frames with zero resets, and 72,057 through mpv and VA-API. Cost is about 13% decode throughput on 4K 10-bit
+VP9 (~187 → ~163 fps headless), which is headroom rather than smoothness — display-paced playback went
+130 → 129 fps.
 
 **Not affected:** 8-bit VP9 (Profile 0) at any length, and HEVC Main10 — both verified clean past 70,000
 frames on the same affected library. Anything that recreates the decoder resets the count, so short clips and
