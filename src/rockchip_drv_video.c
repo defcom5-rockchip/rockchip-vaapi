@@ -291,6 +291,35 @@ static int profile_idc(VAProfile p) {
 
 /* ── VADriverVTable implementations ──────────────────────────── */
 
+/* Tear an MPP decoder down without stranding its buffers.
+ *
+ * mpp_destroy() alone was not enough when a client abandoned a context early.
+ * mpv's zero-copy attempt on the Mali-blob desktop destroys its decoder about
+ * 60 ms after creating it, just after the info-change ack, with packets still
+ * in flight and only two frames fetched. Each such destroy left about four full
+ * decoder frame buffers (16,588,800 bytes each at 4K, dma-heap "system") and one
+ * or two 2 MiB stream buffers open in the process until exit: ~70 MB per
+ * attempt. A looping player exhausted the rkvdec IOMMU after ~55 attempts
+ * (Pi-Desktop screensaver, 2026-10-07; mpv log + RK_VAAPI_LOG receipts).
+ *
+ * Reset first, so the decoder stops and gives back the pictures it holds, then
+ * drain and release any frame still queued for output, then destroy.
+ * decode_get_frame does not block here (MPP_SET_OUTPUT_BLOCK = 0). */
+static void rk_mpp_teardown(RKContext *c) {
+    if (!c->mpp) return;
+    if (c->mpi) {
+        c->mpi->reset(c->mpp);
+        MppFrame f = NULL;
+        while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
+            mpp_frame_deinit(&f);
+            f = NULL;
+        }
+    }
+    mpp_destroy(c->mpp);
+    c->mpp = NULL;
+    c->mpi = NULL;
+}
+
 static VAStatus rk_Terminate(VADriverContextP ctx) {
     LOG("Terminate: cleaning up driver");
     RKDriver *d = drv_from_ctx(ctx);
@@ -308,7 +337,7 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     }
     for (int i = 0; i < MAX_CONTEXTS; i++) {
         if (!d->contexts[i].used) continue;
-        if (d->contexts[i].mpp) mpp_destroy(d->contexts[i].mpp);
+        rk_mpp_teardown(&d->contexts[i]);
     }
     for (int i = 0; i < MAX_BUFFERS; i++) {
         if (d->buffers[i].used) free(d->buffers[i].data);
@@ -695,7 +724,8 @@ static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
     RKDriver *d = drv_from_ctx(ctx);
     RKContext *c = context_by_id(d, id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
-    if (c->mpp) mpp_destroy(c->mpp);
+    LOG("DestroyContext: reset + drain + destroy");
+    rk_mpp_teardown(c);
     memset(c, 0, sizeof(*c));
     return VA_STATUS_SUCCESS;
 }
