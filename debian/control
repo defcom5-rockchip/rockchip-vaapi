@@ -3,7 +3,7 @@ Section: libs
 Priority: optional
 Maintainer: defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13),
-               libva-dev (>= 2.0),
+               libva-dev (>= 2.20.0),
                librockchip-mpp-dev,
                librga-dev,
                pkg-config,
@@ -15,10 +15,10 @@ Rules-Requires-Root: no
 Package: rockchip-vaapi
 Architecture: arm64
 Depends: ${shlibs:Depends}, ${misc:Depends},
-         libva2 (>= 2.0),
-         librockchip-mpp1,
+         libva2 (>= 2.20.0),
+         librockchip-mpp1 (>= 1.5.0),
          librga2 (>= 2.2.0)
-Provides: rockchip-vaapi-driver
+Provides: rockchip-vaapi-driver (= ${binary:Version})
 Replaces: rockchip-vaapi-driver
 Conflicts: rockchip-vaapi-driver
 Description: VA-API video decode driver for Rockchip RK3588 (MPP)

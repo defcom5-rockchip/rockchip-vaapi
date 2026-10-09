@@ -1,7 +1,8 @@
 rockchip-vaapi (2.5.0-1) resolute; urgency=medium
 
-  * Release 2.5.0: safe with several decoders on one VA display and with
-    multi-threaded clients (Firefox's media process, ffmpeg 8). KI-12.
+  * Release 2.5.0: fixes for players that abandon decoders early, several
+    decoders on one VA display and multi-threaded clients (mpv, Firefox's
+    media process, ffmpeg 8). KI-12.
   * Drain the MPP decoder before destroying a context. A player that gave
     up on zero-copy used to strand about 70 MB of decoder buffers per try.
   * Claim context, surface and config slots atomically, keep context locks
@@ -9,8 +10,9 @@ rockchip-vaapi (2.5.0-1) resolute; urgency=medium
   * Packaging: maintained by the fork; Provides/Replaces/Conflicts
     rockchip-vaapi-driver, the name the v2.x release downloads used; ships
     the panthor/panfrost name links (KI-9); debconf text in English, listing
-    every variable it sets; the build stops when librga is missing instead
-    of silently dropping the RGA lane.
+    every variable it sets; Depends libva2 (>= 2.20.0), the first libva
+    that loads a 1.20 driver; the build stops when librga is missing
+    instead of silently dropping the RGA lane, and links with -z defs.
   * Versions 1.0.12 to 2.2.0 were released from the repository without
     entries here; see the GitHub releases.
 

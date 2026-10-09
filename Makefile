@@ -3,7 +3,7 @@ CFLAGS  := -O2 -Wall -Wextra -fPIC -shared \
            $(shell pkg-config --cflags libva 2>/dev/null) \
            -I/usr/include/rockchip
 LDFLAGS := $(shell pkg-config --libs libva 2>/dev/null) \
-           -lrockchip_mpp -lpthread -ldl
+           -lrockchip_mpp -lpthread -ldl -Wl,-z,defs
 
 # RK3588 RGA 2D engine: the 10-bit NV15 -> P010 conversion and the optional 8-bit copy run on it.
 #   RGA=required (default)  stop when librga is missing, so a build never silently loses the RGA lane
@@ -15,7 +15,7 @@ ifneq ($(RGA),no)
 RGA_CFLAGS ?= $(shell pkg-config --cflags librga 2>/dev/null)
 RGA_LIBS   ?= $(shell pkg-config --libs librga 2>/dev/null)
 ifeq ($(strip $(RGA_LIBS)),)
-ifeq ($(filter clean,$(MAKECMDGOALS)),)
+ifneq ($(filter-out clean,$(or $(MAKECMDGOALS),all)),)
 $(error librga not found (no librga.pc): install librga-dev, pass RGA_CFLAGS= and RGA_LIBS=, or build with RGA=no)
 endif
 endif
