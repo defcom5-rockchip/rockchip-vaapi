@@ -28,6 +28,8 @@
 #include <rockchip/mpp_packet.h>
 #include <rockchip/mpp_buffer.h>
 
+#include <pthread.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -81,11 +83,17 @@ static inline bool rga3_stride_ok(int wstride_bytes, int hstride, bool ten_bit)
     return (hstride % 2) == 0 &&
            (ten_bit ? (wstride_bytes % 64) == 0 : (wstride_bytes % 16) == 0);
 }
+/* Once per process, whichever thread gets here first: decoders created at the same moment (Firefox's media
+ * process) used to race the old test-then-set and could both run c_RkRgaInit(). */
 static int rga_legacy_ready = 0;   /* 0 = untried, 1 = ok, -1 = failed */
+static pthread_once_t rga_legacy_once = PTHREAD_ONCE_INIT;
+static void rga_legacy_init_once(void)
+{
+    rga_legacy_ready = (c_RkRgaInit() == 0) ? 1 : -1;
+}
 static inline bool rga_legacy_init(void)
 {
-    if (!rga_legacy_ready)
-        rga_legacy_ready = (c_RkRgaInit() == 0) ? 1 : -1;
+    pthread_once(&rga_legacy_once, rga_legacy_init_once);
     return rga_legacy_ready > 0;
 }
 #endif
@@ -181,9 +189,17 @@ typedef struct {
     int  h264_l0_minus1, h264_l1_minus1;   /* learned PPS num_ref_idx_lX_default_active_minus1 (0 until a slice teaches us) */
     /* Serialises MPP output handling for this context: decode_get_frame, assign_mpp_frame and the
        decode_queue head/tail. Taken by the decoding thread (EndPicture) and by any thread in
-       vaSyncSurface. Lock order: out_lock, then a surface's lock. Never held while sleeping. */
+       vaSyncSurface; also guards the slot's lifetime (claim in CreateContext, teardown and clear in
+       DestroyContext). It lives as long as the driver: initialised for every slot in __vaDriverInit,
+       destroyed in rk_Terminate, and never cleared, so a thread still in vaSyncSurface on a context
+       that is being destroyed waits on a valid mutex and then sees `used` false. MUST stay the last
+       member: CTX_CLEAR stops short of it. Lock order: out_lock, then a surface's lock. Not held
+       across the retry sleeps; it is held while a frame is copied out (assign_mpp_frame). */
     pthread_mutex_t out_lock;
 } RKContext;
+
+/* Clear a context slot but keep its out_lock (the last member, see above). */
+#define CTX_CLEAR(c) memset((c), 0, offsetof(RKContext, out_lock))
 
 typedef struct {
     bool         used;
@@ -243,8 +259,13 @@ typedef struct {
        buffers (vaCreateImage/vaDeriveImage, e.g. ffmpeg's hwframe transfer) could claim the same slot. One
        thread's vaDestroyBuffer then wiped the other's buffer ("invalid VABufferID" on map, "invalid
        VASurfaceID" from vaGetImage, which reports a missing image buffer that way) or freed a borrowed MPP
-       mapping (malloc(): invalid size / corrupted top size). */
+       mapping (malloc(): invalid size / corrupted top size). Held only to claim or release a slot. */
     pthread_mutex_t buf_lock;
+    /* Guards claiming and releasing config and surface slots, for the same reason. Firefox shares one VADisplay
+       between all decoders in its media process (VADisplayHolder), so several decoders starting at once create
+       configs and surface pools on one driver instance concurrently. Context slots are claimed under their own
+       out_lock instead. */
+    pthread_mutex_t obj_lock;
 } RKDriver;
 
 /* ── helpers ─────────────────────────────────────────────────── */
@@ -315,18 +336,18 @@ static int profile_idc(VAProfile p) {
  *
  * Reset first, so the decoder stops and gives back the pictures it holds, then
  * drain and release any frame still queued for output, then destroy.
- * decode_get_frame does not block here (MPP_SET_OUTPUT_BLOCK = 0). */
-static void rk_mpp_teardown(RKContext *c) {
+ * decode_get_frame does not block here (MPP_SET_OUTPUT_BLOCK = 0).
+ * Caller holds c->out_lock for the whole teardown, mpp_destroy included, so no
+ * other thread can reach the decoder between the drain and the destroy. */
+static void rk_mpp_teardown_locked(RKContext *c) {
     if (!c->mpp) return;
     if (c->mpi) {
-        pthread_mutex_lock(&c->out_lock);
         c->mpi->reset(c->mpp);
         MppFrame f = NULL;
         while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
             mpp_frame_deinit(&f);
             f = NULL;
         }
-        pthread_mutex_unlock(&c->out_lock);
     }
     mpp_destroy(c->mpp);
     c->mpp = NULL;
@@ -349,14 +370,18 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
         pthread_mutex_destroy(&d->surfaces[i].lock);
     }
     for (int i = 0; i < MAX_CONTEXTS; i++) {
-        if (!d->contexts[i].used) continue;
-        rk_mpp_teardown(&d->contexts[i]);
-        pthread_mutex_destroy(&d->contexts[i].out_lock);
+        RKContext *c = &d->contexts[i];
+        pthread_mutex_lock(&c->out_lock);
+        if (c->used) rk_mpp_teardown_locked(c);
+        pthread_mutex_unlock(&c->out_lock);
+        pthread_mutex_destroy(&c->out_lock);   /* every slot has one, used or not */
     }
     for (int i = 0; i < MAX_BUFFERS; i++) {
-        if (d->buffers[i].used) free(d->buffers[i].data);
+        /* a derived image still alive aliases MPP memory: not ours to free */
+        if (d->buffers[i].used && !d->buffers[i].borrowed) free(d->buffers[i].data);
     }
     pthread_mutex_destroy(&d->buf_lock);
+    pthread_mutex_destroy(&d->obj_lock);
     free(d);
     ctx->pDriverData = NULL;
     return VA_STATUS_SUCCESS;
@@ -447,24 +472,28 @@ static VAStatus rk_CreateConfig(VADriverContextP ctx,
     }
     (void)attribs; (void)n_attribs;
 
+    pthread_mutex_lock(&d->obj_lock);
     for (unsigned i = 0; i < MAX_CONFIGS; i++) {
         if (!d->configs[i].used) {
             d->configs[i].used = true;
             d->configs[i].profile = profile;
             d->configs[i].entrypoint = entrypoint;
+            pthread_mutex_unlock(&d->obj_lock);
             *out_id = CONFIG_ID_BASE + i;
             return VA_STATUS_SUCCESS;
         }
     }
+    pthread_mutex_unlock(&d->obj_lock);
     return VA_STATUS_ERROR_ALLOCATION_FAILED;
 }
 
 static VAStatus rk_DestroyConfig(VADriverContextP ctx, VAConfigID id) {
     RKDriver *d = drv_from_ctx(ctx);
+    pthread_mutex_lock(&d->obj_lock);
     RKConfig *c = config_by_id(d, id);
-    if (!c) return VA_STATUS_ERROR_INVALID_CONFIG;
-    c->used = false;
-    return VA_STATUS_SUCCESS;
+    if (c) c->used = false;
+    pthread_mutex_unlock(&d->obj_lock);
+    return c ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_INVALID_CONFIG;
 }
 
 static VAStatus rk_QueryConfigAttributes(VADriverContextP ctx,
@@ -496,6 +525,13 @@ static VAStatus rk_QueryConfigAttributes(VADriverContextP ctx,
     return VA_STATUS_SUCCESS;
 }
 
+/* Give a surface slot back. Its buffers, fd, mutex and cond must already be released. */
+static void surface_slot_release(RKDriver *d, RKSurface *s) {
+    pthread_mutex_lock(&d->obj_lock);
+    memset(s, 0, sizeof(*s));
+    pthread_mutex_unlock(&d->obj_lock);
+}
+
 /* vaCreateSurfaces (old API, redirected) */
 static VAStatus create_surfaces_impl(VADriverContextP ctx,
                                      int width, int height, bool rt_10bit,
@@ -505,9 +541,15 @@ static VAStatus create_surfaces_impl(VADriverContextP ctx,
     int allocated = 0;
     for (int s = 0; s < n; s++) {
         unsigned i;
+        pthread_mutex_lock(&d->obj_lock);   /* find and mark in one step (see obj_lock) */
         for (i = 0; i < MAX_SURFACES; i++) {
             if (!d->surfaces[i].used) break;
         }
+        if (i < MAX_SURFACES) {
+            memset(&d->surfaces[i], 0, sizeof(RKSurface));
+            d->surfaces[i].used = true;
+        }
+        pthread_mutex_unlock(&d->obj_lock);
         if (i == MAX_SURFACES) {
             LOG("CreateSurfaces: POOL EXHAUSTED — client asked for surface #%d "
                 "while %d are live (MAX_SURFACES=%d); returning "
@@ -521,13 +563,11 @@ static VAStatus create_surfaces_impl(VADriverContextP ctx,
                 if (rb->priv_group) mpp_buffer_group_put(rb->priv_group);
                 pthread_mutex_destroy(&rb->lock);
                 pthread_cond_destroy(&rb->cond);
-                memset(rb, 0, sizeof(RKSurface));
+                surface_slot_release(d, rb);
             }
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
-        RKSurface *surf = &d->surfaces[i];
-        memset(surf, 0, sizeof(*surf));
-        surf->used     = true;
+        RKSurface *surf = &d->surfaces[i];     /* claimed and zeroed above */
         surf->width    = width;
         surf->height   = height;
         surf->rt_10bit = rt_10bit;
@@ -577,9 +617,9 @@ static VAStatus create_surfaces_impl(VADriverContextP ctx,
                     if (rb->priv_group) mpp_buffer_group_put(rb->priv_group);
                     pthread_mutex_destroy(&rb->lock);
                     pthread_cond_destroy(&rb->cond);
-                    memset(rb, 0, sizeof(RKSurface));
+                    surface_slot_release(d, rb);
                 }
-                memset(surf, 0, sizeof(RKSurface));
+                surface_slot_release(d, surf);
                 return VA_STATUS_ERROR_ALLOCATION_FAILED;
             }
         }
@@ -605,7 +645,7 @@ static VAStatus rk_DestroySurfaces(VADriverContextP ctx,
         if (s->priv_group) { mpp_buffer_group_put(s->priv_group); s->priv_group = NULL; }
         pthread_cond_destroy(&s->cond);
         pthread_mutex_destroy(&s->lock);
-        memset(s, 0, sizeof(*s));
+        surface_slot_release(d, s);
     }
     return VA_STATUS_SUCCESS;
 }
@@ -669,69 +709,78 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
     rga_legacy_init();
 #endif
 
+    /* Build the decoder first, then claim a slot for it. The old order (claim a free slot, then spend
+       milliseconds in mpp_create/mpp_init before marking it used) let two decoders starting at once
+       (Firefox's media process, one shared VADisplay) take the same slot: same VAContextID for both, one
+       MPP instance leaked, frames routed to the other decoder's surfaces. */
+    LOG("CreateContext: config=0x%x %dx%d coding=%d",
+        config_id, width, height, (int)coding);
+
+    MppCtx  mpp = NULL;
+    MppApi *mpi = NULL;
+    MPP_RET ret = mpp_create(&mpp, &mpi);
+    if (ret != MPP_OK) {
+        LOG("mpp_create FAILED: %d", ret);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    LOG("CreateContext: mpp_create OK");
+
+    ret = mpp_init(mpp, MPP_CTX_DEC, coding);
+    if (ret != MPP_OK) {
+        mpp_destroy(mpp);
+        LOG("mpp_init FAILED: %d (coding=%d)", ret, (int)coding);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    LOG("CreateContext: mpp_init OK");
+
+    /* Must be set after mpp_init: split_parse=0 means we send complete
+     * access units; OUTPUT_BLOCK=0 makes decode_get_frame non-blocking. */
+    MppDecCfg dec_cfg = NULL;
+    mpp_dec_cfg_init(&dec_cfg);
+    mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0);
+    mpi->control(mpp, MPP_DEC_SET_CFG, dec_cfg);
+    mpp_dec_cfg_deinit(dec_cfg);
+
+    int block = 0;
+    mpi->control(mpp, MPP_SET_OUTPUT_BLOCK, (MppParam)&block);
+
+    /* Emit every picture as soon as it is decoded, in decode order, instead
+       of holding it back for output reordering.  A stateless VA-API client
+       owns presentation order and blocks in vaSyncSurface on the exact
+       surface it submitted; if MPP holds that picture waiting for later
+       input, the client never submits the later input -- it is waiting on
+       us -- and the sync deadline expires.  That deadlock is why B-frame
+       streams fell back to software after a seek (the pre-roll submits too
+       few pictures to satisfy a reorder window).  Telling MPP the truth
+       here is better than telling the bitstream a lie about
+       max_num_reorder_frames. */
+    {
+        RK_U32 immediate = 1;
+        MPP_RET r = mpi->control(mpp, MPP_DEC_SET_IMMEDIATE_OUT, (MppParam)&immediate);
+        LOG("CreateContext: MPP_DEC_SET_IMMEDIATE_OUT=1 -> %d%s",
+            (int)r, r == MPP_OK ? "" : " (unsupported; reorder deadlock may persist)");
+    }
+
     for (unsigned i = 0; i < MAX_CONTEXTS; i++) {
-        if (d->contexts[i].used) continue;
         RKContext *c = &d->contexts[i];
-        memset(c, 0, sizeof(*c));
-
-        LOG("CreateContext: config=0x%x %dx%d coding=%d",
-            config_id, width, height, (int)coding);
-
-        MPP_RET ret = mpp_create(&c->mpp, &c->mpi);
-        if (ret != MPP_OK) {
-            LOG("mpp_create FAILED: %d", ret);
-            return VA_STATUS_ERROR_ALLOCATION_FAILED;
-        }
-        LOG("CreateContext: mpp_create OK");
-
-        ret = mpp_init(c->mpp, MPP_CTX_DEC, coding);
-        if (ret != MPP_OK) {
-            mpp_destroy(c->mpp);
-            LOG("mpp_init FAILED: %d (coding=%d)", ret, (int)coding);
-            return VA_STATUS_ERROR_ALLOCATION_FAILED;
-        }
-        LOG("CreateContext: mpp_init OK");
-
-        /* Must be set after mpp_init: split_parse=0 means we send complete
-         * access units; OUTPUT_BLOCK=0 makes decode_get_frame non-blocking. */
-        MppDecCfg dec_cfg = NULL;
-        mpp_dec_cfg_init(&dec_cfg);
-        mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0);
-        c->mpi->control(c->mpp, MPP_DEC_SET_CFG, dec_cfg);
-        mpp_dec_cfg_deinit(dec_cfg);
-
-        int block = 0;
-        c->mpi->control(c->mpp, MPP_SET_OUTPUT_BLOCK, (MppParam)&block);
-
-        /* Emit every picture as soon as it is decoded, in decode order, instead
-           of holding it back for output reordering.  A stateless VA-API client
-           owns presentation order and blocks in vaSyncSurface on the exact
-           surface it submitted; if MPP holds that picture waiting for later
-           input, the client never submits the later input -- it is waiting on
-           us -- and the sync deadline expires.  That deadlock is why B-frame
-           streams fell back to software after a seek (the pre-roll submits too
-           few pictures to satisfy a reorder window).  Telling MPP the truth
-           here is better than telling the bitstream a lie about
-           max_num_reorder_frames. */
-        {
-            RK_U32 immediate = 1;
-            MPP_RET r = c->mpi->control(c->mpp, MPP_DEC_SET_IMMEDIATE_OUT,
-                                        (MppParam)&immediate);
-            LOG("CreateContext: MPP_DEC_SET_IMMEDIATE_OUT=1 -> %d%s",
-                (int)r, r == MPP_OK ? "" : " (unsupported; reorder deadlock may persist)");
-        }
-
-        pthread_mutex_init(&c->out_lock, NULL);
-        c->used      = true;
+        pthread_mutex_lock(&c->out_lock);      /* claim: test and mark in one step */
+        if (c->used) { pthread_mutex_unlock(&c->out_lock); continue; }
+        CTX_CLEAR(c);
+        c->mpp       = mpp;
+        c->mpi       = mpi;
         c->config_id = config_id;
         c->width     = width;
         c->height    = height;
         c->coding    = coding;
         c->sps_sent  = false;
+        c->used      = true;
+        pthread_mutex_unlock(&c->out_lock);
 
         *out_id = CONTEXT_ID_BASE + i;
         return VA_STATUS_SUCCESS;
     }
+    LOG("CreateContext: all %d context slots in use", MAX_CONTEXTS);
+    mpp_destroy(mpp);
     return VA_STATUS_ERROR_ALLOCATION_FAILED;
 }
 
@@ -740,10 +789,18 @@ static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
     RKDriver *d = drv_from_ctx(ctx);
     RKContext *c = context_by_id(d, id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
+    /* Teardown and clear under the slot's lock, so a vaSyncSurface on another thread (mpv's VO exporting a
+       surface while its decoder thread abandons zero-copy) either finishes its drain first or finds the slot
+       unused afterwards; it can never reach a half-destroyed decoder or a destroyed mutex. */
+    pthread_mutex_lock(&c->out_lock);
+    if (!c->used) {                            /* lost a race with another DestroyContext */
+        pthread_mutex_unlock(&c->out_lock);
+        return VA_STATUS_ERROR_INVALID_CONTEXT;
+    }
     LOG("DestroyContext: reset + drain + destroy");
-    rk_mpp_teardown(c);
-    pthread_mutex_destroy(&c->out_lock);
-    memset(c, 0, sizeof(*c));
+    rk_mpp_teardown_locked(c);
+    CTX_CLEAR(c);                              /* used = false; out_lock untouched */
+    pthread_mutex_unlock(&c->out_lock);
     return VA_STATUS_SUCCESS;
 }
 
@@ -757,28 +814,37 @@ static VAStatus rk_CreateBuffer(VADriverContextP ctx,
     RKDriver *d = drv_from_ctx(ctx);
     (void)context;
 
+    /* Claim the slot under the lock, allocate and fill outside it: an image buffer is a 25 MB malloc + memset
+       at 4K 10-bit (ffmpeg's hwframe transfer creates one per frame), which would otherwise stall the decoding
+       thread's per-slice vaCreateBuffer for milliseconds. The ID is not handed out until the buffer is ready. */
+    RKBuffer *b = NULL;
+    unsigned i;
     pthread_mutex_lock(&d->buf_lock);
-    for (unsigned i = 0; i < MAX_BUFFERS; i++) {
+    for (i = 0; i < MAX_BUFFERS; i++) {
         if (d->buffers[i].used) continue;
-        RKBuffer *b = &d->buffers[i];
-        b->used         = true;
-        b->type         = type;
-        b->size         = size;
-        b->num_elements = num_elements;
-        b->data         = malloc((size_t)size * num_elements);
-        if (!b->data) {
-            b->used = false;
-            pthread_mutex_unlock(&d->buf_lock);
-            return VA_STATUS_ERROR_ALLOCATION_FAILED;
-        }
-        if (data) memcpy(b->data, data, (size_t)size * num_elements);
-        else      memset(b->data, 0,    (size_t)size * num_elements);
-        *out_id = BUFFER_ID_BASE + i;
-        pthread_mutex_unlock(&d->buf_lock);
-        return VA_STATUS_SUCCESS;
+        b = &d->buffers[i];
+        memset(b, 0, sizeof(*b));
+        b->used = true;
+        break;
     }
     pthread_mutex_unlock(&d->buf_lock);
-    return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    if (!b) return VA_STATUS_ERROR_ALLOCATION_FAILED;
+
+    void *mem = malloc((size_t)size * num_elements);
+    if (!mem) {
+        pthread_mutex_lock(&d->buf_lock);
+        memset(b, 0, sizeof(*b));
+        pthread_mutex_unlock(&d->buf_lock);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    if (data) memcpy(mem, data, (size_t)size * num_elements);
+    else      memset(mem, 0,    (size_t)size * num_elements);
+    b->type         = type;
+    b->size         = size;
+    b->num_elements = num_elements;
+    b->data         = mem;
+    *out_id = BUFFER_ID_BASE + i;
+    return VA_STATUS_SUCCESS;
 }
 
 static VAStatus rk_BufferSetNumElements(VADriverContextP ctx,
@@ -1309,6 +1375,12 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
 
     if (ret != MPP_OK) {
         LOG("decode_put_packet failed after retries: %d", ret);
+        /* undo enqueue, as the generic path does, and only if our entry is still the newest */
+        pthread_mutex_lock(&c->out_lock);
+        int last = (c->dq_tail - 1) & 63;
+        if (c->dq_tail != c->dq_head && c->decode_queue[last] == c->render_target)
+            c->dq_tail = last;
+        pthread_mutex_unlock(&c->out_lock);
         return VA_STATUS_ERROR_DECODING_ERROR;
     }
 
@@ -1516,8 +1588,12 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     if (ret != MPP_OK) {
         LOG("decode_put_packet failed after retries: %d", ret);
         if (!is_hidden) {                                  /* undo enqueue */
+            /* Only if our entry is still the newest: a retry-loop drain here or in vaSyncSurface may already
+               have popped it, and stepping the tail back past the head would make the queue look 63 deep. */
             pthread_mutex_lock(&c->out_lock);
-            c->dq_tail = (c->dq_tail - 1) & 63;
+            int last = (c->dq_tail - 1) & 63;
+            if (c->dq_tail != c->dq_head && c->decode_queue[last] == c->render_target)
+                c->dq_tail = last;
             pthread_mutex_unlock(&c->out_lock);
         }
         return VA_STATUS_ERROR_DECODING_ERROR;
@@ -1605,6 +1681,11 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
         if (c) {
             MppFrame frame = NULL;
             pthread_mutex_lock(&c->out_lock);
+            if (!c->used || !c->mpi) {               /* destroyed meanwhile: nothing left to drain */
+                pthread_mutex_unlock(&c->out_lock);
+                LOG("SyncSurface: surface=0x%x context 0x%x destroyed while waiting", id, cid);
+                break;
+            }
             bool got = (c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame);
             if (got) assign_mpp_frame(frame, c, d);
             pthread_mutex_unlock(&c->out_lock);
@@ -2162,6 +2243,9 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
     if (!d) return VA_STATUS_ERROR_ALLOCATION_FAILED;
     ctx->pDriverData = d;
     pthread_mutex_init(&d->buf_lock, NULL);
+    pthread_mutex_init(&d->obj_lock, NULL);
+    for (int i = 0; i < MAX_CONTEXTS; i++)
+        pthread_mutex_init(&d->contexts[i].out_lock, NULL);   /* live as long as the driver (see RKContext) */
 
     ctx->version_major        = VA_MAJOR_VERSION;
     ctx->version_minor        = VA_MINOR_VERSION;
