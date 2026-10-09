@@ -100,6 +100,9 @@ Client notes:
 
 ## Workflow
 - Development on feature branches (current: `deep-ink`); `main` is released truth.
+- Versions step by halves: 2.2.0 → 2.5.0 → 3.0.0 → 3.5.0. No point releases (no x.y.1);
+  a fix waits for the next half step. Release candidates are `vX.Y.0-rcN`. The release
+  commit is the one-line `str_vendor` change in `src/rockchip_drv_video.c`.
 - Commit as defcom5-rockchip; `Co-authored-by: Claude <model> <noreply@anthropic.com>`
   is welcome and standard here.
 - Related ground truth: yisding/rockchip-vaapi (10-bit work; requires their 6.18
