@@ -179,6 +179,10 @@ typedef struct {
     int  hevc_sets_plus1;        /* 0 = unknown, 1 = original SPS had 0 RPS sets, 2 = had >=1 */
     int  hevc_sent_plus1;        /* what the last emitted SPS declared (same encoding) */
     int  h264_l0_minus1, h264_l1_minus1;   /* learned PPS num_ref_idx_lX_default_active_minus1 (0 until a slice teaches us) */
+    /* Serialises MPP output handling for this context: decode_get_frame, assign_mpp_frame and the
+       decode_queue head/tail. Taken by the decoding thread (EndPicture) and by any thread in
+       vaSyncSurface. Lock order: out_lock, then a surface's lock. Never held while sleeping. */
+    pthread_mutex_t out_lock;
 } RKContext;
 
 typedef struct {
@@ -308,12 +312,14 @@ static int profile_idc(VAProfile p) {
 static void rk_mpp_teardown(RKContext *c) {
     if (!c->mpp) return;
     if (c->mpi) {
+        pthread_mutex_lock(&c->out_lock);
         c->mpi->reset(c->mpp);
         MppFrame f = NULL;
         while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
             mpp_frame_deinit(&f);
             f = NULL;
         }
+        pthread_mutex_unlock(&c->out_lock);
     }
     mpp_destroy(c->mpp);
     c->mpp = NULL;
@@ -338,6 +344,7 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     for (int i = 0; i < MAX_CONTEXTS; i++) {
         if (!d->contexts[i].used) continue;
         rk_mpp_teardown(&d->contexts[i]);
+        pthread_mutex_destroy(&d->contexts[i].out_lock);
     }
     for (int i = 0; i < MAX_BUFFERS; i++) {
         if (d->buffers[i].used) free(d->buffers[i].data);
@@ -706,6 +713,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
                 (int)r, r == MPP_OK ? "" : " (unsupported; reorder deadlock may persist)");
         }
 
+        pthread_mutex_init(&c->out_lock, NULL);
         c->used      = true;
         c->config_id = config_id;
         c->width     = width;
@@ -726,6 +734,7 @@ static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
     LOG("DestroyContext: reset + drain + destroy");
     rk_mpp_teardown(c);
+    pthread_mutex_destroy(&c->out_lock);
     memset(c, 0, sizeof(*c));
     return VA_STATUS_SUCCESS;
 }
@@ -896,6 +905,7 @@ static inline void nv15_row_to_p010(const uint8_t *srow, uint16_t *drow, int n)
     }
 }
 
+/* Caller must hold c->out_lock: this pops c->decode_queue. */
 static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
 {
     if (mpp_frame_get_info_change(frame)) {
@@ -1234,6 +1244,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     }
 
     /* Pre-drain: consume frames MPP already has ready from previous packets */
+    pthread_mutex_lock(&c->out_lock);
     {
         MppFrame f = NULL;
         while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
@@ -1249,6 +1260,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
      * most recently, producing ghosted frames. */
     c->decode_queue[c->dq_tail] = c->render_target;
     c->dq_tail = (c->dq_tail + 1) & 63;
+    pthread_mutex_unlock(&c->out_lock);
 
     /* Debug valve: RKVA_DUMP_H264=<path> appends every assembled H.264 packet so
        `ffmpeg -f h264 -i <path> -f null -` (or a hybrid with the original's
@@ -1270,10 +1282,12 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
         if (ret == MPP_OK || ret != MPP_ERR_BUFFER_FULL)
             break;
         MppFrame df = NULL;
+        pthread_mutex_lock(&c->out_lock);
         while (c->mpi->decode_get_frame(c->mpp, &df) == MPP_OK && df) {
             assign_mpp_frame(df, c, d);
             df = NULL;
         }
+        pthread_mutex_unlock(&c->out_lock);
         usleep(500);
     }
     mpp_packet_deinit(&pkt);
@@ -1292,10 +1306,12 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
        Waiting is vaSyncSurface's job, and rk_SyncSurface() already drains MPP
        with a 3s deadline.  Here, just collect whatever is already available. */
     MppFrame frame = NULL;
+    pthread_mutex_lock(&c->out_lock);
     while (c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame) {
         assign_mpp_frame(frame, c, d);
         frame = NULL;
     }
+    pthread_mutex_unlock(&c->out_lock);
 
     return VA_STATUS_SUCCESS;
 }
@@ -1431,6 +1447,7 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     /* Pre-drain: consume any frames MPP already has ready from previous
      * packets.  Keyframes that timed out in the previous EndPicture poll
      * window land here at the start of the next call. */
+    pthread_mutex_lock(&c->out_lock);
     {
         MppFrame f = NULL;
         while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
@@ -1446,6 +1463,7 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
         c->decode_queue[c->dq_tail] = c->render_target;
         c->dq_tail = (c->dq_tail + 1) & 63;
     }
+    pthread_mutex_unlock(&c->out_lock);
 
     /* Debug valve: RKVA_DUMP_HEVC=<path> appends every assembled HEVC packet
        so `ffmpeg -f hevc -i <path> -f null -` can name a broken syntax element. */
@@ -1470,10 +1488,12 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
         if (ret == MPP_OK || ret != MPP_ERR_BUFFER_FULL)
             break;
         MppFrame df = NULL;
+        pthread_mutex_lock(&c->out_lock);
         while (c->mpi->decode_get_frame(c->mpp, &df) == MPP_OK && df) {
             assign_mpp_frame(df, c, d);
             df = NULL;
         }
+        pthread_mutex_unlock(&c->out_lock);
         usleep(500);
     }
     mpp_packet_deinit(&pkt);
@@ -1481,7 +1501,11 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
 
     if (ret != MPP_OK) {
         LOG("decode_put_packet failed after retries: %d", ret);
-        if (!is_hidden) c->dq_tail = (c->dq_tail - 1) & 63; /* undo enqueue */
+        if (!is_hidden) {                                  /* undo enqueue */
+            pthread_mutex_lock(&c->out_lock);
+            c->dq_tail = (c->dq_tail - 1) & 63;
+            pthread_mutex_unlock(&c->out_lock);
+        }
         return VA_STATUS_ERROR_DECODING_ERROR;
     }
 
@@ -1566,10 +1590,11 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
 
         if (c) {
             MppFrame frame = NULL;
-            if (c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame) {
-                assign_mpp_frame(frame, c, d);
-                continue; /* recheck immediately without sleeping */
-            }
+            pthread_mutex_lock(&c->out_lock);
+            bool got = (c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame);
+            if (got) assign_mpp_frame(frame, c, d);
+            pthread_mutex_unlock(&c->out_lock);
+            if (got) continue; /* recheck immediately without sleeping */
         }
         usleep(1000);
     }
