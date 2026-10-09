@@ -5,11 +5,21 @@ CFLAGS  := -O2 -Wall -Wextra -fPIC -shared \
 LDFLAGS := $(shell pkg-config --libs libva 2>/dev/null) \
            -lrockchip_mpp -lpthread -ldl
 
-# Optional: use the RK3588 RGA 2D blitter for the plane copy when librga is
-# available.  Falls back to memcpy when it is not.
-RGA_LIBS := $(shell pkg-config --libs librga 2>/dev/null)
-ifneq ($(RGA_LIBS),)
-CFLAGS  += -DHAVE_RGA
+# RK3588 RGA 2D engine: the 10-bit NV15 -> P010 conversion and the optional 8-bit copy run on it.
+#   RGA=required (default)  stop when librga is missing, so a build never silently loses the RGA lane
+#                           (the v2.2.0 release download was built without it by accident)
+#   RGA=no                  build without it; every copy then runs on the CPU
+# RGA_CFLAGS / RGA_LIBS override the pkg-config lookup (e.g. headers unpacked from librga-dev).
+RGA ?= required
+ifneq ($(RGA),no)
+RGA_CFLAGS ?= $(shell pkg-config --cflags librga 2>/dev/null)
+RGA_LIBS   ?= $(shell pkg-config --libs librga 2>/dev/null)
+ifeq ($(strip $(RGA_LIBS)),)
+ifeq ($(filter clean,$(MAKECMDGOALS)),)
+$(error librga not found (no librga.pc): install librga-dev, pass RGA_CFLAGS= and RGA_LIBS=, or build with RGA=no)
+endif
+endif
+CFLAGS  += -DHAVE_RGA $(RGA_CFLAGS)
 LDFLAGS += $(RGA_LIBS)
 endif
 

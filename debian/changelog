@@ -1,3 +1,21 @@
+rockchip-vaapi (2.5.0-1) resolute; urgency=medium
+
+  * Release 2.5.0: safe with several decoders on one VA display and with
+    multi-threaded clients (Firefox's media process, ffmpeg 8). KI-12.
+  * Drain the MPP decoder before destroying a context. A player that gave
+    up on zero-copy used to strand about 70 MB of decoder buffers per try.
+  * Claim context, surface and config slots atomically, keep context locks
+    alive for the driver's lifetime, and lock buffer-slot claim/release.
+  * Packaging: maintained by the fork; Provides/Replaces/Conflicts
+    rockchip-vaapi-driver, the name the v2.x release downloads used; ships
+    the panthor/panfrost name links (KI-9); debconf text in English, listing
+    every variable it sets; the build stops when librga is missing instead
+    of silently dropping the RGA lane.
+  * Versions 1.0.12 to 2.2.0 were released from the repository without
+    entries here; see the GitHub releases.
+
+ -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Fri, 09 Oct 2026 13:00:00 -0700
+
 rockchip-vaapi (1.0.11-1) noble; urgency=high
 
   * Fix 4K@60fps stability: >30000 frames decoded without NS_ERROR in Firefox,

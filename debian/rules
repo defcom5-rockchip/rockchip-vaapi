@@ -6,11 +6,16 @@ include /usr/share/dpkg/architecture.mk
 	dh $@
 
 override_dh_auto_build:
-	$(MAKE) all
+	$(MAKE) all RGA=required
 
 override_dh_auto_install:
 	install -D -m 755 rockchip_drv_video.so \
 		$(CURDIR)/debian/rockchip-vaapi/usr/lib/$(DEB_HOST_MULTIARCH)/dri/rockchip_drv_video.so
+
+# librga2 and librockchip-mpp1 declare their own build's version as the minimum, which would tie the package to
+# exactly the builds it was compiled on. The driver uses long-stable API from both; the minimums are in control.
+override_dh_shlibdeps:
+	dh_shlibdeps -- -xlibrga2 -xlibrockchip-mpp1
 
 override_dh_auto_clean:
 	$(MAKE) clean

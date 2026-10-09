@@ -1,0 +1,2 @@
+usr/lib/aarch64-linux-gnu/dri/rockchip_drv_video.so usr/lib/aarch64-linux-gnu/dri/panthor_drv_video.so
+usr/lib/aarch64-linux-gnu/dri/rockchip_drv_video.so usr/lib/aarch64-linux-gnu/dri/panfrost_drv_video.so

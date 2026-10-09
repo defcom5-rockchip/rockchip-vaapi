@@ -28,26 +28,34 @@ cat /proc/cmdline | tr ' ' '\n' | grep cma     # → cma=512M
 grep CmaTotal /proc/meminfo                     # → CmaTotal: 524288 kB
 ```
 
-> The driver's own per-surface buffers come from the *system* dma-heap (not CMA),
-> so they are not the constraint; the CMA pressure is MPP's decode DPB plus the
+> The driver's own per-surface buffers come from MPP's DRM allocator (IOMMU-mapped
+> system memory, not CMA), so they are not the constraint; the CMA pressure is MPP's decode DPB plus the
 > GPU compositor. See `docs/DEVELOPMENT.md` for details.
 
 ## Option A: Install from Debian package (recommended)
 
 ```bash
-sudo dpkg -i rockchip-vaapi_1.0.1-1_arm64.deb
+sudo apt install ./rockchip-vaapi_2.5.0-1_arm64.deb
 ```
 
-This installs `rockchip_drv_video.so` to
-`/usr/lib/aarch64-linux-gnu/dri/` and registers the package with `dpkg`.
-To uninstall: `sudo dpkg -r rockchip-vaapi`.
+This installs `rockchip_drv_video.so` to `/usr/lib/aarch64-linux-gnu/dri/` with the
+`panthor`/`panfrost` name links (KI-9), and replaces the older `rockchip-vaapi-driver`
+package if you had it. If an image holds the package against upgrades
+(`apt-mark showhold`), add `--allow-change-held-packages`. To go back to the old package, use apt too
+(`sudo apt install ./rockchip-vaapi-driver_<version>_arm64.deb`); plain `dpkg -i` refuses because the two conflict.
+
+The package sets `LIBVA_DRIVER_NAME`, `LIBVA_DRIVERS_PATH`, `MOZ_DISABLE_RDD_SANDBOX=1`, `MOZ_ENABLE_WAYLAND=1` and
+`MOZ_X11_EGL=1` system-wide by default (`/etc/environment.d/60-rockchip-vaapi.conf`, `/etc/profile.d/rockchip-vaapi.sh`).
+`MOZ_DISABLE_RDD_SANDBOX=1` turns off the sandbox of Firefox's media process for every user. To opt out:
+`sudo dpkg-reconfigure rockchip-vaapi` and answer No.
+To uninstall: `sudo apt remove rockchip-vaapi`.
 
 ## Option B: Build and install from source
 
 ### 1. Install build dependencies
 
 ```bash
-sudo apt install gcc pkg-config libva-dev librockchip-mpp-dev
+sudo apt install gcc pkg-config libva-dev librockchip-mpp-dev librga-dev
 ```
 
 ### 2. Build
@@ -57,7 +65,9 @@ cd /path/to/rockchip-vaapi
 make
 ```
 
-Expected output: `rockchip_drv_video.so` in the project root.
+Expected output: `rockchip_drv_video.so` in the project root. Without `librga-dev` the
+build stops with a message; `make RGA=no` builds without the RGA paths (10-bit is then
+converted on the CPU).
 
 ### 3. Install
 
@@ -79,7 +89,7 @@ sudo install -m 755 rockchip_drv_video.so /your/path/rockchip_drv_video.so
 tar --exclude='rockchip-vaapi/debian' \
     --exclude='rockchip-vaapi/*.so' \
     --exclude='rockchip-vaapi/src/*.o' \
-    -czf rockchip-vaapi_1.0.1.orig.tar.gz rockchip-vaapi/
+    -czf rockchip-vaapi_2.5.0.orig.tar.gz rockchip-vaapi/
 
 # Build binary package
 cd rockchip-vaapi
@@ -154,10 +164,10 @@ sudo chmod +x /usr/local/bin/firefox-hw
 Verify `LIBVA_DRIVER_NAME=rockchip` and that the `.so` exists at
 `/usr/lib/aarch64-linux-gnu/dri/rockchip_drv_video.so`.
 
-**Firefox still uses SWDEC**
-Check `about:support` → Media → Video Decoder. If it shows `FFmpegVideo`,
-hardware decode is active. If it shows `Softpipe` or similar, verify the three
-`about:config` keys and that `MOZ_DISABLE_RDD_SANDBOX=1` is set.
+**Firefox still decodes in software**
+While a video plays, `sudo fuser -v /dev/mpp_service` must list Firefox's RDD process; or start Firefox with
+`RK_VAAPI_LOG=/tmp/rk-vaapi.log` and look for `mpp_init OK` and `ExportSurfaceHandle` in that file. If neither shows,
+verify the three `about:config` keys and that `MOZ_DISABLE_RDD_SANDBOX=1` is set.
 
 **`/dev/dri` permission denied in RDD process**
 Add your user to the `video` and `render` groups:
@@ -203,4 +213,5 @@ libva derives the VA driver name from the render node's kernel driver. On images
 
 ## Checking an export before decode
 
-`cc tests/va-export-before-decode.c -o va-export-before-decode -lva -lva-drm && LIBVA_DRIVER_NAME=rockchip ./va-export-before-decode` — a 10-bit surface must export as `P010` / `R16` + `GR1616` before any frame is decoded (KI-8).
+`cc tests/va-export-before-decode.c -o va-export-before-decode -lva -lva-drm && LIBVA_DRIVER_NAME=rockchip ./va-export-before-decode` — a 10-bit surface must export as `P010` with layers `R16` + `GR32` (the fourcc of DRM_FORMAT_GR1616), pitch
+2 × width, before any frame is decoded (KI-8).

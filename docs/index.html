@@ -128,10 +128,10 @@
 <div class="wrap">
 
   <header class="reveal">
-    <p class="eyebrow">defcom5-rockchip <span class="sep">/</span> rockchip-vaapi <span class="sep">·</span> update 2026-08-30</p>
+    <p class="eyebrow">defcom5-rockchip <span class="sep">/</span> rockchip-vaapi <span class="sep">·</span> update 2026-10-09</p>
     <h1>Firefox 4K, no green screen.</h1>
     <div class="tags">
-      <span class="pill on">v2.0.0 "Reframe"</span>
+      <span class="pill on">v2.5.0</span>
       <span class="pill">RK3588 / RK3588S</span>
       <span class="pill">ubuntu-rockchip BSP</span>
       <span class="pill">H.264 · HEVC · VP9</span>
@@ -168,11 +168,11 @@
       <li>
         <div class="body">
           <h3>Install the packaged VA-API driver</h3>
-          <p class="muted">Includes the VP9 green-frame fix. Grab it from the release.</p>
+          <p class="muted">Release 2.5.0. Grab it from the release.</p>
           <div class="term"><div class="bar"><span class="dot"></span><span class="name">bash</span></div><button class="copy">Copy</button><pre>cd /tmp
-wget https://github.com/defcom5-rockchip/rockchip-vaapi/releases/download/v2.0.0/rockchip-vaapi-driver_2.0.0_arm64.deb
-sudo apt install ./rockchip-vaapi-driver_2.0.0_arm64.deb</pre></div>
-          <p class="muted" style="margin-top:10px">Deps complaint? <code>sudo apt install -f</code>. Or download from the <a href="https://github.com/defcom5-rockchip/rockchip-vaapi/releases">Releases page</a>.</p>
+wget https://github.com/defcom5-rockchip/rockchip-vaapi/releases/download/v2.5.0/rockchip-vaapi_2.5.0-1_arm64.deb
+sudo apt install ./rockchip-vaapi_2.5.0-1_arm64.deb</pre></div>
+          <p class="muted" style="margin-top:10px">If apt says <code>librga2</code> or <code>librockchip-mpp1</code> is not installable, add your image's Rockchip multimedia repository first. Or download from the <a href="https://github.com/defcom5-rockchip/rockchip-vaapi/releases">Releases page</a>.</p>
         </div>
       </li>
 

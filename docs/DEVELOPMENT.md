@@ -1,6 +1,6 @@
 # Developer documentation — rockchip-vaapi
 
-> **defcom5 fork status (2026-09-07, v2.1.4).** This file is upstream's design document,
+> **defcom5 fork status (2026-10-09, v2.5.0).** This file is upstream's design document,
 > kept verbatim below because the architecture it describes still holds. The fork has
 > moved on in these places — read [KNOWN-ISSUES.md](../KNOWN-ISSUES.md) and
 > [AGENTS.md](../AGENTS.md) for the current, hardware-verified state:

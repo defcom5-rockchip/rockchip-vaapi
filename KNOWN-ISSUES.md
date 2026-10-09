@@ -4,7 +4,7 @@ Hardware-verified on Orange Pi 5B (RK3588S) unless noted. Reports from other
 RK3588/RK3588S boards are welcome — decode silicon is identical across the two,
 so behaviour should match.
 
-Current as of **v2.0.0 "Reframe"**.
+Current as of **v2.5.0**.
 
 ---
 
@@ -31,7 +31,7 @@ If you saw ghosting or "flicker" on H.264 with any earlier version, it was this.
 
 ## KI-2: HEVC — FIXED, and now advertised (8-bit)
 
-**Status:** fixed on `deep-ink`; `HEVCMain` restored to the advertised list · **Severity:** was total
+**Status:** fixed in v2.1.0; `HEVCMain` advertised since then · **Severity:** was total
 
 HEVC had never decoded through this driver, at any bit depth — there was no HEVC bitstream
 assembler, so the decoder received a stream it could not parse and returned empty (green)
@@ -43,7 +43,7 @@ the decoder's picture buffer and destroys the references B-frames depend on).
 
 Verified pixel-identical to software decode at 8-bit and 10-bit, with a full 12-minute
 4096×1714 Main10 feature playing through end to end. **HEVC Main (8-bit) is now advertised
-and hardware-decodes in both Firefox and Chrome.** Main10 stays unadvertised — see KI-3.
+and hardware-decodes in both Firefox and Chrome.** Main10 is advertised since v2.1.3 — see KI-3.
 
 ## KI-3: 10-bit zero-copy display — FIXED in v2.1.3 (a mistyped fourcc, never the GPU)
 
@@ -88,10 +88,8 @@ changed nothing; the fourcc did.
 
 **Menu:** Main10, High10 and VP9 Profile 2 are advertised by default from v2.1.3.
 `RKVA_HIDE_10BIT=1` restores the 8-bit-only menu for a client that still cannot present
-P010. (Pi Desktop's own Chromium never sees this menu — see KI-6.) The `[tenbit-panfork-guard]`
-mpv profile shipped in the image config is now believed unnecessary: software-decoded
-10-bit also displayed correctly in mpv 0.38 on 2026-09-06; it will be retired with the
-next image once re-measured.
+P010. These measurements were made on panfork (Mesa). On Arm's proprietary Mali GL driver,
+clients that import P010 plane by plane draw it near-black — see KI-11.
 
 **Reproduce the failure on an old build:** `EGL_LOG_LEVEL=debug RKVA_ADVERTISE_ALL=1 mpv
 --hwdec=vaapi <main10 file> 2>&1 | grep "EGL user error"`.
@@ -148,9 +146,11 @@ decode errors and ffmpeg falls back.
 
 ---
 
-## KI-6: Chromium on Pi Desktop does not use this driver — its own decode lane aborted on 10-bit (mitigated in the fork)
+## KI-6: Chromium builds that decode through libv4l-rkmpp do not use this driver — 10-bit aborted there (mitigated in the fork)
 
-**Status:** mitigated outside this driver (defcom5-libv4l-rkmpp v1.8.0-defcom5.1, 2026-09-07) · real 10-bit output in Chromium still open
+**Status:** historical for Pi Desktop — its Chromium moved to the VA-API route in Pi Desktop 2.0.3 and now uses this
+driver (10-bit hardware decode with a correct picture, checked 2026-10-09). Still applies to Chromium builds that decode
+through libv4l-rkmpp.
 
 The `+rkmpp` Chromium shipped on Pi Desktop images (`chromium 132 …+rkmpp`) decodes video through **libv4l-rkmpp**, a V4L2 plug-in that talks to MPP directly. It
 never loads `rockchip_drv_video.so` (verified 2026-09-06: no driver log across an 8-bit and a
@@ -262,6 +262,45 @@ browser streaming (which rebuilds the decoder on quality changes) rarely show it
 **Workaround** if you cannot change the library — costs ~10-17% decode throughput, well clear of real-time:
 
     echo 1 > /proc/mpp_service/rkvdec-core1/disable_work
+
+---
+
+## KI-11: 10-bit draws near-black on Arm's proprietary Mali GL driver — external
+
+**Status:** GL driver bug, not this driver · Mesa (panfork) was unaffected in our tests
+
+Arm's proprietary Mali GL driver (libmali g24p0) imports a `DRM_FORMAT_R16` dma-buf as an integer texture
+(`GL_R16UI`), and a normal shader sampler reads it as 0. Clients that import a P010 frame plane by plane — mpv's
+VA-API zero-copy path and Firefox — therefore draw 10-bit video with no brightness: near-black, only colour left. The
+decoded frames are correct; copy-back draws them right. The newer g29p1 driver is worse: it imports the chroma plane
+(`GR1616`) as an integer texture too. Chrome and Chromium draw 10-bit correctly on the same driver (checked by eye
+with a VP9 Profile 2 clip), probably because they import the whole frame, which the driver converts correctly.
+
+**Workarounds:** mpv `--hwdec=vaapi-copy` (still decoded in hardware). For a client that cannot be told to copy, set
+`RKVA_HIDE_10BIT=1` in that client's environment only, for example `env RKVA_HIDE_10BIT=1 firefox`: it then decodes
+10-bit in software and keeps 8-bit in hardware. Don't set it system-wide; any value, even `0`, hides 10-bit. A client can also copy each 16-bit
+plane into a normal texture on the GPU before drawing (a few milliseconds per 4K frame); that draws 10-bit zero-copy
+correctly.
+
+---
+
+## KI-12: abandoned decoders, several decoders or threads at once — green, black or wrong frames, crashes — FIXED in v2.5.0
+
+**Status:** fixed in v2.5.0 · **v2.2.0 and earlier affected**
+
+- **A player that abandons decoders**, one after another: mpv trying zero-copy, giving up and destroying its decoder
+  within a fraction of a second left about 70 MB of decoder buffers mapped at 4K each time. A looping player exhausted
+  the video decoder's IOMMU after about 55 attempts and the picture went green.
+- **Several decoders on one VA display**, as in Firefox's media process (one display for all videos on a page):
+  decoders starting at the same moment could claim the same internal slot. Frames went to the wrong decoder (black or
+  green tiles), or the process crashed.
+- **Several threads**, as in ffmpeg 8 (decoding and frame download on different threads): image and slice buffers
+  created on different threads could collide ("invalid VABufferID", I/O errors, heap corruption).
+
+Measured on an Orange Pi 5B. Four 10-bit decodes on one VA display, every frame compared with a software decode:
+bit-exact in 55 of 55 runs on the release candidate and 15 of 15 on the final code with hardware decode forced
+(2.2.0: 0 of 20). Abandoned-decoder loops: 10,923 decoders in 60 minutes on the candidate and 1,857 in 10 minutes on
+the final code, with the number of held decoder buffers staying flat (2.2.0: 273 held after 30 seconds).
 
 ---
 

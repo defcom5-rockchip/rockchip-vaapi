@@ -1,7 +1,7 @@
 Source: rockchip-vaapi
 Section: libs
 Priority: optional
-Maintainer: Eduardo García-Mádico Portabella <woodyst@gmail.com>
+Maintainer: defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13),
                libva-dev (>= 2.0),
                librockchip-mpp-dev,
@@ -9,19 +9,25 @@ Build-Depends: debhelper-compat (= 13),
                pkg-config,
                po-debconf
 Standards-Version: 4.6.2
+Homepage: https://github.com/defcom5-rockchip/rockchip-vaapi
 Rules-Requires-Root: no
 
 Package: rockchip-vaapi
 Architecture: arm64
 Depends: ${shlibs:Depends}, ${misc:Depends},
-         libva2,
-         librockchip-mpp1
-Description: VA-API driver for Rockchip RK3588 via MPP
- Hardware video acceleration driver that bridges the VA-API (libva)
- interface to Rockchip MPP (librockchip-mpp1) for the RK3588/RK3576 SoC.
+         libva2 (>= 2.0),
+         librockchip-mpp1,
+         librga2 (>= 2.2.0)
+Provides: rockchip-vaapi-driver
+Replaces: rockchip-vaapi-driver
+Conflicts: rockchip-vaapi-driver
+Description: VA-API video decode driver for Rockchip RK3588 (MPP)
+ Hardware video decode on the RK3588/RK3588S video decoders through
+ Rockchip MPP, offered to applications through VA-API (libva): H.264,
+ HEVC, VP8 and VP9, 8- and 10-bit, with zero-copy DRM PRIME surface
+ export (NV12 and P010). The 10-bit conversion runs on the RGA 2D engine.
+ Needs a Rockchip BSP kernel that provides /dev/mpp_service.
  .
- Enables H.264 hardware decode in applications like Firefox via zero-copy
- DRM PRIME 2 surface export.
- .
- Install LIBVA_DRIVER_NAME=rockchip and point LIBVA_DRIVERS_PATH to
- /usr/lib/aarch64-linux-gnu/dri to use.
+ Also installs panthor_drv_video.so and panfrost_drv_video.so links so
+ libva finds the driver on Panthor/Panfrost GPU stacks. Replaces the
+ earlier rockchip-vaapi-driver package.
