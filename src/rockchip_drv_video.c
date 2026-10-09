@@ -162,6 +162,7 @@ typedef struct {
 typedef struct {
     bool         used;
     VAConfigID   config_id;
+    VAProfile    profile;      /* copied from the config at CreateContext: a client may destroy the config first */
     int          width, height;
 
     MppCtx       mpp;
@@ -200,6 +201,8 @@ typedef struct {
 
 /* Clear a context slot but keep its out_lock (the last member, see above). */
 #define CTX_CLEAR(c) memset((c), 0, offsetof(RKContext, out_lock))
+_Static_assert(offsetof(RKContext, out_lock) + sizeof(pthread_mutex_t) == sizeof(RKContext),
+               "out_lock must be the last member of RKContext: CTX_CLEAR keeps everything after it");
 
 typedef struct {
     bool         used;
@@ -763,12 +766,14 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
 
     for (unsigned i = 0; i < MAX_CONTEXTS; i++) {
         RKContext *c = &d->contexts[i];
+        if (c->used) continue;                 /* busy: don't queue behind its frame copy or teardown */
         pthread_mutex_lock(&c->out_lock);      /* claim: test and mark in one step */
         if (c->used) { pthread_mutex_unlock(&c->out_lock); continue; }
         CTX_CLEAR(c);
         c->mpp       = mpp;
         c->mpi       = mpi;
         c->config_id = config_id;
+        c->profile   = cfg->profile;
         c->width     = width;
         c->height    = height;
         c->coding    = coding;
@@ -1291,7 +1296,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
         uint8_t hdr[512];
         if (is_idr || !c->sps_sent) {
             int n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
-                                   profile_idc(config_by_id(d, c->config_id)->profile));
+                                   profile_idc(c->profile));
             if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
         }
         int n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp, c->h264_l0_minus1, c->h264_l1_minus1);
@@ -1659,6 +1664,13 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
      * (B-frame pipeline priming, slow keyframe), actively drain MPP here
      * instead of sleeping on a cond that will never be signalled. */
     RKContext *c = context_by_id(d, cid);
+    if (!c) {                                  /* destroyed before we got here: nothing will decode it */
+        pthread_mutex_lock(&s->lock);
+        bool ok = s->decoded;
+        pthread_mutex_unlock(&s->lock);
+        LOG("SyncSurface: surface=0x%x context 0x%x no longer exists", id, cid);
+        return ok ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_DECODING_ERROR;
+    }
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += 3;
