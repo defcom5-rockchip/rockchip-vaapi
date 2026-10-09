@@ -238,6 +238,13 @@ typedef struct {
     RKContext  contexts[MAX_CONTEXTS];
     RKSurface  surfaces[MAX_SURFACES];
     RKBuffer   buffers [MAX_BUFFERS];
+    /* Guards claiming and releasing buffer slots. vaCreateBuffer used to find a free slot and mark it used in
+       two unlocked steps; a decoding thread creating slice/parameter buffers and another thread creating image
+       buffers (vaCreateImage/vaDeriveImage, e.g. ffmpeg's hwframe transfer) could claim the same slot. One
+       thread's vaDestroyBuffer then wiped the other's buffer ("invalid VABufferID" on map, "invalid
+       VASurfaceID" from vaGetImage, which reports a missing image buffer that way) or freed a borrowed MPP
+       mapping (malloc(): invalid size / corrupted top size). */
+    pthread_mutex_t buf_lock;
 } RKDriver;
 
 /* ── helpers ─────────────────────────────────────────────────── */
@@ -349,6 +356,7 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     for (int i = 0; i < MAX_BUFFERS; i++) {
         if (d->buffers[i].used) free(d->buffers[i].data);
     }
+    pthread_mutex_destroy(&d->buf_lock);
     free(d);
     ctx->pDriverData = NULL;
     return VA_STATUS_SUCCESS;
@@ -749,6 +757,7 @@ static VAStatus rk_CreateBuffer(VADriverContextP ctx,
     RKDriver *d = drv_from_ctx(ctx);
     (void)context;
 
+    pthread_mutex_lock(&d->buf_lock);
     for (unsigned i = 0; i < MAX_BUFFERS; i++) {
         if (d->buffers[i].used) continue;
         RKBuffer *b = &d->buffers[i];
@@ -759,13 +768,16 @@ static VAStatus rk_CreateBuffer(VADriverContextP ctx,
         b->data         = malloc((size_t)size * num_elements);
         if (!b->data) {
             b->used = false;
+            pthread_mutex_unlock(&d->buf_lock);
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
         if (data) memcpy(b->data, data, (size_t)size * num_elements);
         else      memset(b->data, 0,    (size_t)size * num_elements);
         *out_id = BUFFER_ID_BASE + i;
+        pthread_mutex_unlock(&d->buf_lock);
         return VA_STATUS_SUCCESS;
     }
+    pthread_mutex_unlock(&d->buf_lock);
     return VA_STATUS_ERROR_ALLOCATION_FAILED;
 }
 
@@ -794,10 +806,12 @@ static VAStatus rk_UnmapBuffer(VADriverContextP ctx, VABufferID id) {
 
 static VAStatus rk_DestroyBuffer(VADriverContextP ctx, VABufferID id) {
     RKDriver *d = drv_from_ctx(ctx);
+    pthread_mutex_lock(&d->buf_lock);
     RKBuffer *b = buffer_by_id(d, id);
-    if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
+    if (!b) { pthread_mutex_unlock(&d->buf_lock); return VA_STATUS_ERROR_INVALID_BUFFER; }
     if (!b->borrowed) free(b->data);   /* derived images alias MPP memory */
     memset(b, 0, sizeof(*b));
+    pthread_mutex_unlock(&d->buf_lock);
     return VA_STATUS_SUCCESS;
 }
 
@@ -2147,6 +2161,7 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
     RKDriver *d = calloc(1, sizeof(*d));
     if (!d) return VA_STATUS_ERROR_ALLOCATION_FAILED;
     ctx->pDriverData = d;
+    pthread_mutex_init(&d->buf_lock, NULL);
 
     ctx->version_major        = VA_MAJOR_VERSION;
     ctx->version_minor        = VA_MINOR_VERSION;
