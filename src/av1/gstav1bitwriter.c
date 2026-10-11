@@ -1477,7 +1477,10 @@ _av1_bit_writer_loop_restoration_params (const GstAV1FrameHeaderOBU *
         goto error;
       }
 
-      if (i > 1)
+      /* rockchip-vaapi fix (4): UsesChromaLr is set for either chroma plane (spec 5.9.20: i > 0); upstream
+       * tested i > 1, so a frame with loop restoration on Cb only lost its lr_uv_shift bit and every bit after it
+       * shifted (libaom av1-1-b8-00-quantizer-04 and friends). */
+      if (i > 0)
         use_chroma_lr = 1;
     }
 
