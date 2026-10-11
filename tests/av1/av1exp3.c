@@ -31,7 +31,7 @@
 #include <rockchip/mpp_buffer.h>
 
 /* ---------------- MPP side (as av1mpp.c) ---------------- */
-static FILE *out; static int frames_out, dropped, info_changes, drop_next; static int w, h, hs, vs, fmt10;
+static FILE *out, *idx; static int frames_out, dropped, info_changes, drop_next; static long long cur_pts = -1; static int w, h, hs, vs, fmt10;
 static void dump_frame(MppFrame f) {
     MppBuffer buf = mpp_frame_get_buffer(f); if (!buf) return;
     uint8_t *p = mpp_buffer_get_ptr(buf);
@@ -39,6 +39,7 @@ static void dump_frame(MppFrame f) {
     fmt10 = ((mpp_frame_get_fmt(f) & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP_10BIT);
     if (drop_next) { drop_next = 0; dropped++; return; }
     frames_out++;
+    if (idx) fprintf(idx, "%lld\n", (long long)mpp_frame_get_pts(f));
     if (!out) return;
     int rowb = fmt10 ? hs : w;
     for (int y = 0; y < h; y++) fwrite(p + (size_t)y * hs, 1, rowb, out);
@@ -58,7 +59,7 @@ static int drain(MppCtx ctx, MppApi *mpi, int wait_ms) {
     return got;
 }
 static int put(MppCtx ctx, MppApi *mpi, const uint8_t *data, size_t len) {
-    MppPacket pkt; mpp_packet_init(&pkt, (void *)data, len); int tries = 0; MPP_RET r;
+    MppPacket pkt; mpp_packet_init(&pkt, (void *)data, len); mpp_packet_set_pts(pkt, cur_pts); int tries = 0; MPP_RET r;
     while ((r = mpi->decode_put_packet(ctx, pkt)) != MPP_OK) { if (++tries > 4000) { fprintf(stderr, "put failed %d\n", r); mpp_packet_deinit(&pkt); return -1; } drain(ctx, mpi, 0); usleep(500); }
     mpp_packet_deinit(&pkt); drain(ctx, mpi, 0); return 0;
 }
@@ -91,13 +92,19 @@ static size_t build_frame_obu(const GstAV1FrameHeaderOBU *fh, const GstAV1Sequen
     return n;
 }
 
+/* a FRAME_HEADER OBU with show_existing_frame = 1 for slot `slot`, written by our writer */
+static size_t build_show_existing(const GstAV1FrameHeaderOBU *like, const GstAV1SequenceHeaderOBU *seq, int slot, uint8_t *dst, size_t cap) {
+    GstAV1FrameHeaderOBU se; memset(&se, 0, sizeof se);
+    se.show_existing_frame = 1; se.frame_to_show_map_idx = slot; se.frame_type = like->frame_type; se.show_frame = 1;
+    guint sz = cap; if (gst_av1_bit_writer_frame_header_obu(&se, seq, 0, 0, TRUE, dst, &sz) != GST_AV1_BIT_WRITER_OK) return 0; return sz;
+}
 int main(int argc, char **argv) {
-    const char *outp = NULL, *mask0 = NULL; int report = 0, i;
+    const char *outp = NULL, *mask0 = NULL; int report = 0, sekey = 0, hidden_se = 0, i;
     for (i = 1; i < argc - 1; i++) {
         if (!strcmp(argv[i], "--out")) outp = argv[++i]; else if (!strcmp(argv[i], "--mask0")) mask0 = argv[++i];
-        else if (!strcmp(argv[i], "--report")) report = 1; else break;
+        else if (!strcmp(argv[i], "--report")) report = 1; else if (!strcmp(argv[i], "--sekey")) sekey = 1; else if (!strcmp(argv[i], "--hidden-se")) hidden_se = 1; else break;
     }
-    if (i != argc - 1) { fprintf(stderr, "usage: av1exp3 [--mask0 all|N,..] [--out f] [--report] in.ivf\n"); return 2; }
+    if (i != argc - 1) { fprintf(stderr, "usage: av1exp3 [--mask0 all|N,..] [--sekey] [--hidden-se] [--out f] [--report] in.ivf\n"); return 2; }
     FILE *in = fopen(argv[i], "rb"); if (!in) { perror("open"); return 1; }
     uint8_t ivf[32]; if (fread(ivf, 1, 32, in) != 32 || memcmp(ivf, "DKIF", 4)) { fprintf(stderr, "not IVF\n"); return 1; }
     if (outp) out = fopen(outp, "wb");
@@ -110,7 +117,7 @@ int main(int argc, char **argv) {
 
     GstAV1Parser *parser = gst_av1_parser_new(); GstAV1SequenceHeaderOBU seq; int have_seq = 0;
     uint8_t *buf = malloc(8 << 20), *pkt = malloc(8 << 20), *pkt2 = malloc(8 << 20);
-    int tu = 0, fidx = 0, twice = 0, passthrough = 0, se_key = 0;
+    int tu = 0, fidx = 0, twice = 0, passthrough = 0, se_key = 0, hidden_shown = 0; long long slot_pts[8] = {-1,-1,-1,-1,-1,-1,-1,-1}; FILE *expf = fopen("exp.txt", "w"); idx = fopen("out.idx", "w");
     for (;;) {
         uint8_t fh12[12]; if (fread(fh12, 1, 12, in) != 12) break;
         uint32_t sz = fh12[0] | fh12[1] << 8 | fh12[2] << 16 | (uint32_t)fh12[3] << 24;
@@ -125,7 +132,7 @@ int main(int argc, char **argv) {
             } else if (obu.obu_type == GST_AV1_OBU_FRAME && have_seq) {
                 GstAV1FrameOBU frame;
                 if (gst_av1_parser_parse_frame_obu(parser, &obu, &frame) != GST_AV1_PARSER_OK) { fprintf(stderr, "tu %d: frame parse failed\n", tu); pos += consumed; continue; }
-                GstAV1FrameHeaderOBU *fh = &frame.frame_header;
+                GstAV1FrameHeaderOBU *fh = &frame.frame_header; cur_pts = fidx;
                 /* tile bytes = original payload after the header's byte alignment; header length from our own writer */
                 size_t nb = 0; size_t n = build_frame_obu(fh, &seq, obu.header.obu_temporal_id, obu.header.obu_spatial_id, obu.data, 0, pkt, 8 << 20, &nb);
                 size_t hb = (nb + 7) / 8; const uint8_t *tiles = obu.data + hb; size_t tiles_len = obu.obu_size > hb ? obu.obu_size - hb : 0;
@@ -144,18 +151,41 @@ int main(int argc, char **argv) {
                         if (!n0) { fprintf(stderr, "mask0 rewrite failed at frame %d\n", fidx); }
                         else { put(ctx, mpi, pkt2, n0); settle(ctx, mpi, fh->show_frame); twice++; drop_next = fh->show_frame; }
                     }
-                    n = build_frame_obu(fh, &seq, obu.header.obu_temporal_id, obu.header.obu_spatial_id, tiles, tiles_len, pkt, 8 << 20, NULL);
-                    put(ctx, mpi, pkt, n); if (do_mask0) { settle(ctx, mpi, fh->show_frame); drop_next = 0; }
+                    if (sekey && fh->frame_type == GST_AV1_KEY_FRAME && fh->show_frame && fidx > 0) {
+                        /* experiment 4: a shown KEY frame becomes hidden + showable, then a synthesised show_existing of slot 0 shows it
+                           (spec 7.21: show_existing of a KEY frame refreshes all slots and resets state) */
+                        GstAV1FrameHeaderOBU hk = *fh; hk.show_frame = 0; hk.showable_frame = 1;
+                        n = build_frame_obu(&hk, &seq, obu.header.obu_temporal_id, obu.header.obu_spatial_id, tiles, tiles_len, pkt, 8 << 20, NULL);
+                        put(ctx, mpi, pkt, n);
+                        size_t m = build_show_existing(fh, &seq, 0, pkt2, 8 << 20); if (m) put(ctx, mpi, pkt2, m); se_key++;
+                        fprintf(stderr, "frame %d: KEY rewritten as hidden + show_existing(slot 0)\n", fidx);
+                    } else {
+                        n = build_frame_obu(fh, &seq, obu.header.obu_temporal_id, obu.header.obu_spatial_id, tiles, tiles_len, pkt, 8 << 20, NULL);
+                        put(ctx, mpi, pkt, n); if (do_mask0) { settle(ctx, mpi, fh->show_frame); drop_next = 0; }
+                        if (hidden_se && !fh->show_frame && fh->refresh_frame_flags) {
+                            /* the driver's plan for hidden frames: show the slot it refreshed so MPP outputs the picture for the client's surface;
+                               here the extra output is dropped so the stream can still be compared with dav1d */
+                            int slot = __builtin_ctz(fh->refresh_frame_flags);
+                            size_t m = build_show_existing(fh, &seq, slot, pkt2, 8 << 20);
+                            if (m) { int before = frames_out; put(ctx, mpi, pkt2, m); settle(ctx, mpi, 1);
+                                     if (frames_out == before) fprintf(stderr, "frame %d: hidden, show_existing(slot %d) produced NO output (yet)\n", fidx, slot); else hidden_shown++; }
+                        }
+                    }
                 }
+                if (fh->show_frame && expf) fprintf(expf, "%d\n", fidx);
+                { unsigned m = fh->frame_type == GST_AV1_KEY_FRAME && fh->show_frame ? 0xff : fh->refresh_frame_flags; for (int b = 0; b < 8; b++) if (m & (1u << b)) slot_pts[b] = fidx; }
                 gst_av1_parser_reference_frame_update(parser, fh); fidx++;
             } else if (obu.obu_type == GST_AV1_OBU_FRAME_HEADER && have_seq) {
                 GstAV1FrameHeaderOBU fh;
                 if (gst_av1_parser_parse_frame_header_obu(parser, &obu, &fh) == GST_AV1_PARSER_OK) {
                     if (fh.show_existing_frame && fh.frame_type == GST_AV1_KEY_FRAME) se_key++;
                     if (report) fprintf(stderr, "frame %d (tu %d): FRAME_HEADER type %u show %u se %u (slot %u) refresh 0x%02x\n", fidx, tu, fh.frame_type, fh.show_frame, fh.show_existing_frame, fh.frame_to_show_map_idx, fh.refresh_frame_flags);
+                    if (fh.show_existing_frame && expf) fprintf(expf, "%lld\n", slot_pts[fh.frame_to_show_map_idx]);
+                    if (fh.show_existing_frame && fh.frame_type == GST_AV1_KEY_FRAME) { for (int b = 0; b < 8; b++) slot_pts[b] = slot_pts[fh.frame_to_show_map_idx]; }
                     gst_av1_parser_reference_frame_update(parser, &fh); fidx++;
                 }
-                put(ctx, mpi, buf + pos, consumed); passthrough++;   /* show_existing / standalone headers: pass through unchanged (experiment 4 observes them) */
+                /* a VA-API client never sends show_existing to the driver: in --hidden-se mode the synthesised one after the hidden frame stands in for it */
+                if (!(hidden_se && fh.show_existing_frame && fh.frame_type != GST_AV1_KEY_FRAME)) { cur_pts = fidx - 1; put(ctx, mpi, buf + pos, consumed); passthrough++; }   /* show_existing / standalone headers: pass through unchanged (experiment 4 observes them) */
             } /* TD, metadata, padding, tile lists: dropped */
             pos += consumed;
         }
@@ -164,9 +194,9 @@ int main(int argc, char **argv) {
     while (mpi->decode_put_packet(ctx, eos) != MPP_OK) { drain(ctx, mpi, 0); usleep(500); }
     mpp_packet_deinit(&eos);
     for (int k = 0; k < 3000; k++) { if (drain(ctx, mpi, 0) < 0) break; usleep(1000); }
-    if (out) fclose(out);
-    printf("tu=%d frame_headers=%d frames_out=%d dropped_duplicates=%d submitted_twice=%d passthrough=%d show_existing_key=%d info_changes=%d %dx%d stride=%dx%d %s\n",
-           tu, fidx, frames_out, dropped, twice, passthrough, se_key, info_changes, w, h, hs, vs, fmt10 ? "NV15" : "NV12");
+    if (out) fclose(out); if (idx) fclose(idx); if (expf) fclose(expf);
+    printf("tu=%d frame_headers=%d frames_out=%d dropped_extra=%d submitted_twice=%d passthrough=%d show_existing_key=%d hidden_shown=%d info_changes=%d %dx%d stride=%dx%d %s\n",
+           tu, fidx, frames_out, dropped, twice, passthrough, se_key, hidden_shown, info_changes, w, h, hs, vs, fmt10 ? "NV15" : "NV12");
     mpp_destroy(ctx); mpp_dec_cfg_deinit(cfg); gst_av1_parser_free(parser);
     return 0;
 }
