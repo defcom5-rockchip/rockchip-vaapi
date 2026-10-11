@@ -206,6 +206,8 @@ typedef struct {
         bool        valid;        /* a frame is held back until the next one reveals its refresh_frame_flags */
         bool        forced;       /* already decoded once with refresh_frame_flags = 0 (client synced it early) */
         VASurfaceID surface;
+        VASurfaceID ref_surface;  /* pp.current_frame: how later pictures refer to this one (== surface in every client seen) */
+        VASurfaceID out_surface;  /* where the picture lands: pp.current_display_picture when the client gave a separate one (film grain), else surface */
         VADecPictureParameterBufferAV1 pp;
         uint8_t    *tiles_buf;    /* copies of the tile payloads (the client destroys its buffers after EndPicture) */
         size_t      tiles_len, tiles_cap;
@@ -1714,7 +1716,7 @@ static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VA
 }
 
 /* Decode the held picture with refresh_frame_flags = mask.  forced_only: this is the early (mask 0) decode. */
-static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask) {
+static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_show) {
     typeof(c->av1_pending) *p = &c->av1_pending;
     const VADecPictureParameterBufferAV1 *pp = &p->pp;
     Av1RefInfo refs[8];
@@ -1735,23 +1737,30 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask) {
         LOG("av1: sequence header %zu bytes (%ux%u %d-bit)", sn, c->av1_seq.max_frame_width_minus_1 + 1, c->av1_seq.max_frame_height_minus_1 + 1, c->av1_seq.bit_depth);
     }
     GstAV1FrameHeaderOBU fh;
+    /* an early-synced HIDDEN picture: the client wants its pixels now (it is showing it via show_existing), so decode it
+       as a shown frame with refresh_frame_flags = 0 — same picture, nothing refreshed; the real (hidden) header follows
+       later if the successor shows it was a reference */
+    if (force_show) hidden = false;
     if (av1_frame_from_va(pp, &c->av1_seq, refs, mask, &fh) < 0) { LOG("av1: frame uses an unsupported feature (superres/large-scale tile/intra-only refresh)"); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
+    if (force_show && !fh.show_frame) { fh.show_frame = 1; if (fh.frame_type == GST_AV1_KEY_FRAME) fh.refresh_frame_flags = 0xff; }
+    if (getenv("RKVA_AV1_NO_GRAIN")) fh.film_grain_params.apply_grain = 0;   /* experiment switch: send frames without film grain */
     size_t fn = av1_write_frame_obu(&fh, &c->av1_seq, p->tiles, p->ntiles, buf + n, cap - n);
     if (!fn) { LOG("av1: frame header write failed"); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
     n += fn;
     bool will_output = !hidden || mask != 0;      /* hidden + a slot = shown via show_existing below */
-    LOG("av1: submit surface=0x%x type=%u show=%u mask=0x%02x tiles=%d bytes=%zu%s", (unsigned)p->surface, fh.frame_type, fh.show_frame, mask, p->ntiles, n, p->forced ? " (re-submit)" : "");
+    LOG("av1: submit surface=0x%x type=%u show=%u mask=0x%02x tiles=%d bytes=%zu%s%s", (unsigned)p->surface, fh.frame_type, fh.show_frame, mask, p->ntiles, n, p->forced ? " (re-submit)" : "", force_show ? " (forced early)" : "");
     const char *dump = getenv("RKVA_DUMP_AV1");
     if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(buf, 1, n, df); fclose(df); } }
-    VAStatus st = av1_put(c, d, buf, n, p->surface, !hidden);
+    VAStatus st = av1_put(c, d, buf, n, p->out_surface, !hidden);
     if (st == VA_STATUS_SUCCESS && hidden && mask) {
         uint8_t se[64]; size_t sn = av1_write_show_existing(&c->av1_seq, __builtin_ctz(mask), fh.frame_type, se, sizeof se);
-        if (sn) { if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(se, 1, sn, df); fclose(df); } } st = av1_put(c, d, se, sn, p->surface, true); }
+        if (sn) { if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(se, 1, sn, df); fclose(df); } } st = av1_put(c, d, se, sn, p->out_surface, true); }
     }
     free(buf);
     if (st != VA_STATUS_SUCCESS) return st;
-    if (!will_output) av1_mark_decoded(d, p->surface);                   /* nothing will ever come out for it */
-    RKSurface *me = surface_by_id(d, p->surface);
+    if (!will_output) av1_mark_decoded(d, p->out_surface);               /* nothing will ever come out for it */
+    if (p->out_surface != p->surface) av1_mark_decoded(d, p->surface);   /* film grain: the reconstruct surface is never read */
+    RKSurface *me = surface_by_id(d, p->ref_surface);
     if (me) { av1_ref_from_frame(pp, &fh, &me->av1); me->av1_mask = mask; }
     return VA_STATUS_SUCCESS;
 }
@@ -1766,10 +1775,10 @@ static uint8_t av1_mask_from_successor(const VADecPictureParameterBufferAV1 *nex
 static VAStatus av1_resolve_pending(RKContext *c, RKDriver *d, const VADecPictureParameterBufferAV1 *next) {
     typeof(c->av1_pending) *p = &c->av1_pending;
     if (!p->valid) return VA_STATUS_SUCCESS;
-    uint8_t mask = next ? av1_mask_from_successor(next, p->surface) : 0;
+    uint8_t mask = next ? av1_mask_from_successor(next, p->ref_surface) : 0;
     VAStatus st = VA_STATUS_SUCCESS;
-    if (!p->forced || mask) st = av1_submit(c, d, mask);               /* forced + mask 0: the early decode was final */
-    else { RKSurface *me = surface_by_id(d, p->surface); if (me) me->av1_mask = 0; }
+    if (!p->forced || mask) st = av1_submit(c, d, mask, false);        /* forced + mask 0: the early decode was final */
+    else { RKSurface *me = surface_by_id(d, p->ref_surface); if (me) me->av1_mask = 0; }
     p->valid = false; p->forced = false;
     return st;
 }
@@ -1777,11 +1786,11 @@ static VAStatus av1_resolve_pending(RKContext *c, RKDriver *d, const VADecPictur
 /* vaSyncSurface on the held picture: decode it now with refresh_frame_flags = 0. */
 static void av1_force_pending(RKContext *c, RKDriver *d, VASurfaceID sid) {
     typeof(c->av1_pending) *p = &c->av1_pending;
-    if (!p->valid || p->surface != sid) return;                 /* cheap pre-check; re-checked under the lock */
+    if (!p->valid || (p->surface != sid && p->ref_surface != sid && p->out_surface != sid)) return;   /* cheap pre-check; re-checked under the lock */
     pthread_mutex_lock(&c->av1_lock);
-    if (p->valid && !p->forced && p->surface == sid) {
+    if (p->valid && !p->forced && (p->surface == sid || p->ref_surface == sid || p->out_surface == sid)) {
         LOG("av1: early sync of surface 0x%x — decoding with refresh_frame_flags=0 first", (unsigned)sid);
-        if (av1_submit(c, d, 0) == VA_STATUS_SUCCESS) p->forced = true;
+        if (av1_submit(c, d, 0, true) == VA_STATUS_SUCCESS) p->forced = true;
     }
     pthread_mutex_unlock(&c->av1_lock);
 }
@@ -1839,9 +1848,26 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
     if (p->ntiles != (int)pp->tile_cols * (int)pp->tile_rows)
         LOG("av1: NOTE %d tiles delivered, header says %u x %u", p->ntiles, pp->tile_cols, pp->tile_rows);
     p->pp = *pp; p->surface = c->render_target; p->valid = true;
+    /* Film grain: VA-API renders the (grained) output into the render target and keeps the un-grained picture in
+       pp->current_frame, which is what ref_frame_map points at later.  Slot bookkeeping follows current_frame. */
+    p->ref_surface = (pp->current_frame != VA_INVALID_SURFACE && surface_by_id(d, pp->current_frame)) ? pp->current_frame : c->render_target;
+    if (p->ref_surface != p->surface) LOG("av1: NOTE render target 0x%x is not current_frame 0x%x", (unsigned)p->surface, (unsigned)p->ref_surface);
+    /* Film grain: the client renders into current_frame (its reference copy, reused freely between pictures) and
+       reads current_display_picture, where VA-API wants the grained picture.  MPP applies no grain on RK3588 and
+       keeps its own references, so the decoded picture goes to the display surface (un-grained, see the docs) and
+       the reconstruct surface is only marked decoded.  Arm the display surface so a sync on it waits. */
+    p->out_surface = c->render_target;
+    if (pp->current_display_picture != VA_INVALID_SURFACE && pp->current_display_picture != c->render_target) {
+        RKSurface *ds = surface_by_id(d, pp->current_display_picture);
+        if (ds) {
+            p->out_surface = pp->current_display_picture;
+            pthread_mutex_lock(&ds->lock); ds->decoded = false; ds->ctx_id = (VAContextID)(CONTEXT_ID_BASE + (unsigned)(c - d->contexts)); pthread_mutex_unlock(&ds->lock);
+            LOG("av1: film grain: picture for 0x%x lands on display surface 0x%x", (unsigned)p->surface, (unsigned)p->out_surface);
+        }
+    }
     /* 3. a shown KEY frame refreshes every slot by definition: no need to wait */
     if (pp->pic_info_fields.bits.frame_type == 0 && pp->pic_info_fields.bits.show_frame) {
-        st = av1_submit(c, d, 0xff); p->valid = false; return st;
+        st = av1_submit(c, d, 0xff, false); p->valid = false; return st;
     }
     return VA_STATUS_SUCCESS;                                          /* held until the next picture (or a sync) */
 }
