@@ -271,6 +271,7 @@ typedef struct {
     unsigned int   num_elements;
     void          *data;
     bool           borrowed;   /* data points into an MPP buffer: do not free */
+    unsigned short img_w, img_h; /* VAImage buffers: the size the image was created with (bounds for GetImage) */
 } RKBuffer;
 
 typedef struct {
@@ -1085,6 +1086,15 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
        Re-stride here instead: read with src_hs, write with dst_hs. */
     int dst_hs = s->hstride ? s->hstride : copy_w;
     int dst_vs = s->vstride ? s->vstride : copy_h;
+    /* A picture larger than the surface was created for (AV1 sequence change inside one VA context, libaom
+       av1-1-b8-03-sizeup) must never be copied past the placeholder: clamp, and tell the log.  The client sees
+       a cropped picture rather than a corrupted heap. */
+    if (copy_w > dst_hs || copy_h > dst_vs) {
+        LOG("assign_mpp_frame: WARNING surface=0x%x holds %dx%d but MPP decoded %dx%d — cropping",
+            (unsigned)sid, dst_hs, dst_vs, copy_w, copy_h);
+        if (copy_w > dst_hs) copy_w = dst_hs;
+        if (copy_h > dst_vs) copy_h = dst_vs;
+    }
 #ifdef HAVE_RGA
     /* Offload the plane copy to RGA, the RK3588 2D blitter, which handles
        strided NV12->NV12 in hardware, dma-buf to dma-buf.  At 4K the CPU
@@ -1249,8 +1259,8 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         LOG("assign_mpp_frame: WARNING surface=0x%x created as %d-bit but decoded frame is %d-bit — "
             "a client that exported before decode holds a stale descriptor",
             sid, s->rt_10bit ? 10 : 8, MPP_FRAME_FMT_IS_YUV_10BIT(ffmt) ? 10 : 8);
-    if (fwidth  > 0) s->width   = fwidth;
-    if (fheight > 0) s->height  = fheight;
+    if (fwidth  > 0) s->width   = copy_w;   /* clamped above: never beyond the exported layout */
+    if (fheight > 0) s->height  = copy_h;
     /* hstride/vstride are deliberately NOT updated from the MPP frame: they
        describe the layout already handed to the client by ExportSurfaceHandle.
        Changing them would desynchronise the importer's view of the buffer.
@@ -1752,7 +1762,19 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
     const char *dump = getenv("RKVA_DUMP_AV1");
     if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(buf, 1, n, df); fclose(df); } }
     VAStatus st = av1_put(c, d, buf, n, p->out_surface, !hidden);
-    if (st == VA_STATUS_SUCCESS && hidden && mask) {
+    if (st == VA_STATUS_SUCCESS && hidden && mask && fh.frame_type == GST_AV1_KEY_FRAME) {
+        /* A hidden KEY frame (libaom forward keyframes, Chromium 48delayed): show_existing of a KEY makes the decoder
+           refresh every slot and reset — the stream only does that when it really shows it later.  For the client's
+           copy decode the same tiles again as a shown INTRA_ONLY frame with refresh_frame_flags = 0: identical intra
+           coding, no reference side effects. */
+        GstAV1FrameHeaderOBU fi = fh; fi.frame_type = GST_AV1_INTRA_ONLY_FRAME; fi.show_frame = 1; fi.showable_frame = 0; fi.refresh_frame_flags = 0;
+        size_t cap2 = p->tiles_len + 65536 + 4 * (size_t)p->ntiles + 64; uint8_t *b2 = malloc(cap2);
+        size_t n2 = b2 ? av1_write_frame_obu(&fi, &c->av1_seq, p->tiles, p->ntiles, b2, cap2) : 0;
+        if (!n2) { LOG("av1: hidden KEY: intra-only copy header write failed"); free(b2); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
+        LOG("av1: hidden KEY surface=0x%x: output copy as shown INTRA_ONLY (%zu bytes)", (unsigned)p->surface, n2);
+        if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(b2, 1, n2, df); fclose(df); } }
+        st = av1_put(c, d, b2, n2, p->out_surface, true); free(b2);
+    } else if (st == VA_STATUS_SUCCESS && hidden && mask) {
         uint8_t se[64]; size_t sn = av1_write_show_existing(&c->av1_seq, __builtin_ctz(mask), fh.frame_type, se, sizeof se);
         if (sn) { if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(se, 1, sn, df); fclose(df); } } st = av1_put(c, d, se, sn, p->out_surface, true); }
     }
@@ -2153,6 +2175,7 @@ static VAStatus rk_CreateImage(VADriverContextP ctx,
     VAStatus st = rk_CreateBuffer(ctx, 0, VAImageBufferType, size, 1,
                                   NULL, &buf_id);
     if (st != VA_STATUS_SUCCESS) return st;
+    { RKBuffer *ib = buffer_by_id(drv_from_ctx(ctx), buf_id); if (ib) { ib->img_w = (unsigned short)width; ib->img_h = (unsigned short)height; } }
 
     memset(image, 0, sizeof(*image));
     image->image_id    = buf_id; /* reuse buf_id as image_id for simplicity */
@@ -2248,19 +2271,25 @@ static VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
     int vs  = s->vstride ? s->vstride : s->height;
     bool i10 = surf_is_10bit(s);
     int bpp  = i10 ? 2 : 1;
-    /* image stride matches rk_CreateImage: (width+15)&~15 */
-    int img_hs = (int)(((unsigned int)s->width + 15u) & ~15u) * bpp;
+    /* The image has its own size (what the client asked vaCreateImage for) and stride ((width+15)&~15, as in
+       rk_CreateImage); the surface may hold a picture of another size after an AV1 sequence change.  Copy the
+       overlap only — never past either buffer (libaom av1-1-b8-03-sizeup corrupted the heap here). */
+    int img_w  = ib->img_w ? ib->img_w : s->width, img_h = ib->img_h ? ib->img_h : s->height;
+    int img_hs = (int)(((unsigned int)img_w + 15u) & ~15u) * bpp;
+    int rows   = img_h < s->height ? img_h : s->height; if (rows > vs) rows = vs;
+    size_t row = (size_t)(img_hs < hs * bpp ? img_hs : hs * bpp);
+    if ((size_t)img_hs * (size_t)img_h * 3 / 2 > ib->size) return VA_STATUS_ERROR_INVALID_IMAGE;
 
     const uint8_t *sp = (const uint8_t *)mpp_buffer_get_ptr(s->priv_buf);
     uint8_t       *dp = (uint8_t *)ib->data;
     /* Y plane */
-    for (int r = 0; r < s->height; r++)
-        memcpy(dp + r * img_hs, sp + r * hs * bpp, (size_t)img_hs);
-    /* UV plane: src at hs*vs, dst at img_hs*height */
+    for (int r = 0; r < rows; r++)
+        memcpy(dp + (size_t)r * img_hs, sp + (size_t)r * hs * bpp, row);
+    /* UV plane: src at hs*vs, dst at img_hs*img_h */
     const uint8_t *su = sp + (size_t)hs * vs * bpp;
-    uint8_t       *du = dp + (size_t)img_hs * s->height;
-    for (int r = 0; r < s->height / 2; r++)
-        memcpy(du + r * img_hs, su + r * hs * bpp, (size_t)img_hs);
+    uint8_t       *du = dp + (size_t)img_hs * img_h;
+    for (int r = 0; r < rows / 2; r++)
+        memcpy(du + (size_t)r * img_hs, su + (size_t)r * hs * bpp, row);
     return VA_STATUS_SUCCESS;
 }
 

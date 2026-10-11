@@ -1067,7 +1067,8 @@ _av1_bit_writer_tile_info (const GstAV1FrameHeaderOBU * frame_header,
       size_sb = tile_info->mi_col_starts[i + 1] - tile_info->mi_col_starts[i];
       size_sb = size_sb >> sb_shift;
       widest_tile_sb = MAX (size_sb, widest_tile_sb);
-      if (_av1_write_uniform (bw, MIN (width_sb, max_tile_width_sb),
+      /* rockchip-vaapi fix (6): _av1_write_uniform returns TRUE on success; upstream treated that as the error */
+      if (!_av1_write_uniform (bw, MIN (width_sb, max_tile_width_sb),
               size_sb - 1, &have_space))
         goto error;
 
@@ -1090,7 +1091,7 @@ _av1_bit_writer_tile_info (const GstAV1FrameHeaderOBU * frame_header,
     for (i = 0; i < tile_info->tile_rows; i++) {
       size_sb = tile_info->mi_row_starts[i + 1] - tile_info->mi_row_starts[i];
       size_sb = size_sb >> sb_shift;
-      if (_av1_write_uniform (bw, MIN (height_sb, max_tile_height_sb),
+      if (!_av1_write_uniform (bw, MIN (height_sb, max_tile_height_sb),
               size_sb - 1, &have_space))
         goto error;
 
@@ -1494,11 +1495,13 @@ _av1_bit_writer_loop_restoration_params (const GstAV1FrameHeaderOBU *
     if (seq_header->use_128x128_superblock) {
       WRITE_BITS (bw, lr_params->lr_unit_shift - 1, 1);
     } else {
-      WRITE_BITS (bw, 1, 1);
-
-      if (lr_params->lr_unit_shift > 1)
+      /* rockchip-vaapi fix (5): lr_unit_shift f(1), then lr_unit_extra_shift f(1) whenever that bit is 1
+       * (spec 5.9.20).  Upstream wrote a lone 1 for shift 1 (the parser then ate the next field's bit as the
+       * extra shift) and could not express shift 0 at all. */
+      WRITE_BITS (bw, lr_params->lr_unit_shift ? 1 : 0, 1);
+      if (lr_params->lr_unit_shift)
         /* lr_unit_extra_shift */
-        WRITE_BITS (bw, 1, 1);
+        WRITE_BITS (bw, lr_params->lr_unit_shift > 1 ? 1 : 0, 1);
     }
 
     if (seq_header->color_config.subsampling_x

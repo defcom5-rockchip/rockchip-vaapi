@@ -6,6 +6,7 @@
  */
 #include "av1.h"
 #include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
 
 /* ------------------------------------------------------------------ small helpers */
@@ -140,11 +141,14 @@ static int fill_tile_info(const VADecPictureParameterBufferAV1 *pp, const GstAV1
         i = 0; for (int st = 0; st < sb_rows; st += th) ti->mi_row_starts[i++] = st << sb_shift; ti->mi_row_starts[i] = mi_rows;
     } else {
         int start = 0;
+        if (rkva_av1_writer_debug) { fprintf(stderr, "av1: non-uniform tiles %dx%d (sb %dx%d, mi %dx%d) w_sbs-1:", cols, rows, sb_cols, sb_rows, mi_cols, mi_rows); for (int i = 0; i < cols; i++) fprintf(stderr, " %u", pp->width_in_sbs_minus_1[i]); fprintf(stderr, " h_sbs-1:"); for (int i = 0; i < rows; i++) fprintf(stderr, " %u", pp->height_in_sbs_minus_1[i]); fputc('\n', stderr); }
         for (int i = 0; i < cols; i++) { ti->mi_col_starts[i] = start << sb_shift; start += pp->width_in_sbs_minus_1[i] + 1; }
-        ti->mi_col_starts[cols] = mi_cols;
+        /* the writer sizes each tile as (next start - start) >> sb_shift, so the last entry is the superblock-aligned
+           end, not MiCols (720 px: 11 SBs of 12 otherwise, and the writer refuses the frame) */
+        ti->mi_col_starts[cols] = sb_cols << sb_shift;
         start = 0;
         for (int i = 0; i < rows; i++) { ti->mi_row_starts[i] = start << sb_shift; start += pp->height_in_sbs_minus_1[i] + 1; }
-        ti->mi_row_starts[rows] = mi_rows;
+        ti->mi_row_starts[rows] = sb_rows << sb_shift;
         ti->tile_cols_log2 = tile_log2(1, cols); ti->tile_rows_log2 = tile_log2(1, rows);
     }
     return 0;
@@ -213,7 +217,10 @@ int av1_frame_from_va(const VADecPictureParameterBufferAV1 *pp, const GstAV1Sequ
     if (sg->segmentation_enabled) {
         if (fh->primary_ref_frame == GST_AV1_PRIMARY_REF_NONE) { sg->segmentation_update_map = 1; sg->segmentation_temporal_update = 0; }
         else { sg->segmentation_update_map = pp->seg_info.segment_info_fields.bits.update_map; sg->segmentation_temporal_update = sg->segmentation_update_map ? pp->seg_info.segment_info_fields.bits.temporal_update : 0; }
-        sg->segmentation_update_data = 1;
+        /* update_data = 0 means "keep the primary reference frame's segmentation" and VA's feature arrays are then
+           not meaningful (FFmpeg hands zeros); MPP loads them from its own reference state, so pass the flag through.
+           With no primary reference frame the spec implies 1 (not coded). */
+        sg->segmentation_update_data = (fh->primary_ref_frame == GST_AV1_PRIMARY_REF_NONE) ? 1 : pp->seg_info.segment_info_fields.bits.update_data;
         for (int i = 0; i < 8; i++) for (int j = 0; j < 8; j++) {
             sg->feature_enabled[i][j] = (pp->seg_info.feature_mask[i] >> j) & 1;
             sg->feature_data[i][j] = sg->feature_enabled[i][j] ? pp->seg_info.feature_data[i][j] : 0;
@@ -344,6 +351,7 @@ size_t av1_write_seq_obu(const GstAV1SequenceHeaderOBU *seq, uint8_t *dst, size_
 
 size_t av1_write_frame_obu(const GstAV1FrameHeaderOBU *fh, const GstAV1SequenceHeaderOBU *seq,
                            const Av1Tile *tiles, int ntiles, uint8_t *dst, size_t cap) {
+    { static int once; if (!once) { const char *e = getenv("RKVA_AV1_WRITER_DEBUG"); rkva_av1_writer_debug = e ? atoi(e) : 0; once = 1; } }
     uint8_t tmp[1 << 16]; guint tsz = sizeof tmp;
     if (ntiles < 1) return 0;
     if (gst_av1_bit_writer_frame_header_obu(fh, seq, 0, 0, TRUE, tmp, &tsz) != GST_AV1_BIT_WRITER_OK) return 0;
