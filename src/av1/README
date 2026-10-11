@@ -1,0 +1,14 @@
+AV1 OBU writer vendored from GStreamer
+======================================
+gstav1bitwriter.c, gstav1bitwriter.h and gstav1parser.h are copied unmodified (apart from their #include lines, which
+now point at gstcompat.h) from GStreamer 1.28.2, subprojects/gst-plugins-bad/gst-libs/gst/codecparsers/.
+Copyright (C) 2022 Intel Corporation; licence LGPL-2.0-or-later (see the file headers). gstcompat.h/.c supply the small
+subset of GLib and GstBitWriter they need, so no GLib or GStreamer is linked.
+
+Why: rockchip-vaapi must hand Rockchip MPP a complete AV1 OBU stream, but VA-API clients deliver only parsed
+parameters and tile payloads, so the sequence and frame headers are regenerated from VADecPictureParameterBufferAV1
+(see docs and the av1-research notes). Round trip verified 2026-10-11: every sequence and frame header of four
+SVT-AV1 test streams (8-bit, 10-bit, film grain) re-written bit-exactly.
+
+Update: fetch the three files from the GStreamer tag you want, re-apply the include edits, rebuild, re-run the round
+trip test (tests/av1rt).
