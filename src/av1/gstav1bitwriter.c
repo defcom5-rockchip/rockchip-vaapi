@@ -1193,12 +1193,46 @@ _av1_bit_writer_segmentation_params (const GstAV1FrameHeaderOBU * frame_header,
     *segmentation_offset = gst_bit_writer_get_size (bw);
 
   /* TODO: segmentation support. */
-  if (frame_header->segmentation_params.segmentation_enabled) {
-    GST_WARNING ("segmentation is not supported now");
-    goto error;
-  }
+  /* rockchip-vaapi addition: spec 5.9.14 segmentation_params(); GStreamer's copy refused segmentation. */
+  {
+    const GstAV1SegmentationParams *seg = &frame_header->segmentation_params;
+    static const guint8 feature_bits[GST_AV1_SEG_LVL_MAX] = { 8, 6, 6, 6, 6, 3, 0, 0 };
+    static const guint8 feature_signed[GST_AV1_SEG_LVL_MAX] = { 1, 1, 1, 1, 1, 0, 0, 0 };
+    static const gint16 feature_max[GST_AV1_SEG_LVL_MAX] = { 255, 63, 63, 63, 63, 7, 0, 0 };
+    gint i, j;
 
-  WRITE_BITS (bw, frame_header->segmentation_params.segmentation_enabled, 1);
+    WRITE_BITS (bw, seg->segmentation_enabled, 1);
+    if (seg->segmentation_enabled) {
+      gboolean update_data = TRUE;
+      if (frame_header->primary_ref_frame != GST_AV1_PRIMARY_REF_NONE) {
+        WRITE_BITS (bw, seg->segmentation_update_map, 1);
+        if (seg->segmentation_update_map)
+          WRITE_BITS (bw, seg->segmentation_temporal_update, 1);
+        WRITE_BITS (bw, seg->segmentation_update_data, 1);
+        update_data = seg->segmentation_update_data;
+      }
+      if (update_data) {
+        for (i = 0; i < GST_AV1_MAX_SEGMENTS; i++) {
+          for (j = 0; j < GST_AV1_SEG_LVL_MAX; j++) {
+            gint16 v = seg->feature_data[i][j];
+            WRITE_BITS (bw, seg->feature_enabled[i][j] ? 1 : 0, 1);
+            if (!seg->feature_enabled[i][j])
+              continue;
+            if (feature_signed[j]) {
+              if (v > feature_max[j]) v = feature_max[j];
+              if (v < -feature_max[j]) v = -feature_max[j];
+              if (!_av1_write_su (bw, v, feature_bits[j], &have_space))   /* su(1+bits): the helper adds the sign bit */
+                goto error;
+            } else if (feature_bits[j]) {
+              if (v > feature_max[j]) v = feature_max[j];
+              if (v < 0) v = 0;
+              WRITE_BITS (bw, v, feature_bits[j]);
+            }
+          }
+        }
+      }
+    }
+  }
 
   *space = TRUE;
   return TRUE;
@@ -1304,8 +1338,9 @@ _av1_bit_writer_loop_filter_params (const GstAV1FrameHeaderOBU * frame_header,
       for (i = 0; i < GST_AV1_TOTAL_REFS_PER_FRAME; i++) {
         /* If loop_filter_ref_deltas[i] is different from default
            value, we update it. */
-        update_ref_deltas = (lf_params->loop_filter_ref_deltas[i] !=
-            default_loop_filter_ref_deltas[i]);
+        /* rockchip-vaapi: always update (values are effective, not deltas against a reference) */
+        update_ref_deltas = TRUE;
+        (void) default_loop_filter_ref_deltas;
 
         WRITE_BITS (bw, update_ref_deltas, 1);
 
@@ -1319,7 +1354,7 @@ _av1_bit_writer_loop_filter_params (const GstAV1FrameHeaderOBU * frame_header,
       for (i = 0; i < 2; i++) {
         /* If loop_filter_mode_deltas[i] is different from default
            value, we update it. */
-        update_ref_deltas = (lf_params->loop_filter_mode_deltas[i] != 0);
+        update_ref_deltas = TRUE;   /* rockchip-vaapi: always update, see above */
 
         WRITE_BITS (bw, update_ref_deltas, 1);
 
@@ -1520,7 +1555,8 @@ _av1_bit_writer_global_motion_params (const GstAV1FrameHeaderOBU * frame_header,
     goto success;
 
   if (frame_header->primary_ref_frame != GST_AV1_PRIMARY_REF_NONE) {
-    memcpy (prev_gm_params, &frame_header->ref_global_motion_params,
+    /* rockchip-vaapi fix: copy the gm_params array, not the struct (whose first members are the is_global flags) */
+    memcpy (prev_gm_params, frame_header->ref_global_motion_params.gm_params,
         sizeof (gint32) * GST_AV1_NUM_REF_FRAMES * 6);
   } else {
     for (ref = GST_AV1_REF_INTRA_FRAME; ref < GST_AV1_NUM_REF_FRAMES; ref++)

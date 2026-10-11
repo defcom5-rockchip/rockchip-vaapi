@@ -74,21 +74,47 @@ static size_t leb128_write(uint8_t *p, uint64_t v) { size_t n = 0; do { uint8_t 
 static size_t leb128(const uint8_t *p, size_t n, uint64_t *v) { *v = 0; for (size_t i = 0; i < 8 && i < n; i++) { *v |= (uint64_t)(p[i] & 0x7f) << (7 * i); if (!(p[i] & 0x80)) return i + 1; } return 0; }
 static size_t header_bits(const uint8_t *p, size_t len) { for (size_t i = len; i-- > 0;) if (p[i]) { int b = 0; while (!(p[i] & (1u << b))) b++; return i * 8 + (7 - b); } return 0; }
 
-/* Build an OBU_FRAME packet: header bits from our writer (given the header struct), byte-aligned, + tile bytes. */
-static size_t build_frame_obu(const GstAV1FrameHeaderOBU *fh, const GstAV1SequenceHeaderOBU *seq, uint8_t tid, uint8_t sid,
-                              const uint8_t *tiles, size_t tiles_len, uint8_t *dst, size_t dst_cap, size_t *hdr_bits_out) {
+/* SavedGmParams per reference slot (spec 7.20/7.21): what the decoder uses as PrevGmParams via primary_ref_frame */
+static int32_t saved_gm[8][8][6]; static int saved_gm_init = 0;
+static void gm_defaults(int32_t gm[8][6]) { for (int r = 0; r < 8; r++) for (int i = 0; i < 6; i++) gm[r][i] = (i % 3 == 2) ? (1 << 16) : 0; }
+static void gm_prepare(GstAV1FrameHeaderOBU *fh) {   /* fill ref_global_motion_params from the primary reference's saved params */
+    if (!saved_gm_init) { for (int s = 0; s < 8; s++) gm_defaults(saved_gm[s]); saved_gm_init = 1; }
+    if (fh->primary_ref_frame == GST_AV1_PRIMARY_REF_NONE || fh->frame_is_intra) gm_defaults(fh->ref_global_motion_params.gm_params);
+    else memcpy(fh->ref_global_motion_params.gm_params, saved_gm[fh->ref_frame_idx[fh->primary_ref_frame]], sizeof saved_gm[0]);
+}
+static void gm_save(const GstAV1FrameHeaderOBU *fh) {   /* after the frame: slots it refreshes get its gm params (identity for intra frames) */
+    int32_t cur[8][6]; if (fh->frame_is_intra) gm_defaults(cur); else memcpy(cur, fh->global_motion_params.gm_params, sizeof cur);
+    unsigned m = (fh->frame_type == GST_AV1_KEY_FRAME && fh->show_frame) ? 0xff : fh->refresh_frame_flags;
+    for (int b = 0; b < 8; b++) if (m & (1u << b)) memcpy(saved_gm[b], cur, sizeof cur);
+}
+
+/* One tile's payload as the driver receives it from VA-API: a span of bytes, no size field. */
+typedef struct { const uint8_t *data; size_t len; } Tile;
+
+/* Build an OBU_FRAME packet: header bits from our writer (tile_size_bytes forced to 4), byte-aligned, then every tile
+ * except the last prefixed by its 4-byte little-endian size (tile_start_and_end_present_flag = 0: one group, all tiles). */
+static size_t build_frame_obu(const GstAV1FrameHeaderOBU *fh_in, const GstAV1SequenceHeaderOBU *seq, uint8_t tid, uint8_t sid,
+                              const Tile *tiles, int ntiles, uint8_t *dst, size_t dst_cap, size_t *hdr_bits_out) {
     static uint8_t tmp[1 << 16]; guint tsz = sizeof(tmp);
-    if (gst_av1_bit_writer_frame_header_obu(fh, seq, tid, sid, TRUE, tmp, &tsz) != GST_AV1_BIT_WRITER_OK) return 0;
+    GstAV1FrameHeaderOBU fh = *fh_in; fh.tile_info.tile_size_bytes_minus_1 = 3; fh.tile_info.tile_size_bytes = 4;
+    if (gst_av1_bit_writer_frame_header_obu(&fh, seq, tid, sid, TRUE, tmp, &tsz) != GST_AV1_BIT_WRITER_OK) return 0;
     int ext = (tmp[0] >> 2) & 1; size_t off = 1 + ext; uint64_t psz; size_t l = leb128(tmp + off, tsz - off, &psz);
     const uint8_t *p = tmp + off + l; size_t nb = header_bits(p, psz), hb = (nb + 7) / 8;
     if (hdr_bits_out) *hdr_bits_out = nb;
-    uint8_t hdr[sizeof(tmp)]; memcpy(hdr, p, hb); if (nb % 8) hdr[hb - 1] &= (uint8_t)(0xff << (8 - nb % 8));   /* byte_alignment(): zeros */
-    size_t payload = hb + tiles_len, n = 0;
+    /* tile_group_obu(): with NumTiles > 1 a tile_start_and_end_present_flag bit (0) + byte_alignment() precede the tiles = one zero byte */
+    size_t tg_hdr = ntiles > 1 ? 1 : 0;
+    size_t payload = hb + tg_hdr; for (int i = 0; i < ntiles; i++) payload += tiles[i].len + (i + 1 < ntiles ? 4 : 0);
     if (payload + 16 > dst_cap) return 0;
+    size_t n = 0;
     dst[n++] = (uint8_t)((6 << 3) | (ext << 2) | 0x02);                /* OBU_FRAME, has_size_field */
     if (ext) dst[n++] = tmp[1];
     n += leb128_write(dst + n, payload);
-    memcpy(dst + n, hdr, hb); n += hb; memcpy(dst + n, tiles, tiles_len); n += tiles_len;
+    memcpy(dst + n, p, hb); if (nb % 8) dst[n + hb - 1] &= (uint8_t)(0xff << (8 - nb % 8)); n += hb;   /* byte_alignment(): zeros */
+    if (tg_hdr) dst[n++] = 0;
+    for (int i = 0; i < ntiles; i++) {
+        if (i + 1 < ntiles) { uint32_t sz1 = (uint32_t)tiles[i].len - 1; dst[n++] = sz1; dst[n++] = sz1 >> 8; dst[n++] = sz1 >> 16; dst[n++] = sz1 >> 24; }
+        memcpy(dst + n, tiles[i].data, tiles[i].len); n += tiles[i].len;
+    }
     return n;
 }
 
@@ -129,63 +155,73 @@ int main(int argc, char **argv) {
             if (r != GST_AV1_PARSER_OK) { if (r == GST_AV1_PARSER_DROP && consumed) { pos += consumed; continue; } fprintf(stderr, "identify failed %d\n", r); break; }
             if (obu.obu_type == GST_AV1_OBU_SEQUENCE_HEADER) {
                 if (gst_av1_parser_parse_sequence_header_obu(parser, &obu, &seq) == GST_AV1_PARSER_OK) { if (!have_seq) { put(ctx, mpi, buf + pos, consumed); } have_seq = 1; }
-            } else if (obu.obu_type == GST_AV1_OBU_FRAME && have_seq) {
-                GstAV1FrameOBU frame;
-                if (gst_av1_parser_parse_frame_obu(parser, &obu, &frame) != GST_AV1_PARSER_OK) { fprintf(stderr, "tu %d: frame parse failed\n", tu); pos += consumed; continue; }
-                GstAV1FrameHeaderOBU *fh = &frame.frame_header; cur_pts = fidx;
-                /* tile bytes = original payload after the header's byte alignment; header length from our own writer */
-                size_t nb = 0; size_t n = build_frame_obu(fh, &seq, obu.header.obu_temporal_id, obu.header.obu_spatial_id, obu.data, 0, pkt, 8 << 20, &nb);
-                size_t hb = (nb + 7) / 8; const uint8_t *tiles = obu.data + hb; size_t tiles_len = obu.obu_size > hb ? obu.obu_size - hb : 0;
-                if (!n || tiles_len == 0) { put(ctx, mpi, buf + pos, consumed); passthrough++; }
-                else {
-                    int do_mask0 = 0;
-                    if (mask0 && fh->frame_type != GST_AV1_KEY_FRAME && fh->refresh_frame_flags) {
-                        if (mask_all) do_mask0 = 1; else { char s[16]; snprintf(s, sizeof s, "%d", fidx); const char *q = mask0; size_t ls = strlen(s);
-                            while ((q = strstr(q, s))) { if ((q == mask0 || q[-1] == ',') && (q[ls] == 0 || q[ls] == ',')) { do_mask0 = 1; break; } q += ls; } }
+            } else if ((obu.obu_type == GST_AV1_OBU_FRAME || obu.obu_type == GST_AV1_OBU_FRAME_HEADER || obu.obu_type == GST_AV1_OBU_TILE_GROUP) && have_seq) {
+                /* collect header + tiles; emit when the last tile of the frame has arrived */
+                static GstAV1FrameHeaderOBU cur_fh; static int have_fh = 0, ntiles = 0, total_tiles = 0; static Tile tiles[GST_AV1_MAX_TILE_COUNT]; static uint8_t ctid, csid;
+                GstAV1TileGroupOBU *tg = NULL; GstAV1FrameOBU frame; GstAV1TileGroupOBU tgo;
+                if (obu.obu_type == GST_AV1_OBU_FRAME) {
+                    if (gst_av1_parser_parse_frame_obu(parser, &obu, &frame) != GST_AV1_PARSER_OK) { fprintf(stderr, "tu %d: frame parse failed\n", tu); pos += consumed; continue; }
+                    cur_fh = frame.frame_header; have_fh = 1; ntiles = 0; tg = &frame.tile_group; ctid = obu.header.obu_temporal_id; csid = obu.header.obu_spatial_id;
+                } else if (obu.obu_type == GST_AV1_OBU_FRAME_HEADER) {
+                    GstAV1FrameHeaderOBU fh;
+                    if (gst_av1_parser_parse_frame_header_obu(parser, &obu, &fh) != GST_AV1_PARSER_OK) { fprintf(stderr, "tu %d: frame header parse failed\n", tu); pos += consumed; continue; }
+                    if (fh.show_existing_frame) {
+                        if (fh.frame_type == GST_AV1_KEY_FRAME) se_key++;
+                        if (report) fprintf(stderr, "frame %d (tu %d): show_existing slot %u (type %u)\n", fidx, tu, fh.frame_to_show_map_idx, fh.frame_type);
+                        if (expf) fprintf(expf, "%lld\n", slot_pts[fh.frame_to_show_map_idx]);
+                        if (fh.frame_type == GST_AV1_KEY_FRAME) { for (int b = 0; b < 8; b++) { slot_pts[b] = slot_pts[fh.frame_to_show_map_idx]; memcpy(saved_gm[b], saved_gm[fh.frame_to_show_map_idx], sizeof saved_gm[0]); } }
+                        gst_av1_parser_reference_frame_update(parser, &fh); fidx++;
+                        if (!(hidden_se && fh.frame_type != GST_AV1_KEY_FRAME)) { cur_pts = fidx - 1; put(ctx, mpi, buf + pos, consumed); passthrough++; }
+                        pos += consumed; continue;
                     }
-                    if (report || do_mask0) fprintf(stderr, "frame %d (tu %d): type %u show %u se %u refresh 0x%02x order_hint %u%s\n", fidx, tu, fh->frame_type, fh->show_frame,
-                                               fh->show_existing_frame, fh->refresh_frame_flags, fh->order_hint, do_mask0 ? "  <- mask0 then real" : "");
-                    if (do_mask0) {
-                        GstAV1FrameHeaderOBU fh0 = *fh; fh0.refresh_frame_flags = 0;
-                        size_t n0 = build_frame_obu(&fh0, &seq, obu.header.obu_temporal_id, obu.header.obu_spatial_id, tiles, tiles_len, pkt2, 8 << 20, NULL);
-                        if (!n0) { fprintf(stderr, "mask0 rewrite failed at frame %d\n", fidx); }
-                        else { put(ctx, mpi, pkt2, n0); settle(ctx, mpi, fh->show_frame); twice++; drop_next = fh->show_frame; }
-                    }
-                    if (sekey && fh->frame_type == GST_AV1_KEY_FRAME && fh->show_frame && fidx > 0) {
-                        /* experiment 4: a shown KEY frame becomes hidden + showable, then a synthesised show_existing of slot 0 shows it
-                           (spec 7.21: show_existing of a KEY frame refreshes all slots and resets state) */
-                        GstAV1FrameHeaderOBU hk = *fh; hk.show_frame = 0; hk.showable_frame = 1;
-                        n = build_frame_obu(&hk, &seq, obu.header.obu_temporal_id, obu.header.obu_spatial_id, tiles, tiles_len, pkt, 8 << 20, NULL);
-                        put(ctx, mpi, pkt, n);
-                        size_t m = build_show_existing(fh, &seq, 0, pkt2, 8 << 20); if (m) put(ctx, mpi, pkt2, m); se_key++;
-                        fprintf(stderr, "frame %d: KEY rewritten as hidden + show_existing(slot 0)\n", fidx);
-                    } else {
-                        n = build_frame_obu(fh, &seq, obu.header.obu_temporal_id, obu.header.obu_spatial_id, tiles, tiles_len, pkt, 8 << 20, NULL);
-                        put(ctx, mpi, pkt, n); if (do_mask0) { settle(ctx, mpi, fh->show_frame); drop_next = 0; }
-                        if (hidden_se && !fh->show_frame && fh->refresh_frame_flags) {
-                            /* the driver's plan for hidden frames: show the slot it refreshed so MPP outputs the picture for the client's surface;
-                               here the extra output is dropped so the stream can still be compared with dav1d */
-                            int slot = __builtin_ctz(fh->refresh_frame_flags);
-                            size_t m = build_show_existing(fh, &seq, slot, pkt2, 8 << 20);
-                            if (m) { int before = frames_out; put(ctx, mpi, pkt2, m); settle(ctx, mpi, 1);
-                                     if (frames_out == before) fprintf(stderr, "frame %d: hidden, show_existing(slot %d) produced NO output (yet)\n", fidx, slot); else hidden_shown++; }
-                        }
+                    cur_fh = fh; have_fh = 1; ntiles = 0; ctid = obu.header.obu_temporal_id; csid = obu.header.obu_spatial_id;
+                } else { /* TILE_GROUP */
+                    if (!have_fh || gst_av1_parser_parse_tile_group_obu(parser, &obu, &tgo) != GST_AV1_PARSER_OK) { fprintf(stderr, "tu %d: tile group parse failed\n", tu); pos += consumed; continue; }
+                    tg = &tgo;
+                }
+                if (tg) {
+                    total_tiles = tg->num_tiles;
+                    for (unsigned t = tg->tg_start; t <= tg->tg_end && t < GST_AV1_MAX_TILE_COUNT; t++) { tiles[ntiles].data = obu.data + tg->entry[t].tile_offset; tiles[ntiles].len = tg->entry[t].tile_size; ntiles++; }
+                    if (tg->tg_end + 1 < total_tiles) { pos += consumed; continue; }   /* more tile groups follow */
+                }
+                if (!have_fh || ntiles == 0) { pos += consumed; continue; }
+                /* ---- a complete frame: header + all tiles ---- */
+                GstAV1FrameHeaderOBU *fh = &cur_fh; cur_pts = fidx; have_fh = 0;
+                gm_prepare(fh);
+                int do_mask0 = 0;
+                if (mask0 && fh->frame_type != GST_AV1_KEY_FRAME && fh->refresh_frame_flags) {
+                    if (mask_all) do_mask0 = 1; else { char s2[16]; snprintf(s2, sizeof s2, "%d", fidx); const char *q = mask0; size_t ls = strlen(s2);
+                        while ((q = strstr(q, s2))) { if ((q == mask0 || q[-1] == ',') && (q[ls] == 0 || q[ls] == ',')) { do_mask0 = 1; break; } q += ls; } }
+                }
+                if (report || do_mask0) fprintf(stderr, "frame %d (tu %d): type %u show %u refresh 0x%02x order_hint %u tiles %d%s\n", fidx, tu, fh->frame_type, fh->show_frame,
+                                           fh->refresh_frame_flags, fh->order_hint, ntiles, do_mask0 ? "  <- mask0 then real" : "");
+                size_t n;
+                if (do_mask0) {
+                    GstAV1FrameHeaderOBU fh0 = *fh; fh0.refresh_frame_flags = 0;
+                    size_t n0 = build_frame_obu(&fh0, &seq, ctid, csid, tiles, ntiles, pkt2, 8 << 20, NULL);
+                    if (!n0) fprintf(stderr, "mask0 rewrite failed at frame %d\n", fidx);
+                    else { put(ctx, mpi, pkt2, n0); settle(ctx, mpi, fh->show_frame); twice++; drop_next = fh->show_frame; }
+                }
+                if (sekey && fh->frame_type == GST_AV1_KEY_FRAME && fh->show_frame && fidx > 0) {
+                    GstAV1FrameHeaderOBU hk = *fh; hk.show_frame = 0; hk.showable_frame = 1;
+                    n = build_frame_obu(&hk, &seq, ctid, csid, tiles, ntiles, pkt, 8 << 20, NULL); put(ctx, mpi, pkt, n);
+                    size_t m = build_show_existing(fh, &seq, 0, pkt2, 8 << 20); if (m) put(ctx, mpi, pkt2, m); se_key++;
+                    fprintf(stderr, "frame %d: KEY rewritten as hidden + show_existing(slot 0)\n", fidx);
+                } else {
+                    n = build_frame_obu(fh, &seq, ctid, csid, tiles, ntiles, pkt, 8 << 20, NULL);
+                    if (!n) { fprintf(stderr, "frame %d: build failed\n", fidx); }
+                    else { put(ctx, mpi, pkt, n); if (do_mask0) { settle(ctx, mpi, fh->show_frame); drop_next = 0; } }
+                    if (hidden_se && !fh->show_frame && fh->refresh_frame_flags) {
+                        int slot = __builtin_ctz(fh->refresh_frame_flags);
+                        size_t m = build_show_existing(fh, &seq, slot, pkt2, 8 << 20);
+                        if (m) { int before = frames_out; put(ctx, mpi, pkt2, m); settle(ctx, mpi, 1);
+                                 if (frames_out == before) fprintf(stderr, "frame %d: hidden, show_existing(slot %d) produced NO output (yet)\n", fidx, slot); else hidden_shown++; }
                     }
                 }
                 if (fh->show_frame && expf) fprintf(expf, "%d\n", fidx);
                 { unsigned m = fh->frame_type == GST_AV1_KEY_FRAME && fh->show_frame ? 0xff : fh->refresh_frame_flags; for (int b = 0; b < 8; b++) if (m & (1u << b)) slot_pts[b] = fidx; }
+                gm_save(fh);
                 gst_av1_parser_reference_frame_update(parser, fh); fidx++;
-            } else if (obu.obu_type == GST_AV1_OBU_FRAME_HEADER && have_seq) {
-                GstAV1FrameHeaderOBU fh;
-                if (gst_av1_parser_parse_frame_header_obu(parser, &obu, &fh) == GST_AV1_PARSER_OK) {
-                    if (fh.show_existing_frame && fh.frame_type == GST_AV1_KEY_FRAME) se_key++;
-                    if (report) fprintf(stderr, "frame %d (tu %d): FRAME_HEADER type %u show %u se %u (slot %u) refresh 0x%02x\n", fidx, tu, fh.frame_type, fh.show_frame, fh.show_existing_frame, fh.frame_to_show_map_idx, fh.refresh_frame_flags);
-                    if (fh.show_existing_frame && expf) fprintf(expf, "%lld\n", slot_pts[fh.frame_to_show_map_idx]);
-                    if (fh.show_existing_frame && fh.frame_type == GST_AV1_KEY_FRAME) { for (int b = 0; b < 8; b++) slot_pts[b] = slot_pts[fh.frame_to_show_map_idx]; }
-                    gst_av1_parser_reference_frame_update(parser, &fh); fidx++;
-                }
-                /* a VA-API client never sends show_existing to the driver: in --hidden-se mode the synthesised one after the hidden frame stands in for it */
-                if (!(hidden_se && fh.show_existing_frame && fh.frame_type != GST_AV1_KEY_FRAME)) { cur_pts = fidx - 1; put(ctx, mpi, buf + pos, consumed); passthrough++; }   /* show_existing / standalone headers: pass through unchanged (experiment 4 observes them) */
             } /* TD, metadata, padding, tile lists: dropped */
             pos += consumed;
         }
