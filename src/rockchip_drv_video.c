@@ -1853,9 +1853,16 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
     for (int i = 0; i < c->n_pending && p->ntiles < 512; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
         if (!b || b->type != VASliceParameterBufferType) continue;
+        /* the data buffer that follows these parameters (FFmpeg, GStreamer); otherwise the last one before them
+           (Chromium submits the tile data first, then one parameter buffer per tile) */
         int dp = -1; for (int k = 0; k < n_data; k++) if (data_pos[k] > i) { dp = data_pos[k]; break; }
+        if (dp < 0) for (int k = n_data - 1; k >= 0; k--) if (data_pos[k] < i) { dp = data_pos[k]; break; }
         RKBuffer *db = dp >= 0 ? buffer_by_id(d, c->pending[dp]) : NULL;
-        if (!db) { LOG("av1: slice parameters without slice data"); return VA_STATUS_ERROR_INVALID_BUFFER; }
+        if (!db) {
+            LOG("av1: slice parameters without slice data (%d buffers this picture):", c->n_pending);
+            for (int k = 0; k < c->n_pending; k++) { RKBuffer *bk = buffer_by_id(d, c->pending[k]); LOG("av1:   buffer %d type %d size %u x%u", k, bk ? (int)bk->type : -1, bk ? bk->size : 0u, bk ? bk->num_elements : 0u); }
+            return VA_STATUS_ERROR_INVALID_BUFFER;
+        }
         size_t dlen = (size_t)db->size * db->num_elements;
         const VASliceParameterBufferAV1 *sp = (const VASliceParameterBufferAV1 *)b->data;
         for (unsigned e = 0; e < b->num_elements && p->ntiles < 512; e++) {
