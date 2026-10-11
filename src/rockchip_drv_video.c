@@ -212,6 +212,7 @@ typedef struct {
         Av1Tile     tiles[512];
         int         ntiles;
     } av1_pending;
+    pthread_mutex_t av1_lock;   /* serialises the AV1 submit policy between EndPicture (decoder thread) and vaSyncSurface (any thread) */
     pthread_mutex_t out_lock;
 } RKContext;
 
@@ -789,6 +790,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         pthread_mutex_lock(&c->out_lock);      /* claim: test and mark in one step */
         if (c->used) { pthread_mutex_unlock(&c->out_lock); continue; }
         CTX_CLEAR(c);
+        pthread_mutex_init(&c->av1_lock, NULL);
         c->mpp       = mpp;
         c->mpi       = mpi;
         c->config_id = config_id;
@@ -822,7 +824,9 @@ static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
     LOG("DestroyContext: reset + drain + destroy");
+    pthread_mutex_lock(&c->av1_lock);
     free(c->av1_pending.tiles_buf); c->av1_pending.tiles_buf = NULL; c->av1_pending.valid = false;
+    pthread_mutex_unlock(&c->av1_lock); pthread_mutex_destroy(&c->av1_lock);
     rk_mpp_teardown_locked(c);
     CTX_CLEAR(c);                              /* used = false; out_lock untouched */
     pthread_mutex_unlock(&c->out_lock);
@@ -1773,12 +1777,16 @@ static VAStatus av1_resolve_pending(RKContext *c, RKDriver *d, const VADecPictur
 /* vaSyncSurface on the held picture: decode it now with refresh_frame_flags = 0. */
 static void av1_force_pending(RKContext *c, RKDriver *d, VASurfaceID sid) {
     typeof(c->av1_pending) *p = &c->av1_pending;
-    if (!p->valid || p->forced || p->surface != sid) return;
-    LOG("av1: early sync of surface 0x%x — decoding with refresh_frame_flags=0 first", (unsigned)sid);
-    if (av1_submit(c, d, 0) == VA_STATUS_SUCCESS) p->forced = true;
+    if (!p->valid || p->surface != sid) return;                 /* cheap pre-check; re-checked under the lock */
+    pthread_mutex_lock(&c->av1_lock);
+    if (p->valid && !p->forced && p->surface == sid) {
+        LOG("av1: early sync of surface 0x%x — decoding with refresh_frame_flags=0 first", (unsigned)sid);
+        if (av1_submit(c, d, 0) == VA_STATUS_SUCCESS) p->forced = true;
+    }
+    pthread_mutex_unlock(&c->av1_lock);
 }
 
-static VAStatus do_av1_decode(RKContext *c, RKDriver *d) {
+static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
     if (!c->have_pp_av1) { LOG("av1: EndPicture without picture parameters"); return VA_STATUS_ERROR_INVALID_PARAMETER; }
     const VADecPictureParameterBufferAV1 *pp = &c->last_pp_av1;
     c->have_pp_av1 = false;
@@ -1836,6 +1844,13 @@ static VAStatus do_av1_decode(RKContext *c, RKDriver *d) {
         st = av1_submit(c, d, 0xff); p->valid = false; return st;
     }
     return VA_STATUS_SUCCESS;                                          /* held until the next picture (or a sync) */
+}
+
+static VAStatus do_av1_decode(RKContext *c, RKDriver *d) {
+    pthread_mutex_lock(&c->av1_lock);
+    VAStatus st = do_av1_decode_locked(c, d);
+    pthread_mutex_unlock(&c->av1_lock);
+    return st;
 }
 
 static VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
