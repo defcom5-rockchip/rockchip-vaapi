@@ -24,7 +24,7 @@ LDFLAGS += $(RGA_LIBS)
 endif
 
 TARGET  := rockchip_drv_video.so
-SRCS    := src/rockchip_drv_video.c src/h264.c src/hevc.c
+SRCS    := src/rockchip_drv_video.c src/h264.c src/hevc.c src/av1.c src/av1/gstav1bitwriter.c src/av1/gstcompat.c
 OBJS    := $(SRCS:.c=.o)
 INSTALL_DIR := /usr/lib/aarch64-linux-gnu/dri
 
@@ -33,8 +33,11 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+src/av1/%.o: src/av1/%.c
+	$(CC) $(CFLAGS) -Isrc/av1 -DGST_USE_UNSTABLE_API -Wno-unused-function -Wno-unused-parameter -c $< -o $@
+
 src/%.o: src/%.c
-	$(CC) $(CFLAGS) -Isrc -c $< -o $@
+	$(CC) $(CFLAGS) -Isrc -Isrc/av1 -DGST_USE_UNSTABLE_API -Wno-unused-function -c $< -o $@
 
 install: $(TARGET)
 	sudo install -m 755 $(TARGET) $(INSTALL_DIR)/
