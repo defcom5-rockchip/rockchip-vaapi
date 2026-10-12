@@ -4,9 +4,10 @@ Upstream-Contact: defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
 Source: https://github.com/defcom5-rockchip/rockchip-vaapi
 Comment:
  This is the defcom5-rockchip fork of the rockchip-vaapi driver originally
- written by Eduardo García-Mádico Portabella. The fork adds HEVC decoding,
- correct 10-bit output and a number of decode-path fixes; the original
- author's work remains the foundation and is licensed unchanged.
+ written by Eduardo García-Mádico Portabella. The fork adds HEVC and AV1
+ decoding, correct 10-bit output and a number of decode-path fixes; the
+ original author's work remains the foundation and is licensed unchanged.
+ src/av1/ carries GStreamer's AV1 bit writer (Intel, LGPL-2.0+).
 
 Files: *
 Copyright: 2026 Eduardo García-Mádico Portabella <woodyst@gmail.com>
@@ -20,12 +21,20 @@ Comment:
  project has no HEVC support.
 License: LGPL-2.1+
 
-Files: src/av1/gstav1bitwriter.c src/av1/gstav1bitwriter.h src/av1/gstav1parser.h
+Files: src/av1/gstav1bitwriter.c src/av1/gstav1bitwriter.h
 Copyright: 2022 Intel Corporation
 Comment:
- Vendored from GStreamer 1.28.2 (gst-plugins-bad, gst-libs/gst/codecparsers)
- with six marked fixes; see src/av1/README.
+ Vendored from GStreamer 1.28.2 (gst-plugins-bad, gst-libs/gst/codecparsers,
+ author He Junyan) with six marked changes; see src/av1/README.
 License: LGPL-2.0+
+
+Files: src/av1/gstav1parser.h
+Copyright: 2018 Georg Ottinger
+           2019-2020 Intel Corporation
+Comment:
+ Vendored from GStreamer 1.28.2 (gst-plugins-bad, gst-libs/gst/codecparsers),
+ include lines adjusted only.
+License: LGPL-2.1+
 
 Files: src/av1.c src/av1.h src/av1/gstcompat.c src/av1/gstcompat.h
 Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>

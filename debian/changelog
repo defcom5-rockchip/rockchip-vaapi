@@ -24,7 +24,7 @@ rockchip-vaapi (3.0.0-1) resolute; urgency=medium
   * Vendor string: Rockchip MPP VA-API Driver 3.0.0 "Plaid Number Nine"
     (defcom5). Named after Number Nine's Pepper co-processor boards.
 
- -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Sat, 11 Oct 2026 19:00:00 -0700
+ -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Sun, 11 Oct 2026 19:00:00 -0700
 
 rockchip-vaapi (2.5.0-1) resolute; urgency=medium
 
