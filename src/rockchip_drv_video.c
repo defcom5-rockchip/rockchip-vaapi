@@ -2458,11 +2458,11 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
     /* Memory type: VA-managed + DRM PRIME 2 */
     attrib_list[k].type              = VASurfaceAttribMemoryType;
     attrib_list[k].flags             = VA_SURFACE_ATTRIB_GETTABLE |
-    k++;
                                        VA_SURFACE_ATTRIB_SETTABLE;
-    attrib_list[2].value.type        = VAGenericValueTypeInteger;
-    attrib_list[2].value.value.i     = (int)(VA_SURFACE_ATTRIB_MEM_TYPE_VA |
+    attrib_list[k].value.type        = VAGenericValueTypeInteger;
+    attrib_list[k].value.value.i     = (int)(VA_SURFACE_ATTRIB_MEM_TYPE_VA |
                                        VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2);
+    k++;
 
     /* Max resolution */
     attrib_list[k].type              = VASurfaceAttribMaxWidth;
