@@ -1,3 +1,30 @@
+rockchip-vaapi (3.0.0-1) resolute; urgency=medium
+
+  * Release 3.0.0 "Plaid Number Nine": AV1 hardware decode (Main profile,
+    8- and 10-bit). VA-API clients deliver parsed parameters and tile data;
+    MPP wants a complete OBU stream, so src/av1.c rebuilds the sequence and
+    frame headers with a vendored copy of GStreamer's AV1 bit writer (six
+    upstream bugs fixed in the copy). refresh_frame_flags, which VA-API does
+    not pass, comes from the next picture's reference map: pictures are held
+    until their successor arrives, decoded at once when the client syncs
+    them. Hidden frames are shown through a synthesised show_existing
+    (hidden KEY frames through a second decode as INTRA_ONLY), film grain is
+    not applied (MPP #974), the picture lands on current_display_picture.
+    Bit-exact against dav1d: 213/242 libaom and 31/36 Chromium conformance
+    vectors, the rest explained in KI-13. Verified in ffmpeg, mpv, Chrome
+    and Firefox.
+  * RKVA_HIDE_10BIT now also makes every profile 8-bit only and refuses a
+    10-bit AV1 picture (8- and 10-bit AV1 share one profile); RKVA_HIDE_AV1
+    hides AV1; RKVA_AV1_WRITER_DEBUG and RKVA_DUMP_AV1 for diagnosis.
+  * Pictures larger than the surface they were created for (a sequence
+    change inside one context) are cropped instead of overrunning the
+    buffer; vaGetImage is bounded by the image's own size.
+  * Slice parameters are paired with the data buffer before them as well
+    (Chromium submits tile data first).
+  * Vendor string: Rockchip MPP VA-API Driver 3.0.0 "Plaid Number Nine".
+
+ -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Sat, 11 Oct 2026 19:00:00 -0700
+
 rockchip-vaapi (2.5.0-1) resolute; urgency=medium
 
   * Release 2.5.0: fixes for players that abandon decoders early, several

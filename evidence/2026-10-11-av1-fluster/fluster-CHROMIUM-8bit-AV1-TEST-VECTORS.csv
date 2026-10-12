@@ -1,0 +1,35 @@
+SYSTEM INFORMATION,,,
+OS,Linux 6.1.189-vendor-rk35xx,,
+CPU,"ARM Cortex-A55 x4, ARM Cortex-A76 x4",,
+GPU,Unknown GPU,,
+RAM,15.6 GB,,
+Backend-VA-API,Rockchip MPP VA-API Driver 2.5.0 (defcom5) (runtime 1.23),,
+Backend-Vulkan,Mali-G610,,
+,,,
+TEST RESULTS,,,
+,,,
+Test Suite: CHROMIUM-8bit-AV1-TEST-VECTORS,,,
+,,,
+Decoder: FFmpeg-AV1-VAAPI,,,
+Total Tests,13,,
+Passed,9,,
+Failed\Error,4,,
+Total Time (s),4.467,,
+,,,
+Profile,Passed,Total,
+MAIN,9,13,
+,,,
+Vector Name,Result,Time (s),Profile
+00000527.ivf,Success,0.122,MAIN
+00000535.ivf,Success,0.102,MAIN
+00000548.ivf,Success,0.113,MAIN
+48delayed.ivf,Fail,0.739,MAIN
+av1-1-b8-02-allintra.ivf,Success,0.344,MAIN
+av1-1-b8-03-sizeup.ivf,Fail,0.149,MAIN
+av1-1-b8-23-filmgrain-50.ivf,Fail,0.127,MAIN
+ccvbfilmgrain.ivf,Fail,0.771,MAIN
+framesrefsshortsignaling.ivf,Success,0.278,MAIN
+nonuniformtiling.ivf,Success,0.186,MAIN
+test-25fps-192x288-only-tile-cols-is-power-of-2.ivf,Success,0.525,MAIN
+test-25fps-192x288-only-tile-rows-is-power-of-2.ivf,Success,0.467,MAIN
+test-25fps-192x288-tile-rows-3-tile-cols-3.ivf,Success,0.471,MAIN

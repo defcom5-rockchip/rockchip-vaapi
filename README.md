@@ -50,17 +50,31 @@ server-side transcode) instead of rendering a broken picture.
 | HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+), bit-exact vs software |
 | HEVC  | Main10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 (mpv and Firefox verified; see KI-3 for the history) |
 | VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
-| AV1   | any | ❌ not implemented (VA-API supplies headerless tile data; MPP needs full OBU) |
+| AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; bit-exact against dav1d on 213/242 libaom and 31/36 Chromium conformance vectors, the rest explained in KI-13 (film grain is not applied) |
 
 > **Panthor / Panfrost GPU stacks (mainline Mesa):** libva auto-detects the driver from v2.1.5 (shipped `panthor_drv_video.so` / `panfrost_drv_video.so` symlinks); on older versions set `LIBVA_DRIVER_NAME=rockchip`. See KI-9.
 >
-> **Menu switch:** `RKVA_HIDE_10BIT=1` hides the three 10-bit profiles again if a client cannot present P010. Any
-> value hides them, even `0`; leave the variable unset to keep them.
+> **Menu switches:** `RKVA_HIDE_10BIT=1` hides the three 10-bit profiles again if a client cannot present P010, and
+> from v3.0.0 it also makes every profile 8-bit only (no P010 surfaces, a 10-bit AV1 picture is refused), because
+> 8- and 10-bit AV1 share one profile. `RKVA_HIDE_AV1=1` hides AV1. Any value hides, even `0`; leave the variables
+> unset to keep everything.
 >
 > **Browsers:** Firefox, Chrome and Chromium can all decode through this driver over VA-API; which codecs a page is
 > offered also depends on the browser's own build and settings. Chromium builds that decode through libv4l-rkmpp
-> (V4L2) do not use it (KI-6). On Arm's proprietary Mali GL driver, Firefox and mpv's zero-copy path draw 10-bit
-> near-black — see KI-11.
+> (V4L2) do not use it (KI-6). On Arm's proprietary Mali GL driver, unpatched Firefox and mpv's zero-copy path draw
+> 10-bit near-black — see KI-11 for the fixes.
+
+### AV1
+
+AV1 is the one codec where VA-API and MPP disagree about who parses the headers: clients hand the driver parsed
+picture parameters plus the tile payloads, MPP wants a complete OBU stream. `src/av1.c` writes that stream back —
+sequence header, frame header, tile-group framing — with a vendored copy of GStreamer's AV1 bit writer
+(`src/av1/`, six bugs fixed, see DEVELOPMENT.md). The one value VA-API never passes, `refresh_frame_flags`, is read
+from the next picture's reference map, so every picture is held until its successor arrives (or until the client
+syncs it, when it is decoded at once and its slot refresh follows as a hidden frame). Measured through
+`ffmpeg -hwaccel vaapi`, mpv, Chrome and Firefox; see `evidence/2026-10-11-av1-fluster/` for the conformance runs.
+Film grain is **not** applied (MPP does not synthesise it on RK3588): grainy streams decode to the clean picture.
+`RKVA_AV1_WRITER_DEBUG=1` prints the bit writer's warnings, `RKVA_DUMP_AV1=file` saves the stream sent to MPP.
 
 Releases before v2.0.0 advertised HEVC, High10 and VP9 Profile 2 without decoding
 them correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story.

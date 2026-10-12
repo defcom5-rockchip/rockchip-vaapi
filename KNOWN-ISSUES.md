@@ -276,11 +276,15 @@ decoded frames are correct; copy-back draws them right. The newer g29p1 driver i
 (`GR1616`) as an integer texture too. Chrome and Chromium draw 10-bit correctly on the same driver (checked by eye
 with a VP9 Profile 2 clip), probably because they import the whole frame, which the driver converts correctly.
 
-**Workarounds:** mpv `--hwdec=vaapi-copy` (still decoded in hardware). For a client that cannot be told to copy, set
-`RKVA_HIDE_10BIT=1` in that client's environment only, for example `env RKVA_HIDE_10BIT=1 firefox`: it then decodes
-10-bit in software and keeps 8-bit in hardware. Don't set it system-wide; any value, even `0`, hides 10-bit. A client can also copy each 16-bit
-plane into a normal texture on the GPU before drawing (a few milliseconds per 4K frame); that draws 10-bit zero-copy
-correctly.
+**Fixes:** mpv 0.41 with the fork's patch queries the texture's internal format after the import and copies integer
+planes into normalised textures (exact, ~1 ms per 4K plane). Firefox: the same check in `DMABufSurfaceYUV::CreateTexture()`
+(our `+pd3` build, patch submitted to Mozilla) — 10-bit HEVC, VP9 and AV1 then draw correctly from hardware.
+
+**Workarounds for unpatched players:** mpv `--hwdec=vaapi-copy` (still decoded in hardware). For a client that cannot
+be told to copy, set `RKVA_HIDE_10BIT=1` in that client's environment only, for example `env RKVA_HIDE_10BIT=1 firefox`:
+it then decodes 10-bit in software and keeps 8-bit in hardware. From v3.0.0 the switch also covers AV1 (8- and
+10-bit AV1 share one VA profile, so the driver answers 8-bit only for every profile and refuses a 10-bit AV1 picture
+before the decoder sees it; the client falls back to software). Don't set it system-wide; any value, even `0`, hides 10-bit.
 
 ---
 
@@ -301,6 +305,33 @@ Measured on an Orange Pi 5B. Four 10-bit decodes on one VA display, every frame 
 bit-exact in 55 of 55 runs on the release candidate and 15 of 15 on the final code with hardware decode forced
 (2.2.0: 0 of 20). Abandoned-decoder loops: 10,923 decoders in 60 minutes on the candidate and 1,857 in 10 minutes on
 the final code, with the number of held decoder buffers staying flat (2.2.0: 273 held after 30 seconds).
+
+---
+
+## KI-13: AV1 — what the hardware path does not do (v3.0.0)
+
+**Status:** limits, by design or by the hardware · decode is otherwise bit-exact against dav1d
+
+- **Film grain is not applied.** MPP does not synthesise grain on RK3588 (rockchip-mpp issue #974), so a stream with
+  `apply_grain` decodes to the clean reference picture; the driver writes it to both the reference and the display
+  surface. Grainy and non-grainy playback therefore look alike. Chrome, Firefox and mpv do not apply grain themselves
+  on this path.
+- **Frames 66 px wide or high and smaller** (libaom `av1-1-b8-01-size-*`) and **spatial layers** (`svc-L2T*`) decode
+  wrong on the decoder itself: the raw MPP decoder, fed the original stream, produces the same wrong pictures. Not
+  met in practice (web video starts at 144p).
+- **A sequence change inside one VA context** (new sequence header with another frame size, libaom `sizeup`/`sizedown`):
+  FFmpeg keeps the old surfaces, so the picture is cropped to the surface or sits in the corner of it. The driver
+  never writes past the surface (v3.0.0; earlier test builds corrupted the heap here). Players recreate the decoder
+  on a real resolution change; conformance vectors do not.
+- **Refused, so the client falls back to software:** Profile 1/2 (4:4:4, 4:2:2), 12-bit, monochrome, super-resolution
+  frames, large-scale tile frames. FFmpeg's native `av1` decoder has no software path and reports an error instead;
+  players using libdav1d fall back cleanly.
+- Chromium's `48delayed` stress vector: 27 of 557 frames differ in its last 30, where the raw MPP decoder diverges
+  from dav1d as well.
+
+Conformance runs (Fluster, `ffmpeg -hwaccel vaapi`, every failure attributed against the raw decoder):
+libaom AV1-TEST-VECTORS 213/242, Chromium 10-bit 22/23, Chromium 8-bit 9/13 — files and the attribution table in
+`evidence/2026-10-11-av1-fluster/`, scripts in `tests/av1/`.
 
 ---
 

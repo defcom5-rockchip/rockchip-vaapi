@@ -8,7 +8,7 @@
 > | upstream text below says | the fork today |
 > |---|---|
 > | `num_ref_idx_l0/l1_default` hardcoded to 0 ("may require this to match the stream") | **Was KI-1.** Learned from override-free slices and re-emitted; fixed in v2.1.2 (`h264_peek_ref_override`). |
-> | HEVC/VP9/AV1 paths are stubs | HEVC has a real VPS/SPS/PPS assembler (`src/hevc.c`), Main and Main10 advertised, bit-exact; VP9 P0/P2 decode; AV1 still not possible (headerless tile data). |
+> | HEVC/VP9/AV1 paths are stubs | HEVC has a real VPS/SPS/PPS assembler (`src/hevc.c`), Main and Main10 advertised, bit-exact; VP9 P0/P2 decode; AV1 since v3.0.0 through an OBU re-serialiser (`src/av1.c` + `src/av1/`), see "AV1 decode pipeline". |
 > | export = NV12 as R8 + GR88 | 8-bit unchanged; 10-bit exports true P010 (NV15 repacked) as R16 + GR1616 or one composed P010 layer. Fourccs are built with `RK_FOURCC()` after the "GR16" typo that was KI-3. |
 > | 64 surfaces / 8 contexts | 128 surfaces (Chrome's per-frame pool at 4K); the DRM IOMMU's 4 GB I/O space bounds it (KI-7). |
 > | `vaDeriveImage` not mentioned | Implemented (aliases the surface buffer, `borrowed` flag); copy-back clients work. |
@@ -53,7 +53,12 @@ rockchip-vaapi/
 │   ├── rockchip_drv_video.c   # Main driver: full VA-API vtable
 │   ├── h264.c                 # H.264 SPS/PPS Annex B reconstruction
 │   ├── h264.h
+│   ├── hevc.c / hevc.h        # HEVC VPS/SPS/PPS reconstruction
+│   ├── av1.c / av1.h          # AV1: VA parameters -> sequence/frame header OBUs
+│   ├── av1/                   # vendored GStreamer AV1 bit writer + GLib-free shim
 │   └── bs.h                   # Header-only Exp-Golomb bitstream writer
+├── tests/av1/                 # raw-MPP harness, header dumper, Fluster + attribution scripts
+├── evidence/                  # measured runs quoted by the docs
 ├── debian/                    # Debian packaging metadata
 ├── docs/
 │   └── DEVELOPMENT.md         # This file
@@ -310,23 +315,48 @@ val++ → find bit length k of val → write k zeros → write val in k+1 bits
 
 ---
 
-## Extending to other codecs
+## AV1 decode pipeline (v3.0.0)
 
-To add HEVC/VP9/AV1 decode, implement a `do_hevc_decode()` (etc.) function
-analogous to `do_h264_decode()`:
+MPP's `av1d` parses every header itself and wants a low-overhead OBU stream: the sequence header once, then one
+`OBU_FRAME` per picture (frame header + tile group), `obu_has_size_field` set, no temporal delimiters. VA-API clients
+deliver `VADecPictureParameterBufferAV1` plus one `VASliceParameterBufferAV1` element per tile and the tile bytes.
+`src/av1.c` maps the VA structures onto the structs of GStreamer's `gstav1bitwriter.c` (vendored in `src/av1/`,
+LGPL-2.0-or-later, with a GLib-free shim) and writes the OBUs; `do_av1_decode()` in the main file owns the policy.
 
-1. In `rk_EndPicture`, dispatch on `ctx->coding`:
-   ```c
-   if (ctx->coding == MPP_VIDEO_CodingHEVC)
-       return do_hevc_decode(d, ctx, target);
-   ```
-2. HEVC/VP9/AV1 use `VAPictureParameterBufferHEVC`, `VASliceParameterBufferHEVC`,
-   etc. The header reconstruction challenge is codec-specific:
-   - HEVC: reconstruct VPS/SPS/PPS NALUs (more complex than H.264)
-   - VP9/AV1: no NAL structure; MPP accepts raw IVF/OBU frames directly
+What the VA parameters do not say, and how it is handled:
 
-3. Update `rk_QueryConfigProfiles` and `rk_QueryConfigEntrypoints` to expose
-   the new profile (already done in the current driver for all four codecs).
+- **`refresh_frame_flags`** is absent. The successor picture's `ref_frame_map[]` shows which slots the previous picture
+  took, so each picture is held until the next one arrives. If the client syncs the held picture first (FFmpeg does,
+  every frame), it is decoded at once with mask 0 — correct picture, nothing refreshed — and re-submitted with the
+  real mask later **as a hidden frame**, so the second decode never produces an output (the two decodes are not
+  always identical and shared the surface). A shown KEY frame refreshes everything and is never held.
+- **Hidden frames** (`show_frame = 0`): clients never send `show_existing_frame` to a VA driver, but they do read the
+  hidden picture's surface when the stream shows it later. The driver follows a hidden picture with a synthesised
+  `show_existing_frame` of one slot it refreshed; a hidden **KEY** frame instead gets a second decode of the same
+  tiles as a shown `INTRA_ONLY` frame with refresh 0, because `show_existing` of a KEY makes the decoder refresh
+  every slot and reset state. A hidden picture synced early is decoded as shown (INTRA_ONLY if it was a KEY).
+- **Film grain:** with `apply_grain` the client renders into `current_frame` (reused between pictures) and reads
+  `current_display_picture`. MPP applies no grain on RK3588 (#974), so the clean picture is keyed on the display
+  surface and the reconstruct surface is only marked decoded.
+- **Derived header fields:** tile log2 counts from the client's tile counts (uniform case) or the SB-aligned starts
+  (non-uniform), skip-mode frames from the slots' order hints, `PrevGmParams` from the saved global motion of the
+  primary reference, segmentation `update_data` passed through, loop restoration `lr_unit_shift`/`lr_uv_shift` as
+  final spec values (what FFmpeg and Chromium pass).
+- **Sequence header:** derived from the first picture (max size = that picture); `enable_superres` and
+  `separate_uv_delta_q` are set so the per-frame bits can be expressed; a picture that no longer matches starts a new
+  sequence header (MPP info change).
+- **Refused** (`av1_frame_from_va` / `av1_seq_from_va` return -1): Profile 1/2, 12-bit, monochrome, super-resolution,
+  large-scale tile, an INTRA_ONLY frame with refresh 0xff.
+
+Bugs fixed in the vendored writer, each marked `rockchip-vaapi fix (n)`: (1) segmentation params were not written;
+(2) loop-filter delta updates; (3) `PrevGmParams` taken from the struct address instead of `.gm_params`; (4)
+`UsesChromaLr` only for Cr; (5) `lr_unit_shift` for 64x64 superblocks written as one bit; (6) `_av1_write_uniform()`
+success treated as failure, so non-uniform tiles could never be written. Upstream GStreamer candidates.
+
+Tools in `tests/av1/`: `av1mpp.c` (raw MPP decode of an IVF, the attribution reference), `fhdump.c` (every frame
+header field, builds against gstreamer-codecparsers), `obulist.py`, `addtd.py` (temporal delimiters so dav1d/ffmpeg
+accept a dumped stream), `obu2ivf.py`, `fhmatch.py`, `fluster-run.sh`, `attrib.sh` (driver vs raw MPP vs dav1d per
+failed vector). Switches: `RKVA_DUMP_AV1=file` appends the stream sent to MPP; `RKVA_AV1_WRITER_DEBUG=1|2`.
 
 ---
 
