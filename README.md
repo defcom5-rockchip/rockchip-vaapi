@@ -50,7 +50,7 @@ server-side transcode) instead of rendering a broken picture.
 | HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+), bit-exact vs software |
 | HEVC  | Main10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 (mpv and Firefox verified; see KI-3 for the history) |
 | VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
-| AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; bit-exact against dav1d on 213/242 libaom and 31/36 Chromium conformance vectors, the rest explained in KI-13 (film grain is not applied) |
+| AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; matches the Fluster reference checksums on 213/242 libaom and 31/36 Chromium conformance vectors, the rest explained in KI-13 (film grain is not applied) |
 
 Releases before v2.0.0 advertised HEVC, High10 and VP9 Profile 2 without decoding
 them correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story.
@@ -72,10 +72,11 @@ them correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story.
 AV1 is the one codec where VA-API and MPP disagree about who parses the headers: clients hand the driver parsed
 picture parameters plus the tile payloads, MPP wants a complete OBU stream. `src/av1.c` writes that stream back —
 sequence header, frame header, tile-group framing — with a vendored copy of GStreamer's AV1 bit writer
-(`src/av1/`, six bugs fixed, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)). The one value VA-API never passes, `refresh_frame_flags`, is read
+(`src/av1/`, five bugs fixed and segmentation implemented, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)). The one value VA-API never passes, `refresh_frame_flags`, is read
 from the next picture's reference map, so every picture is held until its successor arrives (or until the client
-syncs it, when it is decoded at once and its slot refresh follows as a hidden frame). Measured through
-`ffmpeg -hwaccel vaapi`, mpv, Chrome and Firefox; see `evidence/2026-10-11-av1-fluster/` for the conformance runs.
+syncs it, when it is decoded at once and its slot refresh follows as a hidden frame). Conformance measured through
+`ffmpeg -hwaccel vaapi` (see `evidence/2026-10-11-av1-fluster/`); decode on the AV1 engine confirmed by interrupt
+counts in Chrome, Firefox and mpv, the picture checked by eye in Chrome and Firefox.
 Film grain is **not** applied (MPP does not synthesise it on RK3588): grainy streams decode to the clean picture.
 `RKVA_AV1_WRITER_DEBUG=1` prints the bit writer's warnings, `RKVA_DUMP_AV1=file` saves the stream sent to MPP.
 The release is named after Number Nine's Pepper boards, the co-processor graphics cards of the late 1980s — this

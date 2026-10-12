@@ -1,0 +1,37 @@
+vector                             dav1d   drv   raw | drv!=ref raw!=ref
+current rga_api version 1.10.6_[3]. The called RockchipRga API is deprecated and will be removed in a future release, currently using the legacy API for compatibility. Please refer to the latest IM2D API documentation to update your implementation.
+av1-1-b10-23-film_grain-50            10    10    10 |        0        0  size=352x288 info change
+av1-1-b10-24-monochrome            - (skipped: gray10le)
+av1-1-b8-01-size-16x16                 2     2     2 |        1        1  size=16x16 info change
+av1-1-b8-01-size-16x18                 2     2     2 |        1        1  size=16x18 info change
+av1-1-b8-01-size-16x32                 2     2     2 |        1        1  size=16x32 info change
+av1-1-b8-01-size-16x64                 2     2     2 |        2        2  size=16x64 info change
+av1-1-b8-01-size-16x66                 2     2     2 |        1        1  size=16x66 info change
+av1-1-b8-01-size-18x16                 2     2     2 |        1        1  size=18x16 info change
+av1-1-b8-01-size-18x64                 2     2     2 |        2        2  size=18x64 info change
+av1-1-b8-01-size-32x18                 2     2     2 |        1        1  size=32x18 info change
+av1-1-b8-01-size-32x32                 2     2     2 |        1        1  size=32x32 info change
+av1-1-b8-01-size-32x64                 2     2     2 |        2        2  size=32x64 info change
+av1-1-b8-01-size-34x16                 2     2     2 |        1        1  size=34x16 info change
+av1-1-b8-01-size-34x32                 2     2     2 |        1        1  size=34x32 info change
+av1-1-b8-01-size-34x64                 2     2     2 |        2        2  size=34x64 info change
+av1-1-b8-01-size-64x16                 2     2     2 |        1        1  size=64x16 info change
+av1-1-b8-01-size-64x32                 2     2     2 |        1        1  size=64x32 info change
+av1-1-b8-01-size-64x64                 2     2     2 |        2        2  size=64x64 info change
+av1-1-b8-01-size-64x66                 2     2     2 |        1        1  size=64x66 info change
+av1-1-b8-01-size-66x16                 2     2     2 |        1        1  size=66x16 info change
+av1-1-b8-01-size-66x18                 2     2     2 |        1        1  size=66x18 info change
+av1-1-b8-01-size-66x32                 2     2     2 |        1        1  size=66x32 info change
+av1-1-b8-01-size-66x64                 2     2     2 |        2        2  size=66x64 info change
+av1-1-b8-03-sizedown: not found
+av1-1-b8-03-sizeup                    20    20    11 |       10       20  size=1280x720 info change
+av1-1-b8-22-svc-L2T1                   8     8     7 |        8        1  size=1280x720 info change
+av1-1-b8-22-svc-L2T2                   8     8     7 |        8        1  size=1280x720 info change
+av1-1-b8-23-film_grain-50             10    10    10 |        0        0  size=352x288 info change
+av1-1-b8-24-monochrome             - (skipped: gray)
+current rga_api version 1.10.6_[3]. The called RockchipRga API is deprecated and will be removed in a future release, currently using the legacy API for compatibility. Please refer to the latest IM2D API documentation to update your implementation.
+av1-1-b10-23-filmgrain-50             10    10    10 |        0        0  size=352x288 info change
+48delayed                            557   557   557 |       27       56  size=240x100 info change
+av1-1-b8-03-sizeup                    20    20    11 |       10       20  size=1280x720 info change
+av1-1-b8-23-filmgrain-50              10    10    10 |        0        0  size=352x288 info change
+ccvbfilmgrain                        100   100   100 |        1        0  size=640x480 info change
