@@ -1,7 +1,7 @@
 AV1 OBU writer vendored from GStreamer
 ======================================
 gstav1bitwriter.h and gstav1parser.h are copied unmodified (apart from their #include lines, which now point at
-gstcompat.h) from GStreamer 1.28.2; gstav1bitwriter.c carries six marked "rockchip-vaapi" changes (below) and is
+gstcompat.h) from GStreamer 1.28.2; gstav1bitwriter.c carries six marked "rockchip-vaapi" changes (below: segmentation implemented, five bugs fixed) and is
 otherwise unmodified. Source: subprojects/gst-plugins-bad/gst-libs/gst/codecparsers/.
 Copyright (C) 2022 Intel Corporation; licence LGPL-2.0-or-later (see the file headers). gstcompat.h/.c supply the small
 subset of GLib and GstBitWriter they need, so no GLib or GStreamer is linked.

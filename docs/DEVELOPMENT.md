@@ -328,7 +328,7 @@ What the VA parameters do not say, and how it is handled:
 
 - **`refresh_frame_flags`** is absent. The successor picture's `ref_frame_map[]` shows which slots the previous picture
   took, so each picture is held until the next one arrives. If the client syncs the held picture first (FFmpeg does,
-  every frame), it is decoded at once with mask 0 — correct picture, nothing refreshed — and re-submitted with the
+  every frame — design reasoning from FFmpeg's download path, not a measurement), it is decoded at once with mask 0 — correct picture, nothing refreshed — and re-submitted with the
   real mask later **as a hidden frame**, so the second decode never produces an output (the two decodes are not
   always identical and shared the surface). A shown KEY frame refreshes everything and is never held.
 - **Hidden frames** (`show_frame = 0`): clients never send `show_existing_frame` to a VA driver, but they do read the
@@ -349,7 +349,7 @@ What the VA parameters do not say, and how it is handled:
 - **Refused** (`av1_frame_from_va` / `av1_seq_from_va` return -1): Profile 1/2, 12-bit, monochrome, super-resolution,
   large-scale tile, an INTRA_ONLY frame with refresh 0xff.
 
-Bugs fixed in the vendored writer, each marked `rockchip-vaapi fix (n)`: (1) segmentation params were not written;
+Changes to the vendored writer, each marked `rockchip-vaapi fix (n)` in the source: (1) segmentation params implemented (upstream had a TODO);
 (2) loop-filter delta updates; (3) `PrevGmParams` taken from the struct address instead of `.gm_params`; (4)
 `UsesChromaLr` only for Cr; (5) `lr_unit_shift` for 64x64 superblocks written as one bit; (6) `_av1_write_uniform()`
 success treated as failure, so non-uniform tiles could never be written. Upstream GStreamer candidates.
@@ -357,7 +357,8 @@ success treated as failure, so non-uniform tiles could never be written. Upstrea
 Tools in `tests/av1/`: `av1mpp.c` (raw MPP decode of an IVF, the attribution reference), `fhdump.c` (every frame
 header field, builds against gstreamer-codecparsers), `obulist.py`, `addtd.py` (temporal delimiters so dav1d/ffmpeg
 accept a dumped stream), `obu2ivf.py`, `fhmatch.py`, `fluster-run.sh`, `attrib.sh` (driver vs raw MPP vs dav1d per
-failed vector). Switches: `RKVA_DUMP_AV1=file` appends the stream sent to MPP; `RKVA_AV1_WRITER_DEBUG=1|2`.
+failed vector). Switches: `RKVA_DUMP_AV1=file` appends the stream sent to MPP; `RKVA_AV1_WRITER_DEBUG=1|2`; `RKVA_AV1_NO_GRAIN=1`
+strips `apply_grain` from the written header (experiment switch; no visible effect on RK3588, where MPP applies none).
 
 ---
 
