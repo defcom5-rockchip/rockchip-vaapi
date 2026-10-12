@@ -326,7 +326,7 @@ the final code, with the number of held decoder buffers staying flat (2.2.0: 273
   raw MPP decoder fails `sizeup` as well (11 of 20 frames). The driver never writes past the surface (v3.0.0; earlier
   test builds corrupted the heap here). Browsers create a new decoder on a resolution change; these vectors do not.
 - **Refused, so the client falls back to software:** Profile 1/2 (4:4:4, 4:2:2), 12-bit, monochrome, super-resolution
-  frames, large-scale tile frames, more than 64 tile columns or rows. ffmpeg's hwaccel path (`-c:v av1 -hwaccel vaapi`) reports an error instead of falling
+  frames, large-scale tile frames, switch frames, more than 64 tile columns or rows. ffmpeg's hwaccel path (`-c:v av1 -hwaccel vaapi`) reports an error instead of falling
   back — use `-c:v libdav1d`; players that pick libdav1d themselves fall back cleanly.
 - Chromium's `48delayed` stress vector: 27 of 557 frames differ in its last 30, where the raw MPP decoder diverges
   from dav1d as well.

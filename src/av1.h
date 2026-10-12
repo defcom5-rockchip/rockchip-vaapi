@@ -26,7 +26,13 @@ typedef struct {
     uint16_t width, height;       /* upscaled width, frame height */
     int32_t  gm[8][6];            /* SavedGmParams: identity after intra frames */
     uint8_t  gm_type[8];
+    uint8_t  feature_enabled[8][8]; /* that picture's segmentation features, for a successor that keeps them (update_data = 0) */
+    int16_t  feature_data[8][8];
 } Av1RefInfo;
+
+/* Assumption the submit policy relies on: MPP's av1d does not enforce showable_frame when it meets show_existing_frame
+   (the driver shows hidden pictures that way, and libaom's non-showable ARFs would otherwise be refused).  Fluster
+   passing on the vectors that have them is the evidence. */
 
 /* One tile's payload: [slice_data_offset, +slice_data_size) of a VASliceData buffer. */
 typedef struct { const uint8_t *data; size_t len; } Av1Tile;
@@ -54,5 +60,6 @@ size_t av1_write_seq_obu(const GstAV1SequenceHeaderOBU *seq, uint8_t *dst, size_
  * but the last prefixed with a 4-byte little-endian size (the header is written with tile_size_bytes = 4). */
 size_t av1_write_frame_obu(const GstAV1FrameHeaderOBU *fh, const GstAV1SequenceHeaderOBU *seq,
                            const Av1Tile *tiles, int ntiles, uint8_t *dst, size_t cap);
-/* A FRAME_HEADER OBU with show_existing_frame = 1 for `slot` (makes MPP output that slot's picture). */
+/* A FRAME_HEADER OBU with show_existing_frame = 1 for `slot` (makes MPP output that slot's picture).  av1_write_frame_obu
+   keeps a 64 KiB header scratch on the stack: fine on client threads (8 MB default), noted because vaSyncSurface runs it. */
 size_t av1_write_show_existing(const GstAV1SequenceHeaderOBU *seq, int slot, uint8_t frame_type, uint8_t *dst, size_t cap);

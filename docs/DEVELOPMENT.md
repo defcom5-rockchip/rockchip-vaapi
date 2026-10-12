@@ -347,7 +347,9 @@ What the VA parameters do not say, and how it is handled:
   `separate_uv_delta_q` are set so the per-frame bits can be expressed; a picture that no longer matches starts a new
   sequence header (MPP info change).
 - **Refused** (`av1_frame_from_va` / `av1_seq_from_va` return -1): Profile 1/2, 12-bit, monochrome, super-resolution,
-  large-scale tile, an INTRA_ONLY frame with refresh 0xff.
+  large-scale tile, switch frames, an INTRA_ONLY frame with refresh 0xff, more than 64 tile columns or rows. A picture
+  whose tile count does not match its header, or whose slice buffers are malformed, is refused at EndPicture; every
+  refusal marks the picture's surfaces decoded so a waiting vaSyncSurface returns at once.
 
 Changes to the vendored writer, each marked `rockchip-vaapi fix (n)` in the source: (1) segmentation params implemented (upstream had a TODO);
 (2) loop-filter delta updates; (3) `PrevGmParams` taken from the struct address instead of `.gm_params`; (4)

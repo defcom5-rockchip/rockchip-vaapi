@@ -171,7 +171,7 @@ typedef struct {
     MppCodingType coding;
 
     /* buffers collected between BeginPicture / EndPicture */
-    VABufferID   pending[64];
+    VABufferID   pending[576];   /* Chromium: one slice-parameter buffer per AV1 tile (up to 512) + the rest */
     int          n_pending;
 
     VASurfaceID  render_target;
@@ -195,7 +195,7 @@ typedef struct {
        DestroyContext). It lives as long as the driver: initialised for every slot in __vaDriverInit,
        destroyed in rk_Terminate, and never cleared, so a thread still in vaSyncSurface on a context
        that is being destroyed waits on a valid mutex and then sees `used` false. MUST stay the last
-       member: CTX_CLEAR stops short of it. Lock order: out_lock, then a surface's lock. Not held
+       member: CTX_CLEAR stops short of it. Lock order: av1_lock, then out_lock, then a surface's lock. Not held
        across the retry sleeps; it is held while a frame is copied out (assign_mpp_frame). */
     /* AV1: the re-serialiser's state (see av1.h / do_av1_decode) */
     VADecPictureParameterBufferAV1 last_pp_av1;
@@ -214,14 +214,15 @@ typedef struct {
         Av1Tile     tiles[512];
         int         ntiles;
     } av1_pending;
-    pthread_mutex_t av1_lock;   /* serialises the AV1 submit policy between EndPicture (decoder thread) and vaSyncSurface (any thread) */
     pthread_mutex_t out_lock;
+    pthread_mutex_t av1_lock;   /* serialises the AV1 submit policy between EndPicture (decoder thread) and vaSyncSurface (any
+                                   thread).  Driver lifetime like out_lock.  Lock order: av1_lock, then out_lock, then a surface. */
 } RKContext;
 
 /* Clear a context slot but keep its out_lock (the last member, see above). */
 #define CTX_CLEAR(c) memset((c), 0, offsetof(RKContext, out_lock))
-_Static_assert(offsetof(RKContext, out_lock) + sizeof(pthread_mutex_t) == sizeof(RKContext),
-               "out_lock must be the last member of RKContext: CTX_CLEAR keeps everything after it");
+_Static_assert(offsetof(RKContext, out_lock) + 2 * sizeof(pthread_mutex_t) == sizeof(RKContext),
+               "out_lock and av1_lock must be the last members of RKContext: CTX_CLEAR keeps everything after out_lock");
 
 typedef struct {
     bool         used;
@@ -396,10 +397,12 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     }
     for (int i = 0; i < MAX_CONTEXTS; i++) {
         RKContext *c = &d->contexts[i];
+        pthread_mutex_lock(&c->av1_lock);
         pthread_mutex_lock(&c->out_lock);
-        if (c->used) rk_mpp_teardown_locked(c);
-        pthread_mutex_unlock(&c->out_lock);
-        pthread_mutex_destroy(&c->out_lock);   /* every slot has one, used or not */
+        if (c->used) { free(c->av1_pending.tiles_buf); c->av1_pending.tiles_buf = NULL; rk_mpp_teardown_locked(c); }
+        pthread_mutex_unlock(&c->out_lock); pthread_mutex_unlock(&c->av1_lock);
+        pthread_mutex_destroy(&c->out_lock);   /* every slot has both, used or not */
+        pthread_mutex_destroy(&c->av1_lock);
     }
     for (int i = 0; i < MAX_BUFFERS; i++) {
         /* a derived image still alive aliases MPP memory: not ours to free */
@@ -808,7 +811,6 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         pthread_mutex_lock(&c->out_lock);      /* claim: test and mark in one step */
         if (c->used) { pthread_mutex_unlock(&c->out_lock); continue; }
         CTX_CLEAR(c);
-        pthread_mutex_init(&c->av1_lock, NULL);
         c->mpp       = mpp;
         c->mpi       = mpi;
         c->config_id = config_id;
@@ -836,18 +838,19 @@ static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
     /* Teardown and clear under the slot's lock, so a vaSyncSurface on another thread (mpv's VO exporting a
        surface while its decoder thread abandons zero-copy) either finishes its drain first or finds the slot
        unused afterwards; it can never reach a half-destroyed decoder or a destroyed mutex. */
+    /* av1_lock before out_lock, the order EndPicture and a forcing vaSyncSurface use (av1_submit takes out_lock
+       repeatedly under av1_lock); the reverse order deadlocked a sync on a held AV1 picture against this teardown. */
+    pthread_mutex_lock(&c->av1_lock);
     pthread_mutex_lock(&c->out_lock);
     if (!c->used) {                            /* lost a race with another DestroyContext */
-        pthread_mutex_unlock(&c->out_lock);
+        pthread_mutex_unlock(&c->out_lock); pthread_mutex_unlock(&c->av1_lock);
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
     LOG("DestroyContext: reset + drain + destroy");
-    pthread_mutex_lock(&c->av1_lock);
     free(c->av1_pending.tiles_buf); c->av1_pending.tiles_buf = NULL; c->av1_pending.valid = false;
-    pthread_mutex_unlock(&c->av1_lock); pthread_mutex_destroy(&c->av1_lock);
     rk_mpp_teardown_locked(c);
-    CTX_CLEAR(c);                              /* used = false; out_lock untouched */
-    pthread_mutex_unlock(&c->out_lock);
+    CTX_CLEAR(c);                              /* used = false; out_lock and av1_lock untouched */
+    pthread_mutex_unlock(&c->out_lock); pthread_mutex_unlock(&c->av1_lock);
     return VA_STATUS_SUCCESS;
 }
 
@@ -960,7 +963,9 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
     RKContext *c = context_by_id(d, ctx_id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
 
-    for (int i = 0; i < n && c->n_pending < 64; i++) {
+    const int max_pending = (int)(sizeof c->pending / sizeof c->pending[0]);
+    if (c->n_pending + n > max_pending) LOG("RenderPicture: %d buffers exceed the pending list (%d); the picture will be refused", c->n_pending + n, max_pending);
+    for (int i = 0; i < n && c->n_pending < max_pending; i++) {
         c->pending[c->n_pending++] = buffers[i];
         /* Snapshot VAPictureParameterBufferH264 immediately */
         RKBuffer *b = buffer_by_id(d, buffers[i]);
@@ -1767,7 +1772,7 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
        later if the successor shows it was a reference */
     if (force_show) hidden = false;
     bool resub = p->forced;                       /* second submission: the slot refresh only, the picture was output already */
-    if (av1_frame_from_va(pp, &c->av1_seq, refs, mask, &fh) < 0) { LOG("av1: frame uses an unsupported feature (superres/large-scale tile/intra-only refresh)"); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
+    if (av1_frame_from_va(pp, &c->av1_seq, refs, mask, &fh) < 0) { LOG("av1: frame uses an unsupported feature (superres/large-scale tile/intra-only refresh/switch frame)"); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
     if (force_show && !fh.show_frame) {
         fh.show_frame = 1; fh.showable_frame = 0;
         /* a hidden KEY shown early would refresh every slot (shown KEY semantics): decode it as INTRA_ONLY instead —
@@ -1825,6 +1830,7 @@ static VAStatus av1_resolve_pending(RKContext *c, RKDriver *d, const VADecPictur
     uint8_t mask = next ? av1_mask_from_successor(next, p->ref_surface) : 0;
     VAStatus st = VA_STATUS_SUCCESS;
     if (!p->forced || mask) st = av1_submit(c, d, mask, false);        /* forced + mask 0: the early decode was final */
+    if (st != VA_STATUS_SUCCESS) { av1_mark_decoded(d, p->surface); if (p->out_surface != p->surface) av1_mark_decoded(d, p->out_surface); }
     else { RKSurface *me = surface_by_id(d, p->ref_surface); if (me) me->av1_mask = 0; }
     p->valid = false; p->forced = false;
     return st;
@@ -1842,16 +1848,24 @@ static void av1_force_pending(RKContext *c, RKDriver *d, VASurfaceID sid) {
     pthread_mutex_unlock(&c->av1_lock);
 }
 
+/* A refused picture: nothing will come out of MPP for it, so release whoever syncs its surfaces (BeginPicture armed
+   the render target; film grain arms the display surface too) instead of making them wait out the 3 s deadline. */
+static VAStatus av1_refuse(RKContext *c, RKDriver *d, const VADecPictureParameterBufferAV1 *pp, VAStatus st) {
+    av1_mark_decoded(d, c->render_target);
+    if (pp && pp->current_display_picture != VA_INVALID_SURFACE && pp->current_display_picture != c->render_target) av1_mark_decoded(d, pp->current_display_picture);
+    return st;
+}
+
 static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
-    if (!c->have_pp_av1) { LOG("av1: EndPicture without picture parameters"); return VA_STATUS_ERROR_INVALID_PARAMETER; }
+    if (!c->have_pp_av1) { LOG("av1: EndPicture without picture parameters"); return av1_refuse(c, d, NULL, VA_STATUS_ERROR_INVALID_PARAMETER); }
     const VADecPictureParameterBufferAV1 *pp = &c->last_pp_av1;
     c->have_pp_av1 = false;
     /* RKVA_HIDE_10BIT: 8- and 10-bit AV1 share one profile, so a client that ignores the RT-format/P010 answers can
        still hand us a 10-bit stream with 8-bit surfaces (ffmpeg's CLI does).  Refuse before MPP sees it. */
-    if (hide_10bit() && pp->bit_depth_idx) { LOG("av1: 10-bit stream refused (RKVA_HIDE_10BIT)"); return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT; }
+    if (hide_10bit() && pp->bit_depth_idx) { LOG("av1: 10-bit stream refused (RKVA_HIDE_10BIT)"); return av1_refuse(c, d, pp, VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT); }
     /* 1. the previous picture can now be decoded: this one's ref_frame_map shows where it went */
     VAStatus st = av1_resolve_pending(c, d, pp);
-    if (st != VA_STATUS_SUCCESS) return st;
+    if (st != VA_STATUS_SUCCESS) return av1_refuse(c, d, pp, st);
     /* a shown-existing KEY frame: the client refreshed every slot with the same key surface → MPP must do the same */
     {
         VASurfaceID k = pp->ref_frame_map[0]; bool all = (k != VA_INVALID_SURFACE);
@@ -1874,6 +1888,7 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
     for (int i = 0; i < c->n_pending; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
         if (!b || b->type != VASliceParameterBufferType) continue;
+        if (b->size < sizeof(VASliceParameterBufferAV1)) { LOG("av1: slice parameter buffer too small (%u bytes)", b->size); return av1_refuse(c, d, pp, VA_STATUS_ERROR_INVALID_BUFFER); }
         const VASliceParameterBufferAV1 *sp = (const VASliceParameterBufferAV1 *)b->data;
         for (unsigned e = 0; e < b->num_elements; e++) need += sp[e].slice_data_size;
     }
@@ -1889,12 +1904,12 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
         if (!db) {
             LOG("av1: slice parameters without slice data (%d buffers this picture):", c->n_pending);
             for (int k = 0; k < c->n_pending; k++) { RKBuffer *bk = buffer_by_id(d, c->pending[k]); LOG("av1:   buffer %d type %d size %u x%u", k, bk ? (int)bk->type : -1, bk ? bk->size : 0u, bk ? bk->num_elements : 0u); }
-            return VA_STATUS_ERROR_INVALID_BUFFER;
+            return av1_refuse(c, d, pp, VA_STATUS_ERROR_INVALID_BUFFER);
         }
         size_t dlen = (size_t)db->size * db->num_elements;
         const VASliceParameterBufferAV1 *sp = (const VASliceParameterBufferAV1 *)b->data;
         for (unsigned e = 0; e < b->num_elements && p->ntiles < 512; e++) {
-            if ((size_t)sp[e].slice_data_offset + sp[e].slice_data_size > dlen || sp[e].slice_data_size == 0) { LOG("av1: tile span out of range"); return VA_STATUS_ERROR_INVALID_BUFFER; }
+            if ((size_t)sp[e].slice_data_offset + sp[e].slice_data_size > dlen || sp[e].slice_data_size == 0) { LOG("av1: tile span out of range"); return av1_refuse(c, d, pp, VA_STATUS_ERROR_INVALID_BUFFER); }
             memcpy(p->tiles_buf + p->tiles_len, (const uint8_t *)db->data + sp[e].slice_data_offset, sp[e].slice_data_size);
             p->tiles[p->ntiles].data = NULL; p->tiles[p->ntiles].len = sp[e].slice_data_size;   /* pointer fixed below (realloc-safe) */
             p->tiles_len += sp[e].slice_data_size; p->ntiles++;
@@ -1902,8 +1917,10 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
     }
     { size_t off = 0; for (int t = 0; t < p->ntiles; t++) { p->tiles[t].data = p->tiles_buf + off; off += p->tiles[t].len; } }
     if (p->ntiles == 0) { LOG("av1: no tiles, marking surface 0x%x decoded", (unsigned)c->render_target); av1_mark_decoded(d, c->render_target); return VA_STATUS_SUCCESS; }
-    if (p->ntiles != (int)pp->tile_cols * (int)pp->tile_rows)
-        LOG("av1: NOTE %d tiles delivered, header says %u x %u", p->ntiles, pp->tile_cols, pp->tile_rows);
+    if (p->ntiles != (int)pp->tile_cols * (int)pp->tile_rows) {   /* a short tile group would send MPP's parser past the packet */
+        LOG("av1: %d tiles delivered, header says %u x %u — picture refused", p->ntiles, pp->tile_cols, pp->tile_rows);
+        return av1_refuse(c, d, pp, VA_STATUS_ERROR_INVALID_BUFFER);
+    }
     p->pp = *pp; p->surface = c->render_target; p->valid = true;
     /* Film grain: VA-API renders the (grained) output into the render target and keeps the un-grained picture in
        pp->current_frame, which is what ref_frame_map points at later.  Slot bookkeeping follows current_frame. */
@@ -1924,7 +1941,7 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
     }
     /* 3. a shown KEY frame refreshes every slot by definition: no need to wait */
     if (pp->pic_info_fields.bits.frame_type == 0 && pp->pic_info_fields.bits.show_frame) {
-        st = av1_submit(c, d, 0xff, false); p->valid = false; return st;
+        st = av1_submit(c, d, 0xff, false); p->valid = false; return st == VA_STATUS_SUCCESS ? st : av1_refuse(c, d, pp, st);
     }
     return VA_STATUS_SUCCESS;                                          /* held until the next picture (or a sync) */
 }
@@ -2583,8 +2600,10 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
     ctx->pDriverData = d;
     pthread_mutex_init(&d->buf_lock, NULL);
     pthread_mutex_init(&d->obj_lock, NULL);
-    for (int i = 0; i < MAX_CONTEXTS; i++)
+    for (int i = 0; i < MAX_CONTEXTS; i++) {
         pthread_mutex_init(&d->contexts[i].out_lock, NULL);   /* live as long as the driver (see RKContext) */
+        pthread_mutex_init(&d->contexts[i].av1_lock, NULL);
+    }
 
     ctx->version_major        = VA_MAJOR_VERSION;
     ctx->version_minor        = VA_MINOR_VERSION;

@@ -142,12 +142,12 @@ static int fill_tile_info(const VADecPictureParameterBufferAV1 *pp, const GstAV1
     } else {
         int start = 0;
         if (rkva_av1_writer_debug) { fprintf(stderr, "av1: non-uniform tiles %dx%d (sb %dx%d, mi %dx%d) w_sbs-1:", cols, rows, sb_cols, sb_rows, mi_cols, mi_rows); for (int i = 0; i < cols; i++) fprintf(stderr, " %u", pp->width_in_sbs_minus_1[i]); fprintf(stderr, " h_sbs-1:"); for (int i = 0; i < rows; i++) fprintf(stderr, " %u", pp->height_in_sbs_minus_1[i]); fputc('\n', stderr); }
-        for (int i = 0; i < cols; i++) { ti->mi_col_starts[i] = start << sb_shift; start += pp->width_in_sbs_minus_1[i] + 1; }
+        for (int i = 0; i < cols; i++) { ti->mi_col_starts[i] = start << sb_shift; if (i + 1 < cols) start += pp->width_in_sbs_minus_1[i] + 1; }   /* VA arrays hold 63 */
         /* the writer sizes each tile as (next start - start) >> sb_shift, so the last entry is the superblock-aligned
            end, not MiCols (720 px: 11 SBs of 12 otherwise, and the writer refuses the frame) */
         ti->mi_col_starts[cols] = sb_cols << sb_shift;
         start = 0;
-        for (int i = 0; i < rows; i++) { ti->mi_row_starts[i] = start << sb_shift; start += pp->height_in_sbs_minus_1[i] + 1; }
+        for (int i = 0; i < rows; i++) { ti->mi_row_starts[i] = start << sb_shift; if (i + 1 < rows) start += pp->height_in_sbs_minus_1[i] + 1; }
         ti->mi_row_starts[rows] = sb_rows << sb_shift;
         ti->tile_cols_log2 = tile_log2(1, cols); ti->tile_rows_log2 = tile_log2(1, rows);
     }
@@ -173,6 +173,8 @@ int av1_frame_from_va(const VADecPictureParameterBufferAV1 *pp, const GstAV1Sequ
     if (fh->frame_is_intra) fh->force_integer_mv = 1;
     fh->current_frame_id = 0;
     fh->frame_size_override_flag = 0;                                   /* frame size == sequence max (surface size) */
+    if (fh->frame_type == GST_AV1_SWITCH_FRAME) return -1;              /* switch frames need the explicit-size header and a full
+                                                                           refresh; not produced by the encoders we meet — refused */
     fh->order_hint = pp->order_hint;
     fh->primary_ref_frame = (fh->frame_is_intra || fh->error_resilient_mode) ? GST_AV1_PRIMARY_REF_NONE : pp->primary_ref_frame;
     fh->buffer_removal_time_present_flag = 0;
@@ -217,13 +219,15 @@ int av1_frame_from_va(const VADecPictureParameterBufferAV1 *pp, const GstAV1Sequ
     if (sg->segmentation_enabled) {
         if (fh->primary_ref_frame == GST_AV1_PRIMARY_REF_NONE) { sg->segmentation_update_map = 1; sg->segmentation_temporal_update = 0; }
         else { sg->segmentation_update_map = pp->seg_info.segment_info_fields.bits.update_map; sg->segmentation_temporal_update = sg->segmentation_update_map ? pp->seg_info.segment_info_fields.bits.temporal_update : 0; }
-        /* update_data = 0 means "keep the primary reference frame's segmentation" and VA's feature arrays are then
-           not meaningful (FFmpeg hands zeros); MPP loads them from its own reference state, so pass the flag through.
-           With no primary reference frame the spec implies 1 (not coded). */
+        /* update_data = 0 means "keep the primary reference frame's segmentation"; libva says VA's feature arrays
+           "shall be ignored" then.  MPP loads them from its own reference state (the flag is passed through); for our
+           own lossless derivation below take them from what that reference carried. */
         sg->segmentation_update_data = (fh->primary_ref_frame == GST_AV1_PRIMARY_REF_NONE) ? 1 : pp->seg_info.segment_info_fields.bits.update_data;
+        const Av1RefInfo *pr = (!sg->segmentation_update_data && fh->primary_ref_frame != GST_AV1_PRIMARY_REF_NONE) ? &refs[pp->ref_frame_idx[fh->primary_ref_frame]] : NULL;
+        if (pr && !pr->valid) pr = NULL;
         for (int i = 0; i < 8; i++) for (int j = 0; j < 8; j++) {
-            sg->feature_enabled[i][j] = (pp->seg_info.feature_mask[i] >> j) & 1;
-            sg->feature_data[i][j] = sg->feature_enabled[i][j] ? pp->seg_info.feature_data[i][j] : 0;
+            sg->feature_enabled[i][j] = pr ? pr->feature_enabled[i][j] : (pp->seg_info.feature_mask[i] >> j) & 1;
+            sg->feature_data[i][j] = sg->feature_enabled[i][j] ? (pr ? pr->feature_data[i][j] : pp->seg_info.feature_data[i][j]) : 0;
             if (sg->feature_enabled[i][j]) { sg->last_active_seg_id = i; if (j >= 5) sg->seg_id_pre_skip = 1; }
         }
     }
@@ -337,6 +341,9 @@ void av1_ref_from_frame(const VADecPictureParameterBufferAV1 *pp, const GstAV1Fr
     memset(out, 0, sizeof *out);
     out->valid = true; out->frame_type = fh->frame_type; out->order_hint = fh->order_hint;
     out->width = fh->upscaled_width; out->height = fh->frame_height;
+    if (fh->segmentation_params.segmentation_enabled) {           /* for a successor with segmentation_update_data = 0 */
+        for (int i = 0; i < 8; i++) for (int j = 0; j < 8; j++) { out->feature_enabled[i][j] = fh->segmentation_params.feature_enabled[i][j]; out->feature_data[i][j] = fh->segmentation_params.feature_data[i][j]; }
+    }
     if (fh->frame_is_intra) av1_gm_identity(out->gm); else memcpy(out->gm, fh->global_motion_params.gm_params, sizeof out->gm);
     for (int r = 0; r < 8; r++) out->gm_type[r] = fh->frame_is_intra ? GST_AV1_WARP_MODEL_IDENTITY : fh->global_motion_params.gm_type[r];
     (void)pp;
