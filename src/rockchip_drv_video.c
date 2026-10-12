@@ -444,6 +444,16 @@ static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
     return VA_STATUS_SUCCESS;
 }
 
+/* RT formats a profile decodes into.  RKVA_HIDE_10BIT=1 (the Firefox stopgap while the Mali blob imports R16 planes as
+   integer textures) must also cover AV1, whose 8- and 10-bit streams share VAProfileAV1Profile0: with it set, every
+   profile answers 8-bit only, a 10-bit request is refused at vaCreateConfig, and P010 leaves the surface attributes —
+   FFmpeg/ffvpx then fails hwaccel setup for a 10-bit AV1 stream and falls back to software. */
+static bool hide_10bit(void) { static int v = -1; if (v < 0) v = getenv("RKVA_HIDE_10BIT") ? 1 : 0; return v == 1; }
+static unsigned rt_formats_for(VAProfile profile) {
+    (void)profile;
+    return hide_10bit() ? VA_RT_FORMAT_YUV420 : (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10);
+}
+
 static VAStatus rk_QueryConfigEntrypoints(VADriverContextP ctx,
                                           VAProfile profile,
                                           VAEntrypoint *list, int *n) {
@@ -459,12 +469,12 @@ static VAStatus rk_GetConfigAttributes(VADriverContextP ctx,
                                        VAProfile profile,
                                        VAEntrypoint entrypoint,
                                        VAConfigAttrib *list, int n) {
-    (void)ctx; (void)profile; (void)entrypoint;
+    (void)ctx; (void)entrypoint;
     for (int i = 0; i < n; i++) {
         LOG("GetConfigAttributes: type=%d", list[i].type);
         switch (list[i].type) {
         case VAConfigAttribRTFormat:
-            list[i].value = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10;
+            list[i].value = rt_formats_for(profile);
             break;
         case VAConfigAttribDecSliceMode:
             list[i].value = VA_DEC_SLICE_MODE_NORMAL;
@@ -496,7 +506,13 @@ static VAStatus rk_CreateConfig(VADriverContextP ctx,
         LOG("CreateConfig: unsupported entrypoint %d", entrypoint);
         return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
     }
-    (void)attribs; (void)n_attribs;
+    for (int i = 0; i < n_attribs && attribs; i++) {
+        if (attribs[i].type == VAConfigAttribRTFormat && attribs[i].value != VA_ATTRIB_NOT_SUPPORTED &&
+            (attribs[i].value & ~rt_formats_for(profile))) {
+            LOG("CreateConfig: RT format 0x%x not offered for profile %d (supported 0x%x)", attribs[i].value, profile, rt_formats_for(profile));
+            return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+        }
+    }
 
     pthread_mutex_lock(&d->obj_lock);
     for (unsigned i = 0; i < MAX_CONFIGS; i++) {
@@ -542,12 +558,11 @@ static VAStatus rk_QueryConfigAttributes(VADriverContextP ctx,
        VAConfigAttribRTFormat (enum value 0) with value 0, i.e. "no formats". */
     if (attribs) {
         attribs[0].type  = VAConfigAttribRTFormat;
-        attribs[0].value = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10;
+        attribs[0].value = rt_formats_for(c->profile);
     }
     *n = 1;
     LOG("QueryConfigAttributes: profile=%d entrypoint=%d -> RTFormat=0x%x",
-        c->profile, c->entrypoint,
-        (unsigned)(VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10));
+        c->profile, c->entrypoint, rt_formats_for(c->profile));
     return VA_STATUS_SUCCESS;
 }
 
@@ -1831,6 +1846,9 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
     if (!c->have_pp_av1) { LOG("av1: EndPicture without picture parameters"); return VA_STATUS_ERROR_INVALID_PARAMETER; }
     const VADecPictureParameterBufferAV1 *pp = &c->last_pp_av1;
     c->have_pp_av1 = false;
+    /* RKVA_HIDE_10BIT: 8- and 10-bit AV1 share one profile, so a client that ignores the RT-format/P010 answers can
+       still hand us a 10-bit stream with 8-bit surfaces (ffmpeg's CLI does).  Refuse before MPP sees it. */
+    if (hide_10bit() && pp->bit_depth_idx) { LOG("av1: 10-bit stream refused (RKVA_HIDE_10BIT)"); return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT; }
     /* 1. the previous picture can now be decoded: this one's ref_frame_map shows where it went */
     VAStatus st = av1_resolve_pending(c, d, pp);
     if (st != VA_STATUS_SUCCESS) return st;
@@ -2410,7 +2428,7 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
         config, attrib_list ? "provided" : "NULL (query count)");
 
     /* Firefox calls this twice: first with NULL to get count, then with buffer */
-    const unsigned int n = 7;
+    const unsigned int n = hide_10bit() ? 6 : 7;     /* RKVA_HIDE_10BIT: no P010 entry */
     if (!attrib_list) {
         *num_attribs = n;
         return VA_STATUS_SUCCESS;
@@ -2420,49 +2438,59 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
         return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
     }
 
+    unsigned k = 0;
     /* Pixel format: NV12 (8-bit) */
-    attrib_list[0].type              = VASurfaceAttribPixelFormat;
-    attrib_list[0].flags             = VA_SURFACE_ATTRIB_GETTABLE;
-    attrib_list[0].value.type        = VAGenericValueTypeInteger;
-    attrib_list[0].value.value.i     = VA_FOURCC_NV12;
+    attrib_list[k].type              = VASurfaceAttribPixelFormat;
+    attrib_list[k].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[k].value.type        = VAGenericValueTypeInteger;
+    attrib_list[k].value.value.i     = VA_FOURCC_NV12;
+    k++;
 
-    /* Pixel format: P010 (10-bit) */
-    attrib_list[1].type              = VASurfaceAttribPixelFormat;
-    attrib_list[1].flags             = VA_SURFACE_ATTRIB_GETTABLE;
-    attrib_list[1].value.type        = VAGenericValueTypeInteger;
-    attrib_list[1].value.value.i     = VA_FOURCC_P010;
+    /* Pixel format: P010 (10-bit) — not under RKVA_HIDE_10BIT */
+    if (!hide_10bit()) {
+        attrib_list[k].type              = VASurfaceAttribPixelFormat;
+        attrib_list[k].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+        attrib_list[k].value.type        = VAGenericValueTypeInteger;
+        attrib_list[k].value.value.i     = VA_FOURCC_P010;
+        k++;
+    }
 
     /* Memory type: VA-managed + DRM PRIME 2 */
-    attrib_list[2].type              = VASurfaceAttribMemoryType;
-    attrib_list[2].flags             = VA_SURFACE_ATTRIB_GETTABLE |
+    attrib_list[k].type              = VASurfaceAttribMemoryType;
+    attrib_list[k].flags             = VA_SURFACE_ATTRIB_GETTABLE |
+    k++;
                                        VA_SURFACE_ATTRIB_SETTABLE;
     attrib_list[2].value.type        = VAGenericValueTypeInteger;
     attrib_list[2].value.value.i     = (int)(VA_SURFACE_ATTRIB_MEM_TYPE_VA |
                                        VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2);
 
     /* Max resolution */
-    attrib_list[3].type              = VASurfaceAttribMaxWidth;
-    attrib_list[3].flags             = VA_SURFACE_ATTRIB_GETTABLE;
-    attrib_list[3].value.type        = VAGenericValueTypeInteger;
-    attrib_list[3].value.value.i     = 7680;
+    attrib_list[k].type              = VASurfaceAttribMaxWidth;
+    attrib_list[k].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[k].value.type        = VAGenericValueTypeInteger;
+    attrib_list[k].value.value.i     = 7680;
+    k++;
 
-    attrib_list[4].type              = VASurfaceAttribMaxHeight;
-    attrib_list[4].flags             = VA_SURFACE_ATTRIB_GETTABLE;
-    attrib_list[4].value.type        = VAGenericValueTypeInteger;
-    attrib_list[4].value.value.i     = 4320;
+    attrib_list[k].type              = VASurfaceAttribMaxHeight;
+    attrib_list[k].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[k].value.type        = VAGenericValueTypeInteger;
+    attrib_list[k].value.value.i     = 4320;
+    k++;
 
-    attrib_list[5].type              = VASurfaceAttribMinWidth;
-    attrib_list[5].flags             = VA_SURFACE_ATTRIB_GETTABLE;
-    attrib_list[5].value.type        = VAGenericValueTypeInteger;
-    attrib_list[5].value.value.i     = 16;
+    attrib_list[k].type              = VASurfaceAttribMinWidth;
+    attrib_list[k].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[k].value.type        = VAGenericValueTypeInteger;
+    attrib_list[k].value.value.i     = 16;
+    k++;
 
-    attrib_list[6].type              = VASurfaceAttribMinHeight;
-    attrib_list[6].flags             = VA_SURFACE_ATTRIB_GETTABLE;
-    attrib_list[6].value.type        = VAGenericValueTypeInteger;
-    attrib_list[6].value.value.i     = 16;
+    attrib_list[k].type              = VASurfaceAttribMinHeight;
+    attrib_list[k].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[k].value.type        = VAGenericValueTypeInteger;
+    attrib_list[k].value.value.i     = 16;
+    k++;
 
-    *num_attribs = n;
-    LOG("QuerySurfaceAttributes: returned %u attribs (NV12, P010, DRM_PRIME_2)", n);
+    *num_attribs = k;
+    LOG("QuerySurfaceAttributes: returned %u attribs (NV12%s, DRM_PRIME_2)", n, hide_10bit() ? "" : ", P010");
     return VA_STATUS_SUCCESS;
 }
 
