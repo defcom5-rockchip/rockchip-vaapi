@@ -1,0 +1,21 @@
+=== download (cached) 2026-10-11T17:26:00-07:00
+Test suites: ['AV1-TEST-VECTORS', 'CHROMIUM-8bit-AV1-TEST-VECTORS', 'CHROMIUM-10bit-AV1-TEST-VECTORS']
+Downloading resources for test suites: AV1-TEST-VECTORS, CHROMIUM-10bit-AV1-TEST-VECTORS, CHROMIUM-8bit-AV1-TEST-VECTORS
+Unique sources: 278, using 4 parallel job(s)
+All downloads finished
+=== run AV1-TEST-VECTORS 2026-10-11T17:26:00-07:00
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command 'ffmpeg -hide_banner -nostdin -loglevel warning -hwaccel vaapi -threads 1 -codec av1 -i /home/plaiddesktop/fluster/fluster/../resources/AV1-TEST-VECTORS/av1-1-b8-24-monochrome/av1-1-b8-24-monochrome.ivf -fps_mode passthrough -filter format=pix_fmts=gray -f rawvideo /tmp/fluster_output/AV1-TEST-VECTORS/av1-1-b8-24-monochrome.out' returned non-zero exit status 69.
+
+Ran 213/242 tests successfully, in 32.148 secs
+=== run CHROMIUM-8bit-AV1-TEST-VECTORS 2026-10-11T17:26:34-07:00
++ c299c8957b76bacb355434c03eb07ef6
+ : ccvbfilmgrain.ivf
+
+Ran 9/13 tests successfully, in 4.467 secs
+=== run CHROMIUM-10bit-AV1-TEST-VECTORS 2026-10-11T17:26:39-07:00
++ 5bdd8c25c73321c741e167b1365cf811
+ : av1-1-b10-23-filmgrain-50.ivf
+
+Ran 22/23 tests successfully, in 2.585 secs
+=== done 2026-10-11T17:26:43-07:00
