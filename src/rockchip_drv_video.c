@@ -1751,18 +1751,28 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
        as a shown frame with refresh_frame_flags = 0 — same picture, nothing refreshed; the real (hidden) header follows
        later if the successor shows it was a reference */
     if (force_show) hidden = false;
+    bool resub = p->forced;                       /* second submission: the slot refresh only, the picture was output already */
     if (av1_frame_from_va(pp, &c->av1_seq, refs, mask, &fh) < 0) { LOG("av1: frame uses an unsupported feature (superres/large-scale tile/intra-only refresh)"); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
-    if (force_show && !fh.show_frame) { fh.show_frame = 1; if (fh.frame_type == GST_AV1_KEY_FRAME) fh.refresh_frame_flags = 0xff; }
+    if (force_show && !fh.show_frame) {
+        fh.show_frame = 1; fh.showable_frame = 0;
+        /* a hidden KEY shown early would refresh every slot (shown KEY semantics): decode it as INTRA_ONLY instead —
+           identical intra coding, refresh 0 */
+        if (fh.frame_type == GST_AV1_KEY_FRAME) fh.frame_type = GST_AV1_INTRA_ONLY_FRAME;
+    }
+    /* MPP decodes the re-submission again; its output must never reach the client's surface (it can land after the
+       picture the client already read, and the second decode of a frame is not always identical: Chromium 48delayed
+       frames 302/366).  A hidden frame refreshes its slots and outputs nothing. */
+    if (resub && fh.show_frame) { fh.show_frame = 0; fh.showable_frame = 1; hidden = true; }
     if (getenv("RKVA_AV1_NO_GRAIN")) fh.film_grain_params.apply_grain = 0;   /* experiment switch: send frames without film grain */
     size_t fn = av1_write_frame_obu(&fh, &c->av1_seq, p->tiles, p->ntiles, buf + n, cap - n);
     if (!fn) { LOG("av1: frame header write failed"); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
     n += fn;
-    bool will_output = !hidden || mask != 0;      /* hidden + a slot = shown via show_existing below */
+    bool will_output = !resub && (!hidden || mask != 0);   /* hidden + a slot = shown via show_existing below */
     LOG("av1: submit surface=0x%x type=%u show=%u mask=0x%02x tiles=%d bytes=%zu%s%s", (unsigned)p->surface, fh.frame_type, fh.show_frame, mask, p->ntiles, n, p->forced ? " (re-submit)" : "", force_show ? " (forced early)" : "");
     const char *dump = getenv("RKVA_DUMP_AV1");
     if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(buf, 1, n, df); fclose(df); } }
     VAStatus st = av1_put(c, d, buf, n, p->out_surface, !hidden);
-    if (st == VA_STATUS_SUCCESS && hidden && mask && fh.frame_type == GST_AV1_KEY_FRAME) {
+    if (st == VA_STATUS_SUCCESS && !resub && hidden && mask && fh.frame_type == GST_AV1_KEY_FRAME) {
         /* A hidden KEY frame (libaom forward keyframes, Chromium 48delayed): show_existing of a KEY makes the decoder
            refresh every slot and reset — the stream only does that when it really shows it later.  For the client's
            copy decode the same tiles again as a shown INTRA_ONLY frame with refresh_frame_flags = 0: identical intra
@@ -1774,13 +1784,13 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
         LOG("av1: hidden KEY surface=0x%x: output copy as shown INTRA_ONLY (%zu bytes)", (unsigned)p->surface, n2);
         if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(b2, 1, n2, df); fclose(df); } }
         st = av1_put(c, d, b2, n2, p->out_surface, true); free(b2);
-    } else if (st == VA_STATUS_SUCCESS && hidden && mask) {
+    } else if (st == VA_STATUS_SUCCESS && !resub && hidden && mask) {
         uint8_t se[64]; size_t sn = av1_write_show_existing(&c->av1_seq, __builtin_ctz(mask), fh.frame_type, se, sizeof se);
         if (sn) { if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(se, 1, sn, df); fclose(df); } } st = av1_put(c, d, se, sn, p->out_surface, true); }
     }
     free(buf);
     if (st != VA_STATUS_SUCCESS) return st;
-    if (!will_output) av1_mark_decoded(d, p->out_surface);               /* nothing will ever come out for it */
+    if (!will_output && !resub) av1_mark_decoded(d, p->out_surface);     /* nothing will ever come out for it */
     if (p->out_surface != p->surface) av1_mark_decoded(d, p->surface);   /* film grain: the reconstruct surface is never read */
     RKSurface *me = surface_by_id(d, p->ref_surface);
     if (me) { av1_ref_from_frame(pp, &fh, &me->av1); me->av1_mask = mask; }
