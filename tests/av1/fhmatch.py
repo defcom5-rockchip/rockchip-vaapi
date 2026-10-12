@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (C) 2026 defcom5-rockchip
 # fhmatch.py A.fh B.fh order_hint refresh : diff the first frame blocks (after the 250th) in A and B whose header has that order_hint and refresh_frame_flags and show_frame=1
 import sys
 def blocks(p):

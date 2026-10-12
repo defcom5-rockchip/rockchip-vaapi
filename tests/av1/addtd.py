@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (C) 2026 defcom5-rockchip
 # insert a temporal delimiter OBU before every SEQ/FRAME/FRAME_HEADER OBU of a raw low-overhead OBU stream (makes ffmpeg's obu demuxer accept it)
 import sys
 def leb(b,i):

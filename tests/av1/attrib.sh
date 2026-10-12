@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (C) 2026 defcom5-rockchip
 # Attribute each failed Fluster vector: driver (VA-API re-serialiser) vs raw MPP (original stream, av1mpp --mode tu), both against dav1d.
 # usage: FLUSTER=~/fluster LIBVA_DRIVERS_PATH=<dir with rockchip_drv_video.so> TOOLS=<dir with av1mpp, nv15unpack> \
 #        CSVS="fluster-*.csv" ./attrib.sh > attrib.out      (needs ffmpeg with libdav1d + vaapi, ffprobe)

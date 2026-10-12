@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (C) 2026 defcom5-rockchip
 # cmpdisp.py hw.framemd5 out.idx exp.txt sw.framemd5 — compare MPP outputs (by packet pts) with dav1d's display order
 import sys
 hw=[l.split(',')[5].strip() for l in open(sys.argv[1]) if l.startswith('0,')]

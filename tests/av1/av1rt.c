@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * Copyright (C) 2026 defcom5-rockchip */
 /*
  * av1rt.c — round-trip test for the vendored AV1 OBU writer (experiment 2, our port).
  * For every sequence header and frame header in an IVF file: parse it with GStreamer's AV1 parser (system

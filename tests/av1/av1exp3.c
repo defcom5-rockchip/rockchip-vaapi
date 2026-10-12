@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * Copyright (C) 2026 defcom5-rockchip */
 /*
  * av1exp3.c — experiments 3 and 4 for the AV1 driver design (refresh_frame_flags deferral; show_existing of a KEY frame).
  *

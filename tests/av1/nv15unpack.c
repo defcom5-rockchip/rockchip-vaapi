@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * Copyright (C) 2026 defcom5-rockchip */
 /* nv15unpack.c — unpack MPP's NV15 (10-bit, 4 samples per 5 bytes, little-endian bit-packed rows) into yuv420p10le.
  * usage: nv15unpack in.nv15 out.yuv width height hor_stride   (input = frames of height + height/2 rows of hor_stride bytes)
  * Build: gcc -O2 -o nv15unpack nv15unpack.c */

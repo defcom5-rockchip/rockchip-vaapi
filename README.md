@@ -78,7 +78,8 @@ syncs it, when it is decoded at once and its slot refresh follows as a hidden fr
 `ffmpeg -hwaccel vaapi` (see `evidence/2026-10-11-av1-fluster/`); decode on the AV1 engine confirmed by interrupt
 counts in Chrome, Firefox and mpv, the picture checked by eye in Chrome and Firefox.
 Film grain is **not** applied (MPP does not synthesise it on RK3588): grainy streams decode to the clean picture.
-`RKVA_AV1_WRITER_DEBUG=1` prints the bit writer's warnings, `RKVA_DUMP_AV1=file` saves the stream sent to MPP.
+`RKVA_AV1_WRITER_DEBUG=1` prints the bit writer's warnings (`2` adds its debug trace), `RKVA_DUMP_AV1=file` saves the stream sent to MPP.
+AV1 needs MPP's `av1d` and the RK3588's AV1 decoder (RK356x has none); film grain depends on MPP (#974).
 The release is named after Number Nine's Pepper boards, the co-processor graphics cards of the late 1980s — this
 driver's whole job is handing video work to a co-processor.
 
@@ -200,7 +201,7 @@ above belongs to Eduardo García-Mádico Portabella; it does not cover these for
 ## License and attribution
 
 **LGPL-2.1-or-later** — see [LICENSE](LICENSE). Per-file copyright is recorded in
-[debian/copyright](debian/copyright); every source file carries an SPDX identifier.
+[debian/copyright](debian/copyright); the driver sources carry SPDX identifiers.
 
 This is a fork, and the lineage matters:
 
@@ -208,6 +209,9 @@ This is a fork, and the lineage matters:
   the VA-API vtable, the MPP plumbing, the H.264 parameter-set reconstruction and
   the H.264 bit writer (`bs.h`) this fork still builds on. Upstream: https://github.com/woodyst/rockchip-vaapi
 - **truongsinh** contributed the surface-stride fixes carried here from upstream PR #2.
+- **The GStreamer project** — `gstav1bitwriter.c`/`.h` (Intel, He Junyan, 2022) and `gstav1parser.h` (Georg
+  Ottinger, Intel), LGPL-2.0-or-later / LGPL-2.1-or-later, vendored in `src/av1/` from GStreamer 1.28.2 with six
+  marked changes (`src/av1/README`). The AV1 path is built on them.
 - **defcom5-rockchip** maintains this fork: the HEVC bitstream assembler (`src/hevc.c`,
   original work — upstream has no HEVC), the NV15 to P010 repack with its NEON path,
   B-frame and reference-routing fixes, `vaDeriveImage`, the honest profile
@@ -223,6 +227,7 @@ licenses and are not redistributed here.
 |---|---|
 | **Eduardo García-Mádico Portabella** (`woodyst`) | original driver: VA-API ↔ MPP bridge, H.264 path, the H.264 bit writer this fork builds on |
 | **TruongSinh Tran-Nguyen** (`truongsinh`) | surface-stride fixes (upstream PR #2) |
+| **GStreamer project** (Intel / He Junyan, Georg Ottinger) | the AV1 bit writer and parser headers vendored in `src/av1/` |
 | **defcom5-rockchip** | fork maintainer: 10-bit zero-copy (GR1616 fix), Main10/High10/VP9 P2, Chrome created-depth export, Panthor/Panfrost libva names, the RGA3 NV15→P010 export lane, AV1 (v3.0.0), the KI test ladder, releases — and the RK3588 kernel-side fixes that surfaced along the way (Armbian `linux-rockchip` PR #548) |
 | **Claude** (Anthropic) — Opus 5.5, Fable 5.1, Fable 5, Opus 5, Sonnet 4.6 | co-engineer on the fork, credited per commit in the `Co-Authored-By` trailers: root-cause work, patches, test tooling and the documentation |
 | **JFL** (Armbian forum) | test partner on the Orange Pi 5 Plus / Armbian vendor kernel: confirmed Chrome 10-bit HEVC and VP9 Profile 2 hardware playback with 2.1.5, measured the 2.2.0-rc1 RGA lane (97 → 1 dropped frames at 4K60 HDR), and reported the Panthor libva naming that became the shipped symlinks |

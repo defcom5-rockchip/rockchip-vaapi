@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * Copyright (C) 2026 defcom5-rockchip */
 /*
  * av1mpp.c — experiment harness: feed an AV1 IVF file to Rockchip MPP (av1d) and dump decoded frames.
  *

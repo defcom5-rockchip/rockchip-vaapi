@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (C) 2026 defcom5-rockchip
 # obu2ivf.py in.obu out.ivf W H : wrap a raw low-overhead OBU stream into IVF, one IVF frame per FRAME/FRAME_HEADER OBU
 # (a sequence header OBU rides with the frame that follows it)
 import sys, struct

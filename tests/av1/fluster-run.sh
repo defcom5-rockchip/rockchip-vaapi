@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (C) 2026 defcom5-rockchip
 # fluster-run.sh — run the three AV1 conformance suites through ffmpeg -hwaccel vaapi with this driver.
 # usage: FLUSTER=~/fluster LIBVA_DRIVERS_PATH=<dir holding rockchip_drv_video.so> OUT=<dir> ./fluster-run.sh
 #   Downloads the suites on first use (Fluster: https://github.com/fluendo/fluster), one CSV per suite in OUT.

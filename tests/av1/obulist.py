@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (C) 2026 defcom5-rockchip
 # list OBUs per IVF frame (or per raw OBU stream): type, size, and for frame headers the first bits
 import sys, struct
 OBU={1:"SEQ",2:"TD",3:"FRAME_HDR",4:"TILE_GRP",5:"META",6:"FRAME",7:"REDUNDANT_FH",8:"TILE_LIST",15:"PAD"}
