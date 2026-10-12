@@ -19,7 +19,7 @@ library, which in turn uses the hardware VPU.
 
 Key features:
 
-- H.264, HEVC, VP8 and VP9 hardware decode, 8- and 10-bit (AV1 is not supported, see below)
+- H.264, HEVC, VP8, VP9 and AV1 hardware decode, 8- and 10-bit (AV1 since v3.0.0 "Plaid Number Nine", see below)
 - Zero-copy DRM PRIME 2 surface export (NV12 and P010, DMABUF)
 - Fixes for several decoders on one VA display, multi-threaded clients and players that
   abandon decoders early (Firefox's media process, ffmpeg 8, mpv) in v2.5.0 — see KI-12
@@ -52,6 +52,9 @@ server-side transcode) instead of rendering a broken picture.
 | VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
 | AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; bit-exact against dav1d on 213/242 libaom and 31/36 Chromium conformance vectors, the rest explained in KI-13 (film grain is not applied) |
 
+Releases before v2.0.0 advertised HEVC, High10 and VP9 Profile 2 without decoding
+them correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story.
+
 > **Panthor / Panfrost GPU stacks (mainline Mesa):** libva auto-detects the driver from v2.1.5 (shipped `panthor_drv_video.so` / `panfrost_drv_video.so` symlinks); on older versions set `LIBVA_DRIVER_NAME=rockchip`. See KI-9.
 >
 > **Menu switches:** `RKVA_HIDE_10BIT=1` hides the three 10-bit profiles again if a client cannot present P010, and
@@ -69,15 +72,14 @@ server-side transcode) instead of rendering a broken picture.
 AV1 is the one codec where VA-API and MPP disagree about who parses the headers: clients hand the driver parsed
 picture parameters plus the tile payloads, MPP wants a complete OBU stream. `src/av1.c` writes that stream back —
 sequence header, frame header, tile-group framing — with a vendored copy of GStreamer's AV1 bit writer
-(`src/av1/`, six bugs fixed, see DEVELOPMENT.md). The one value VA-API never passes, `refresh_frame_flags`, is read
+(`src/av1/`, six bugs fixed, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)). The one value VA-API never passes, `refresh_frame_flags`, is read
 from the next picture's reference map, so every picture is held until its successor arrives (or until the client
 syncs it, when it is decoded at once and its slot refresh follows as a hidden frame). Measured through
 `ffmpeg -hwaccel vaapi`, mpv, Chrome and Firefox; see `evidence/2026-10-11-av1-fluster/` for the conformance runs.
 Film grain is **not** applied (MPP does not synthesise it on RK3588): grainy streams decode to the clean picture.
 `RKVA_AV1_WRITER_DEBUG=1` prints the bit writer's warnings, `RKVA_DUMP_AV1=file` saves the stream sent to MPP.
-
-Releases before v2.0.0 advertised HEVC, High10 and VP9 Profile 2 without decoding
-them correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story.
+The release is named after Number Nine's Pepper boards, the co-processor graphics cards of the late 1980s — this
+driver's whole job is handing video work to a co-processor.
 
 ## Dependencies
 
@@ -182,6 +184,13 @@ This fork (`defcom5-rockchip/rockchip-vaapi`) builds on the base driver above, a
   coded width is not a multiple of 16 (e.g. 2970×2160@25, 1.375:1 Academy-ratio content)
   no longer render as a solid green frame. See [REPRO.md](REPRO.md).
 
+- **AV1 decode (v3.0.0 "Plaid Number Nine")** — `src/av1.c`/`av1.h`, the `do_av1_decode` submit policy
+  (refresh_frame_flags deferral, early decode on sync, synthesised show_existing, hidden KEY as INTRA_ONLY,
+  film-grain surface routing), the six fixes to the vendored GStreamer AV1 bit writer in `src/av1/` and the
+  `tests/av1/` harness were written by Claude (Opus 5.5 and Fable 5.1) in pair sessions; defcom5-rockchip set the
+  design constraints, ran every measurement on the Orange Pi 5B and reviewed each change. Fluster results and the
+  attribution table are in `evidence/2026-10-11-av1-fluster/`.
+
 These fork additions were developed with the assistance of **Claude (Fable 5)** and were
 reviewed, tested, and validated on real hardware — **Orange Pi 5B (RK3588S)**, panfork
 Mesa 23, Firefox 154 VA-API — by **defcom5-rockchip**. (The base-driver validation credit
@@ -196,12 +205,12 @@ This is a fork, and the lineage matters:
 
 - **Eduardo García-Mádico Portabella** (`woodyst`) wrote the original driver —
   the VA-API vtable, the MPP plumbing, the H.264 parameter-set reconstruction and
-  the bit writer this fork still builds on. Upstream: https://github.com/woodyst/rockchip-vaapi
+  the H.264 bit writer (`bs.h`) this fork still builds on. Upstream: https://github.com/woodyst/rockchip-vaapi
 - **truongsinh** contributed the surface-stride fixes carried here from upstream PR #2.
 - **defcom5-rockchip** maintains this fork: the HEVC bitstream assembler (`src/hevc.c`,
   original work — upstream has no HEVC), the NV15 to P010 repack with its NEON path,
   B-frame and reference-routing fixes, `vaDeriveImage`, the honest profile
-  advertisement, and the test tooling. Developed with Claude as co-engineer;
+  advertisement, the AV1 OBU re-serialiser (`src/av1.c`, v3.0.0), and the test tooling. Developed with Claude as co-engineer;
   contributions are attributed in the commit trailers.
 
 Rockchip MPP, libva and the other libraries this links against carry their own
@@ -211,9 +220,9 @@ licenses and are not redistributed here.
 
 | who | what |
 |---|---|
-| **Eduardo García-Mádico Portabella** (`woodyst`) | original driver: VA-API ↔ MPP bridge, H.264 path, the bit writer this fork builds on |
+| **Eduardo García-Mádico Portabella** (`woodyst`) | original driver: VA-API ↔ MPP bridge, H.264 path, the H.264 bit writer this fork builds on |
 | **TruongSinh Tran-Nguyen** (`truongsinh`) | surface-stride fixes (upstream PR #2) |
-| **defcom5-rockchip** | fork maintainer: 10-bit zero-copy (GR1616 fix), Main10/High10/VP9 P2, Chrome created-depth export, Panthor/Panfrost libva names, the RGA3 NV15→P010 export lane, the KI test ladder, releases — and the RK3588 kernel-side fixes that surfaced along the way (Armbian `linux-rockchip` PR #548) |
+| **defcom5-rockchip** | fork maintainer: 10-bit zero-copy (GR1616 fix), Main10/High10/VP9 P2, Chrome created-depth export, Panthor/Panfrost libva names, the RGA3 NV15→P010 export lane, AV1 (v3.0.0), the KI test ladder, releases — and the RK3588 kernel-side fixes that surfaced along the way (Armbian `linux-rockchip` PR #548) |
 | **Claude** (Anthropic) — Opus 5.5, Fable 5.1, Fable 5, Opus 5, Sonnet 4.6 | co-engineer on the fork, credited per commit in the `Co-Authored-By` trailers: root-cause work, patches, test tooling and the documentation |
 | **JFL** (Armbian forum) | test partner on the Orange Pi 5 Plus / Armbian vendor kernel: confirmed Chrome 10-bit HEVC and VP9 Profile 2 hardware playback with 2.1.5, measured the 2.2.0-rc1 RGA lane (97 → 1 dropped frames at 4K60 HDR), and reported the Panthor libva naming that became the shipped symlinks |
 | **nyanmisaka** (`ffmpeg-rockchip`, `jellyfin-ffmpeg`) | the RGA3 P010 recipe (`RK_FORMAT_YCbCr_420_SP_10B` + the 10-bit flags) the export lane follows, and the Rockchip lanes in Jellyfin's FFmpeg |

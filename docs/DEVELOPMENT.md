@@ -1,6 +1,6 @@
 # Developer documentation — rockchip-vaapi
 
-> **defcom5 fork status (2026-10-09, v2.5.0).** This file is upstream's design document,
+> **defcom5 fork status (2026-10-11, v3.0.0).** This file is upstream's design document,
 > kept verbatim below because the architecture it describes still holds. The fork has
 > moved on in these places — read [KNOWN-ISSUES.md](../KNOWN-ISSUES.md) and
 > [AGENTS.md](../AGENTS.md) for the current, hardware-verified state:
@@ -270,7 +270,8 @@ platform/deployment setting, not a driver change. See `INSTALL.md`.
 Contrast this with AV1, which is a genuine *parse* failure: AV1 never
 acknowledges `info_change` and decodes zero frames, because VA-API hands MPP
 headerless tile data instead of a full OBU bitstream. CMA exhaustion is the
-opposite — decode works, then a resource runs out.
+opposite — decode works, then a resource runs out. ***Fork: that was the
+behaviour before v3.0.0; AV1 decodes now — the headers are rebuilt in `src/av1.c`.***
 
 ### Per-surface output buffers
 
@@ -383,7 +384,7 @@ patching Firefox's sandbox policy).
 - Maximum 64 surfaces / 8 concurrent decode contexts. ***Fork: 128 surfaces (v2.1.4).***
 - Only H.264 header reconstruction is implemented. HEVC/VP9/AV1 decode paths call
   `do_h264_decode` as a stub. ***Fork: HEVC assembler real since v2.1.0; VP9 decodes; AV1
-  remains impossible over VA-API's headerless tile data.***
+  since v3.0.0 — the driver re-serialises the OBU headers from the VA parameters (see "AV1 decode pipeline").***
 
 ## AI-assisted development notice
 

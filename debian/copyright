@@ -20,6 +20,19 @@ Comment:
  project has no HEVC support.
 License: LGPL-2.1+
 
+Files: src/av1/gstav1bitwriter.c src/av1/gstav1bitwriter.h src/av1/gstav1parser.h
+Copyright: 2022 Intel Corporation
+Comment:
+ Vendored from GStreamer 1.28.2 (gst-plugins-bad, gst-libs/gst/codecparsers)
+ with six marked fixes; see src/av1/README.
+License: LGPL-2.0+
+
+Files: src/av1.c src/av1.h src/av1/gstcompat.c src/av1/gstcompat.h
+Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+Comment:
+ The AV1 OBU re-serialiser is original work in this fork.
+License: LGPL-2.1+
+
 Files: tests/* tools/*
 Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
 License: LGPL-2.1+
@@ -27,6 +40,15 @@ License: LGPL-2.1+
 Files: debian/*
 Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
 License: LGPL-2.1+
+
+License: LGPL-2.0+
+ This library is free software; you can redistribute it and/or
+ modify it under the terms of the GNU Library General Public
+ License as published by the Free Software Foundation; either
+ version 2 of the License, or (at your option) any later version.
+ .
+ On Debian systems, the full text of the GNU Library General Public
+ License version 2 can be found in /usr/share/common-licenses/LGPL-2.
 
 License: LGPL-2.1+
  This library is free software; you can redistribute it and/or

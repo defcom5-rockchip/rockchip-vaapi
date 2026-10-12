@@ -1,4 +1,4 @@
-# AV1 conformance, 2026-10-11 — rockchip-vaapi 3.0.0 candidate on an Orange Pi 5B (.214), kernel 6.1.189 vendor
+# AV1 conformance, 2026-10-11 — rockchip-vaapi 3.0.0 candidate on an Orange Pi 5B, kernel 6.1.189 vendor
 
 Fluster (fluendo, 7e4d85b) with its `FFmpeg-AV1-VAAPI` decoder (`ffmpeg -hwaccel vaapi`, md5 of the whole output),
 driver built from the `av1` branch, `LIBVA_DRIVER_NAME=rockchip`.
@@ -18,4 +18,4 @@ differs only in its last 30 frames, where raw MPP diverges as well.
 
 Also measured the same day (not in these files): a 7-clip regression set (Tears of Steel 480p/1080p, 8/10-bit,
 multi-tile, segmentation, film grain) bit-exact against dav1d on every run; mpv `--hwdec=vaapi`, Chrome and Firefox
-(+pd3) decoding 8- and 10-bit AV1 on the av1d engine with the picture checked by eye.
+(with the Mozilla-submitted luma-copy patch) decoding 8- and 10-bit AV1 on the av1d engine with the picture checked by eye.

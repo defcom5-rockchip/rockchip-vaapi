@@ -5,7 +5,7 @@ Unique sources: 278, using 4 parallel job(s)
 All downloads finished
 === run AV1-TEST-VECTORS 2026-10-11T17:26:00-07:00
                              output=stdout, stderr=stderr)
-subprocess.CalledProcessError: Command 'ffmpeg -hide_banner -nostdin -loglevel warning -hwaccel vaapi -threads 1 -codec av1 -i /home/plaiddesktop/fluster/fluster/../resources/AV1-TEST-VECTORS/av1-1-b8-24-monochrome/av1-1-b8-24-monochrome.ivf -fps_mode passthrough -filter format=pix_fmts=gray -f rawvideo /tmp/fluster_output/AV1-TEST-VECTORS/av1-1-b8-24-monochrome.out' returned non-zero exit status 69.
+subprocess.CalledProcessError: Command 'ffmpeg -hide_banner -nostdin -loglevel warning -hwaccel vaapi -threads 1 -codec av1 -i .../resources/AV1-TEST-VECTORS/av1-1-b8-24-monochrome/av1-1-b8-24-monochrome.ivf -fps_mode passthrough -filter format=pix_fmts=gray -f rawvideo /tmp/fluster_output/AV1-TEST-VECTORS/av1-1-b8-24-monochrome.out' returned non-zero exit status 69.
 
 Ran 213/242 tests successfully, in 32.148 secs
 === run CHROMIUM-8bit-AV1-TEST-VECTORS 2026-10-11T17:26:34-07:00

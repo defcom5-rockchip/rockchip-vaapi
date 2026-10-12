@@ -1,5 +1,7 @@
 /* fhdump.c — print every frame header field of an IVF or raw OBU stream (gstav1parser), one frame per block, for diffing
- * original vs re-serialised streams.  Build like fgdump. */
+ * original vs re-serialised streams.
+ * Build (from src/av1 with this file copied there): gcc -O1 -DGST_USE_UNSTABLE_API -I. -o fhdump fhdump.c \
+ *   $(pkg-config --cflags --libs gstreamer-codecparsers-1.0) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

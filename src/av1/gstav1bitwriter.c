@@ -1194,7 +1194,7 @@ _av1_bit_writer_segmentation_params (const GstAV1FrameHeaderOBU * frame_header,
     *segmentation_offset = gst_bit_writer_get_size (bw);
 
   /* TODO: segmentation support. */
-  /* rockchip-vaapi addition: spec 5.9.14 segmentation_params(); GStreamer's copy refused segmentation. */
+  /* rockchip-vaapi fix (1): spec 5.9.14 segmentation_params(); GStreamer's copy refused segmentation. */
   {
     const GstAV1SegmentationParams *seg = &frame_header->segmentation_params;
     static const guint8 feature_bits[GST_AV1_SEG_LVL_MAX] = { 8, 6, 6, 6, 6, 3, 0, 0 };
@@ -1339,7 +1339,7 @@ _av1_bit_writer_loop_filter_params (const GstAV1FrameHeaderOBU * frame_header,
       for (i = 0; i < GST_AV1_TOTAL_REFS_PER_FRAME; i++) {
         /* If loop_filter_ref_deltas[i] is different from default
            value, we update it. */
-        /* rockchip-vaapi: always update (values are effective, not deltas against a reference) */
+        /* rockchip-vaapi fix (2): always update (values are effective, not deltas against a reference) */
         update_ref_deltas = TRUE;
         (void) default_loop_filter_ref_deltas;
 
@@ -1561,7 +1561,7 @@ _av1_bit_writer_global_motion_params (const GstAV1FrameHeaderOBU * frame_header,
     goto success;
 
   if (frame_header->primary_ref_frame != GST_AV1_PRIMARY_REF_NONE) {
-    /* rockchip-vaapi fix: copy the gm_params array, not the struct (whose first members are the is_global flags) */
+    /* rockchip-vaapi fix (3): copy the gm_params array, not the struct (whose first members are the is_global flags) */
     memcpy (prev_gm_params, frame_header->ref_global_motion_params.gm_params,
         sizeof (gint32) * GST_AV1_NUM_REF_FRAMES * 6);
   } else {

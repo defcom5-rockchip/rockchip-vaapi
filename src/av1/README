@@ -1,14 +1,14 @@
 AV1 OBU writer vendored from GStreamer
 ======================================
 gstav1bitwriter.h and gstav1parser.h are copied unmodified (apart from their #include lines, which now point at
-gstcompat.h) from GStreamer 1.28.2; gstav1bitwriter.c carries three marked "rockchip-vaapi" changes (below) and is
-otherwise unmodified. Source:, subprojects/gst-plugins-bad/gst-libs/gst/codecparsers/.
+gstcompat.h) from GStreamer 1.28.2; gstav1bitwriter.c carries six marked "rockchip-vaapi" changes (below) and is
+otherwise unmodified. Source: subprojects/gst-plugins-bad/gst-libs/gst/codecparsers/.
 Copyright (C) 2022 Intel Corporation; licence LGPL-2.0-or-later (see the file headers). gstcompat.h/.c supply the small
 subset of GLib and GstBitWriter they need, so no GLib or GStreamer is linked.
 
 Why: rockchip-vaapi must hand Rockchip MPP a complete AV1 OBU stream, but VA-API clients deliver only parsed
 parameters and tile payloads, so the sequence and frame headers are regenerated from VADecPictureParameterBufferAV1
-(see docs and the av1-research notes). Round trip verified 2026-10-11: every sequence and frame header of four
+(see docs/DEVELOPMENT.md, "AV1 decode pipeline"). Round trip verified 2026-10-11: every sequence and frame header of four
 SVT-AV1 test streams (8-bit, 10-bit, film grain) re-written bit-exactly.
 
 Changes to gstav1bitwriter.c (all marked with a "rockchip-vaapi" comment):
@@ -19,10 +19,17 @@ Changes to gstav1bitwriter.c (all marked with a "rockchip-vaapi" comment):
    reference's deltas for entries not updated, so every entry must be written.
 3. global_motion_params(): PrevGmParams was copied from the address of ref_global_motion_params (whose first
    members are the is_global flags) instead of its gm_params array, so deltas were coded against garbage whenever
-   primary_ref_frame != NONE. Upstream bug (GStreamer gst-plugins-bad, gstav1bitwriter.c); report after release.
+   primary_ref_frame != NONE. Upstream bug (GStreamer gst-plugins-bad, gstav1bitwriter.c).
+4. loop_restoration_params(): UsesChromaLr is set for either chroma plane (spec 5.9.20: i > 0), so lr_uv_shift is
+   written when only Cb uses loop restoration. Upstream wrote it only when Cr did.
+5. loop_restoration_params(): lr_unit_shift for 64x64 superblocks is f(1) followed by lr_unit_extra_shift f(1) when
+   that bit is 1; upstream wrote a lone 1 for shift 1 and could not express shift 0.
+6. tile_info(): _av1_write_uniform() returns TRUE on success; both non-uniform tile call sites treated that as the
+   error, so non-uniform tiles could never be written.
+Fixes 3-6 are upstream bugs, to be reported to GStreamer (gst-plugins-bad) after this release.
 Verified 2026-10-11 on the Orange Pi 5B: every sequence and frame header of seven test streams (SVT-AV1 and libaom;
 8/10-bit, film grain, segmentation, 2x2 tiles, error-resilient, global motion) re-written bit-exactly, and the
 re-serialised streams decode bit-exactly through MPP (tests/av1).
 
 Update: fetch the three files from the GStreamer tag you want, re-apply the include edits, rebuild, re-run the round
-trip test (tests/av1rt).
+trip test (tests/av1/av1rt.c).

@@ -4,7 +4,7 @@ Hardware-verified on Orange Pi 5B (RK3588S) unless noted. Reports from other
 RK3588/RK3588S boards are welcome — decode silicon is identical across the two,
 so behaviour should match.
 
-Current as of **v2.5.0**.
+Current as of **v3.0.0**.
 
 ---
 
@@ -278,7 +278,7 @@ with a VP9 Profile 2 clip), probably because they import the whole frame, which 
 
 **Fixes:** mpv 0.41 with the fork's patch queries the texture's internal format after the import and copies integer
 planes into normalised textures (exact, ~1 ms per 4K plane). Firefox: the same check in `DMABufSurfaceYUV::CreateTexture()`
-(our `+pd3` build, patch submitted to Mozilla) — 10-bit HEVC, VP9 and AV1 then draw correctly from hardware.
+(a Firefox build carrying the patch we submitted to Mozilla alongside Bugzilla 2078820) — 10-bit HEVC, VP9 and AV1 then draw correctly from hardware.
 
 **Workarounds for unpatched players:** mpv `--hwdec=vaapi-copy` (still decoded in hardware). For a client that cannot
 be told to copy, set `RKVA_HIDE_10BIT=1` in that client's environment only, for example `env RKVA_HIDE_10BIT=1 firefox`:
@@ -313,19 +313,19 @@ the final code, with the number of held decoder buffers staying flat (2.2.0: 273
 **Status:** limits, by design or by the hardware · decode is otherwise bit-exact against dav1d
 
 - **Film grain is not applied.** MPP does not synthesise grain on RK3588 (rockchip-mpp issue #974), so a stream with
-  `apply_grain` decodes to the clean reference picture; the driver writes it to both the reference and the display
-  surface. Grainy and non-grainy playback therefore look alike. Chrome, Firefox and mpv do not apply grain themselves
+  `apply_grain` decodes to the clean reference picture, which the driver lands on the display surface (the reference
+  surface is only marked decoded; nothing reads it). Grainy and non-grainy playback therefore look alike. Chrome, Firefox and mpv do not apply grain themselves
   on this path.
-- **Frames 66 px wide or high and smaller** (libaom `av1-1-b8-01-size-*`) and **spatial layers** (`svc-L2T*`) decode
-  wrong on the decoder itself: the raw MPP decoder, fed the original stream, produces the same wrong pictures. Not
+- **Frames 66 px wide or high and smaller** (libaom `av1-1-b8-01-size-*`) and **spatial layers** (`svc-L2T*`) fail
+  on the decoder itself: the raw MPP decoder, fed the original stream, does not match dav1d on them either. Not
   met in practice (web video starts at 144p).
 - **A sequence change inside one VA context** (new sequence header with another frame size, libaom `sizeup`/`sizedown`):
   FFmpeg keeps the old surfaces, so the picture is cropped to the surface or sits in the corner of it. The driver
   never writes past the surface (v3.0.0; earlier test builds corrupted the heap here). Players recreate the decoder
   on a real resolution change; conformance vectors do not.
 - **Refused, so the client falls back to software:** Profile 1/2 (4:4:4, 4:2:2), 12-bit, monochrome, super-resolution
-  frames, large-scale tile frames. FFmpeg's native `av1` decoder has no software path and reports an error instead;
-  players using libdav1d fall back cleanly.
+  frames, large-scale tile frames. ffmpeg's hwaccel path (`-c:v av1 -hwaccel vaapi`) reports an error instead of falling
+  back — use `-c:v libdav1d`; players that pick libdav1d themselves fall back cleanly.
 - Chromium's `48delayed` stress vector: 27 of 557 frames differ in its last 30, where the raw MPP decoder diverges
   from dav1d as well.
 
