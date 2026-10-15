@@ -227,6 +227,10 @@ typedef struct {
        output queue, so vaSyncSurface waits on the surface's condition variable instead of polling MPP. */
     pthread_t       out_thread;
     bool            out_started, out_stop;
+    /* Zero-copy only for a client seen to re-export a surface after decoding into it again (Firefox, mpv export
+       every frame).  Chromium and GStreamer import each surface once, at pool creation, and Chromium never calls
+       vaSyncSurface per frame either: holding MPP's frame would leave them showing the surface's own, stale buffer. */
+    bool            zc_ok;
     /* AV1: which picture MPP holds in each of its 8 reference slots (surface + its gen), as the refresh masks we sent
        say.  The synthesised show_existing of a KEY must name a slot that really holds that KEY: the old guess (slot 0
        when the KEY's mask had been cleared) showed whatever MPP had there -- with the deferred refresh, a picture MPP had
@@ -279,6 +283,7 @@ typedef struct {
     int          zc_hs, zc_vs;   /* MPP's strides for that frame */
     size_t       zc_size;
     bool         zc_exported;    /* handed to the client by ExportSurfaceHandle since it arrived */
+    uint32_t     exported_gen;   /* gen at the last ExportSurfaceHandle after a decode (0 = none) */
     int          prime_fd;       /* dup'd fd to priv_buf, stable for surface lifetime */
     int          hstride;
     int          vstride;
@@ -1409,7 +1414,8 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
 
     /* 8-bit zero-copy: keep MPP's frame (see RKSurface.zc_frame) */
     int zfd = buf ? mpp_buffer_get_fd(buf) : -1;
-    if (zc_enabled() && !MPP_FRAME_FMT_IS_YUV_10BIT(ffmt) && (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP &&
+    if (zc_enabled() && __atomic_load_n(&c->zc_ok, __ATOMIC_ACQUIRE) &&
+        !MPP_FRAME_FMT_IS_YUV_10BIT(ffmt) && (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP &&
         zfd > 0 && fwidth > 0 && fheight > 0 && fhs >= fwidth && fvs >= fheight &&
         fwidth <= (s->hstride ? s->hstride : s->width) && fheight <= (s->vstride ? s->vstride : s->height) &&
         mpp_buffer_get_size(buf) >= (size_t)fhs * fvs * 3 / 2) {
@@ -2460,6 +2466,23 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
     if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
         LOG("ExportSurfaceHandle: unsupported mem_type 0x%x", mem_type);
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
+    }
+
+    /* Zero-copy eligibility (RKContext.zc_ok): this surface exported again after a new decode into it. */
+    {
+        VAContextID ecid = 0; bool reexport = false;
+        pthread_mutex_lock(&s->lock);
+        if (s->ctx_id != 0 && s->gen != 0) {
+            if (s->exported_gen != 0 && s->exported_gen != s->gen) reexport = true;
+            s->exported_gen = s->gen;
+            ecid = s->ctx_id;
+        }
+        pthread_mutex_unlock(&s->lock);
+        RKContext *ec = reexport ? context_by_id(d, ecid) : NULL;
+        if (ec && !__atomic_load_n(&ec->zc_ok, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&ec->zc_ok, true, __ATOMIC_RELEASE);
+            LOG("zero-copy: context 0x%x re-exports surfaces after decoding: zero-copy on", ecid);
+        }
     }
 
     /* If decode is in progress, sync now so the exported DMA-BUF contains the
