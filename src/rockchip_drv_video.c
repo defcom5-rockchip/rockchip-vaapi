@@ -1574,6 +1574,10 @@ static void out_thread_stop(RKContext *c) {
     __atomic_store_n(&c->out_stop, true, __ATOMIC_RELEASE);
     pthread_join(c->out_thread, NULL);
     c->out_started = false; c->out_stop = false;
+    /* back to non-blocking at once: a vaSyncSurface that now takes the polling branch calls decode_get_frame under
+       out_lock and must not wait up to the thread's 20 ms in MPP there */
+    MppPollType nb = MPP_POLL_NON_BLOCK;
+    c->mpi->control(c->mpp, MPP_SET_OUTPUT_TIMEOUT, (MppParam)&nb);
 }
 
 /* The PTS a packet carries: the target surface in the low word, its generation (bumped at every BeginPicture) in the
@@ -2080,7 +2084,7 @@ static void *av1_submit_thread(void *arg) {
         mpp_packet_set_pts(pkt, k->pts);
         MPP_RET ret = MPP_OK;
         long long t_put0 = rk_now_us(); int attempts = 0;
-        for (int attempt = 0; attempt < 4000 && !c->sub_stop; attempt++) {
+        for (int attempt = 0; attempt < 4000 && !__atomic_load_n(&c->sub_stop, __ATOMIC_ACQUIRE); attempt++) {
             attempts = attempt + 1;
             ret = c->mpi->decode_put_packet(c->mpp, pkt);
             if (ret == MPP_OK || ret != MPP_ERR_BUFFER_FULL) break;
@@ -2114,7 +2118,7 @@ static void *av1_submit_thread(void *arg) {
 /* Stop the submit thread (pending packets are dropped).  Caller must NOT hold out_lock: the thread takes it. */
 static void av1_submit_stop(RKContext *c) {
     if (!c->sub_started) return;
-    pthread_mutex_lock(&c->sub_lock); c->sub_stop = true; pthread_cond_signal(&c->sub_cv); pthread_mutex_unlock(&c->sub_lock);
+    pthread_mutex_lock(&c->sub_lock); __atomic_store_n(&c->sub_stop, true, __ATOMIC_RELEASE); pthread_cond_signal(&c->sub_cv); pthread_mutex_unlock(&c->sub_lock);
     pthread_join(c->sub_thread, NULL);
     pthread_cond_destroy(&c->sub_room); pthread_cond_destroy(&c->sub_cv); pthread_mutex_destroy(&c->sub_lock);
     c->sub_started = false; c->sub_stop = false; c->sub_head = c->sub_tail = NULL; c->sub_count = 0;
