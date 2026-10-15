@@ -446,6 +446,15 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     RKDriver *d = drv_from_ctx(ctx);
     if (!d) return VA_STATUS_SUCCESS;
 
+    /* Stop every live context's submit and output threads first: they route frames into surfaces (and copy into
+       their buffers) until stopped, so tearing surfaces down under them was a use-after-free. */
+    for (int i = 0; i < MAX_CONTEXTS; i++) {
+        RKContext *c = &d->contexts[i];
+        pthread_mutex_lock(&c->av1_lock);
+        if (c->used) { av1_submit_stop(c); out_thread_stop(c); }
+        pthread_mutex_unlock(&c->av1_lock);
+    }
+
     /* destroy any leftover objects */
     for (int i = 0; i < MAX_SURFACES; i++) {
         if (!d->surfaces[i].used) continue;
@@ -461,8 +470,7 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     for (int i = 0; i < MAX_CONTEXTS; i++) {
         RKContext *c = &d->contexts[i];
         pthread_mutex_lock(&c->av1_lock);
-        if (c->used) { av1_submit_stop(c); out_thread_stop(c); }
-        pthread_mutex_lock(&c->out_lock);
+        pthread_mutex_lock(&c->out_lock);       /* threads already stopped above */
         if (c->used) { free(c->av1_pending.tiles_buf); c->av1_pending.tiles_buf = NULL; rk_mpp_teardown_locked(c); }
         pthread_mutex_unlock(&c->out_lock); pthread_mutex_unlock(&c->av1_lock);
         pthread_mutex_destroy(&c->out_lock);   /* every slot has both, used or not */
