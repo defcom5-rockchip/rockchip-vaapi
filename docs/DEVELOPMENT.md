@@ -349,6 +349,15 @@ What the VA parameters do not say, and how it is handled:
   any other MPP the picture is re-submitted with the real mask later **as a hidden frame**, so the second decode
   never produces an output (the two decodes are not always identical and shared the surface).
   `RKVA_AV1_NO_DEFER=1` forces the re-decode. A shown KEY frame refreshes everything and is never held.
+- **Clients that never wait.** Packets reach MPP from the per-context submit thread, so EndPicture returns before the
+  picture is decoded; FFmpeg, mpv and Firefox wait on each picture (vaSyncSurface, or an export after decoding) and
+  never notice. Chromium syncs a surface only when it imports it (before its first decode) and then composites the
+  dma-buf whenever the picture is due, so when it decodes ahead (start, seek, loop) it showed the surface's previous
+  picture, or green on a surface's first use (3.5.0~rc1, caught by eye in a blind A/B and by a frame checker that
+  compares every presented frame with 3.0.0's). Until a context's client has waited on a picture it rendered, and
+  again after 32 pictures without such a wait, EndPicture waits (bounded, 250 ms) until the picture from `RKVA_PACE`
+  (default 2) pictures earlier is in its surface. AV1 only: the other codecs feed MPP from EndPicture, which blocks on
+  MPP's input queue as in 3.0.0, and H.264/HEVC output in display order, so waiting on a reordered picture would stall.
 - **Hidden frames** (`show_frame = 0`): clients never send `show_existing_frame` to a VA driver, but they do read the
   hidden picture's surface when the stream shows it later. The driver follows a hidden picture with a synthesised
   `show_existing_frame` of one slot it refreshed; a hidden **KEY** frame instead gets a second decode of the same

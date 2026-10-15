@@ -55,7 +55,12 @@ Releases are triggered by the human maintainer, never autonomously.
    Since 3.5.0 each context runs an **output thread** (the only
    `decode_get_frame` caller while it runs; routes frames under `out_lock`,
    broadcasts the surface's cond) and, for AV1, a **submit thread** fed through
-   `sub_lock` (a leaf lock; at most 16 queued packets). Both are stopped
+   `sub_lock` (a leaf lock; at most 16 queued packets). An AV1 context whose
+   client has not waited on a picture it rendered (vaSyncSurface, or an export
+   after decoding) is paced: EndPicture returns only once the picture from
+   `RKVA_PACE` (2) pictures earlier is in its surface. Chromium syncs a surface
+   only at import and then samples its dma-buf unsynchronised: without pacing it
+   shows old pictures or green (rc1). Both threads are stopped
    (`av1_submit_stop`, `out_thread_stop`) before `out_lock` is taken in
    DestroyContext and Terminate, and in Terminate before any surface is torn
    down. Nothing blocks inside MPP while holding `out_lock`. Packets carry
@@ -127,7 +132,8 @@ Client notes:
 - assign_mpp_frame `copied=`: 1 CPU memcpy · 2 RGA blit (8-bit) · 3 NV15→P010 CPU repack · 4 RGA NV15→P010 blit;
   `zero-copy fd=` = the frame is held, not copied; `zero-copy: ... read without an export` = the late copy.
 - Switches: `RKVA_ZERO_COPY=0` (always copy), `RKVA_SYNC_POLL=1` (no output thread: sync polls MPP every 1 ms),
-  `RKVA_AV1_NO_DEFER=1` (re-decode early-synced AV1 pictures even with a capable MPP).
+  `RKVA_AV1_NO_DEFER=1` (re-decode early-synced AV1 pictures even with a capable MPP),
+  `RKVA_PACE=n` (AV1 pictures in flight for a client that never waits, default 2, 0 = no pacing).
 
 ## Workflow
 - Development on feature branches; `main` is released truth.

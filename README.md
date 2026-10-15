@@ -249,6 +249,10 @@ Since 3.5.0 a client that exports each surface after decoding (Firefox, mpv `hwd
 any copy: the driver exports MPP's own buffer when its stride is 64-aligned and keeps it until the surface is reused
 (`RKVA_ZERO_COPY=0` turns this off). Chromium, vaapi-copy and ffmpeg's download path keep the copy.
 `RKVA_SYNC_POLL=1` brings back the 1 ms polling vaSyncSurface of 3.0.0 instead of the per-decoder output thread.
+AV1 pictures go to MPP from a per-decoder thread, so vaEndPicture returns before the picture is decoded. A client that
+never waits on its pictures (Chromium syncs each surface once, when it imports it) is paced instead: vaEndPicture returns
+once the picture from two pictures earlier is in its surface, about what 3.0.0 had (`RKVA_PACE=n` changes the depth,
+`0` turns pacing off).
 
 All of this needs the driver to be built against librga. The v2.2.0 release download was
 built without it (it does not link `librga.so.2`), so on that build 10-bit always used the
