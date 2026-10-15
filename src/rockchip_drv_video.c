@@ -2598,9 +2598,13 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
     pthread_mutex_unlock(&s->lock);
     if (needs_sync)
         rk_sync_wait(ctx, id);
+    /* A writable export never gets MPP's buffer: that frame may be one of MPP's reference pictures.  Copy it into the
+       surface's own buffer and export that (a read-only export handed out earlier keeps the frame alive). */
+    if (flags & VA_EXPORT_SURFACE_WRITE_ONLY)
+        surface_zc_materialize(d, s, true);
 
     pthread_mutex_lock(&s->lock);
-    bool zc      = (s->zc_frame != NULL);
+    bool zc      = (s->zc_frame != NULL) && !(flags & VA_EXPORT_SURFACE_WRITE_ONLY);
     int fd       = zc ? s->zc_fd : s->prime_fd;
     int hs       = zc ? s->zc_hs : (s->hstride ? s->hstride : s->width);
     int vs       = zc ? s->zc_vs : (s->vstride ? s->vstride : s->height);
