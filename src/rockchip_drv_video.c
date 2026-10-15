@@ -126,8 +126,13 @@ static void log_init(void) {
     const char *p = getenv("RK_VAAPI_LOG");
     if (p && *p) g_log_fp = fopen(p, "a");
 }
+#include <time.h>
+#include <sys/syscall.h>
+/* exp/4k60: monotonic microsecond clock for the per-step timing in the log */
+static inline long long rk_now_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (long long)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000; }
 #define LOG(fmt, ...) do { if (g_log_fp) { \
-    fprintf(g_log_fp, "[rk-vaapi pid=%d] " fmt "\n", getpid(), ##__VA_ARGS__); \
+    long long _t = rk_now_us(); \
+    fprintf(g_log_fp, "[rk-vaapi pid=%d tid=%ld t=%lld.%03lld] " fmt "\n", getpid(), (long)syscall(SYS_gettid), _t / 1000, _t % 1000, ##__VA_ARGS__); \
     fflush(g_log_fp); } \
 } while(0)
 
@@ -1097,6 +1102,7 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     int  copied = 0;
     void *src = buf ? mpp_buffer_get_ptr(buf) : NULL;
     void *dst = s->priv_buf ? mpp_buffer_get_ptr(s->priv_buf) : NULL;
+    long long t_copy0 = rk_now_us();
     /* The destination layout must match what ExportSurfaceHandle already
        reported, not MPP's frame stride.  Clients import the dma-buf once --
        Chromium does so at frame-pool creation, before any decode -- and never
@@ -1272,6 +1278,7 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
                    (size_t)row_bytes);
         copied = 1;
     }
+    long long t_copy1 = rk_now_us();
     mpp_frame_deinit(&frame);
 
     pthread_mutex_lock(&s->lock);
@@ -1290,8 +1297,8 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     s->decoded  = true;
     pthread_cond_signal(&s->cond);
     pthread_mutex_unlock(&s->lock);
-    LOG("assign_mpp_frame: surface=0x%x prime_fd=%d MPP %dx%d stride=%dx%d fmt=0x%x copied=%d",
-        (unsigned)sid, s->prime_fd, fwidth, fheight, fhs, fvs, (unsigned)ffmt, copied);
+    LOG("assign_mpp_frame: surface=0x%x prime_fd=%d MPP %dx%d stride=%dx%d fmt=0x%x copied=%d copy_us=%lld",
+        (unsigned)sid, s->prime_fd, fwidth, fheight, fhs, fvs, (unsigned)ffmt, copied, t_copy1 - t_copy0);
 }
 
 /* Build Annex B bitstream from VA-API buffers and send to MPP */
@@ -1761,7 +1768,9 @@ static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VA
     if (enqueue) { c->decode_queue[c->dq_tail] = sid; c->dq_tail = (c->dq_tail + 1) & 63; }
     pthread_mutex_unlock(&c->out_lock);
     MPP_RET ret = MPP_OK;
+    long long t_put0 = rk_now_us(); int attempts = 0;
     for (int attempt = 0; attempt < 400; attempt++) {
+        attempts = attempt + 1;
         ret = c->mpi->decode_put_packet(c->mpp, pkt);
         if (ret == MPP_OK || ret != MPP_ERR_BUFFER_FULL) break;
         MppFrame df = NULL;
@@ -1771,6 +1780,7 @@ static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VA
         usleep(500);
     }
     mpp_packet_deinit(&pkt);
+    LOG("av1_put: surface=0x%x %zu bytes put in %lld us (%d attempts)", (unsigned)sid, len, rk_now_us() - t_put0, attempts);
     if (ret != MPP_OK) {
         LOG("av1_put: decode_put_packet failed: %d", ret);
         if (enqueue) {
@@ -1893,7 +1903,9 @@ static void av1_force_pending(RKContext *c, RKDriver *d, VASurfaceID sid) {
     pthread_mutex_lock(&c->av1_lock);
     if (p->valid && !p->forced && (p->surface == sid || p->ref_surface == sid || p->out_surface == sid)) {
         LOG("av1: early sync of surface 0x%x — decoding with refresh_frame_flags=0 first", (unsigned)sid);
+        long long t_f0 = rk_now_us();
         if (av1_submit(c, d, 0, true) == VA_STATUS_SUCCESS) p->forced = true;
+        LOG("av1: early submit took %lld us", rk_now_us() - t_f0);
     }
     pthread_mutex_unlock(&c->av1_lock);
 }
@@ -2010,12 +2022,14 @@ static VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
 
     VAStatus st;
+    long long t_ep0 = rk_now_us();
     if (c->coding == MPP_VIDEO_CodingAVC)
         st = do_h264_decode(c, d);
     else if (c->coding == MPP_VIDEO_CodingAV1)
         st = do_av1_decode(c, d);
     else
         st = do_generic_decode(c, d);
+    LOG("EndPicture: done in %lld us", rk_now_us() - t_ep0);
 
     return st;
 }
@@ -2053,11 +2067,12 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
     deadline.tv_sec += 3;
 
     LOG("SyncSurface: surface=0x%x draining MPP ctx=0x%x", id, cid);
+    long long t_sync0 = rk_now_us(); int n_frames = 0, n_sleeps = 0;
     for (;;) {
         pthread_mutex_lock(&s->lock);
         bool done = s->decoded;
         pthread_mutex_unlock(&s->lock);
-        if (done) { LOG("SyncSurface: surface=0x%x OK prime_fd=%d", id, s->prime_fd); break; }
+        if (done) { LOG("SyncSurface: surface=0x%x OK prime_fd=%d waited_us=%lld frames=%d sleeps=%d", id, s->prime_fd, rk_now_us() - t_sync0, n_frames, n_sleeps); break; }
 
         struct timespec now;
         clock_gettime(CLOCK_REALTIME, &now);
@@ -2078,8 +2093,9 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
             bool got = (c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame);
             if (got) assign_mpp_frame(frame, c, d);
             pthread_mutex_unlock(&c->out_lock);
-            if (got) continue; /* recheck immediately without sleeping */
+            if (got) { n_frames++; continue; } /* recheck immediately without sleeping */
         }
+        n_sleeps++;
         usleep(1000);
     }
     pthread_mutex_lock(&s->lock);
