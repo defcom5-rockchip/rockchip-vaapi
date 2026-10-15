@@ -1417,6 +1417,11 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     if (zc_enabled() && __atomic_load_n(&c->zc_ok, __ATOMIC_ACQUIRE) &&
         !MPP_FRAME_FMT_IS_YUV_10BIT(ffmt) && (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP &&
         zfd > 0 && fwidth > 0 && fheight > 0 && fhs >= fwidth && fvs >= fheight &&
+        /* invariant 2: an exported pitch is 64-aligned (a 16-aligned one green-screens the RK3588 EGL importer,
+           REPRO.md).  MPP aligns AV1/H.264/VP8 frames up to 1920 wide to 16 only (854 -> 864, 426 -> 432), so those
+           take the copy into the 64-aligned surface buffer.  With fhs % 64 == 0 the chroma plane's offset
+           (fhs * fvs) and pitch are 64-aligned too. */
+        (fhs % 64) == 0 &&
         fwidth <= (s->hstride ? s->hstride : s->width) && fheight <= (s->vstride ? s->vstride : s->height) &&
         mpp_buffer_get_size(buf) >= (size_t)fhs * fvs * 3 / 2) {
         MppFrame drop = NULL;
