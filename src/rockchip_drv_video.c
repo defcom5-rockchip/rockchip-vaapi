@@ -215,6 +215,7 @@ typedef struct {
         VASurfaceID surface;
         VASurfaceID ref_surface;  /* pp.current_frame: how later pictures refer to this one (== surface in every client seen) */
         VASurfaceID out_surface;  /* where the picture lands: pp.current_display_picture when the client gave a separate one (film grain), else surface */
+        uint32_t    out_gen;      /* out_surface's gen when this picture was handed to us */
         VADecPictureParameterBufferAV1 pp;
         uint8_t    *tiles_buf;    /* copies of the tile payloads (the client destroys its buffers after EndPicture) */
         size_t      tiles_len, tiles_cap;
@@ -261,6 +262,9 @@ typedef struct {
     bool         decoded;
     VAContextID  ctx_id;   /* context currently decoding into this surface */
     Av1RefInfo   av1;      /* AV1: order hint / frame type / saved global motion of the picture decoded here */
+    uint32_t     gen;      /* bumped each time the surface becomes a render target again; AV1 packets carry it in the
+                              PTS high word so an output still in flight for its previous picture cannot complete the
+                              new one (assign_mpp_frame drops it) */
     uint8_t      av1_mask; /* AV1: refresh_frame_flags it was submitted with (0xff = full refresh) */
     pthread_mutex_t  lock;
     pthread_cond_t   cond;
@@ -958,6 +962,7 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
         pthread_mutex_lock(&s->lock);
         s->decoded = false;
         s->ctx_id  = ctx_id;
+        if (++s->gen == 0) s->gen = 1;
         pthread_mutex_unlock(&s->lock);
     }
     return VA_STATUS_SUCCESS;
@@ -1084,6 +1089,15 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
             (unsigned long long)raw_pts);
         mpp_frame_deinit(&frame);
         return;
+    }
+    {   /* AV1 packets carry the surface generation in the PTS high word (0 = untagged, other codecs) */
+        uint32_t pgen = (uint32_t)((uint64_t)raw_pts >> 32);
+        if (pgen && (VASurfaceID)raw_pts == sid && pgen != s->gen) {
+            LOG("assign_mpp_frame: surface=0x%x output for an earlier picture (gen %u, surface now %u) dropped",
+                (unsigned)sid, pgen, s->gen);
+            mpp_frame_deinit(&frame);
+            return;
+        }
     }
 
     MppBuffer      buf    = mpp_frame_get_buffer(frame);
@@ -1758,11 +1772,11 @@ static void av1_mark_decoded(RKDriver *d, VASurfaceID sid) {
 }
 
 /* Send one packet (pts = the surface its output belongs to); enqueue that surface in the FIFO when `enqueue`. */
-static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VASurfaceID sid, bool enqueue) {
+static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VASurfaceID sid, uint32_t gen, bool enqueue) {
     MppPacket pkt = NULL;
     mpp_packet_init(&pkt, data, len);
     mpp_packet_set_length(pkt, len);
-    mpp_packet_set_pts(pkt, (RK_S64)sid);
+    mpp_packet_set_pts(pkt, (RK_S64)(((uint64_t)gen << 32) | (uint64_t)sid));
     pthread_mutex_lock(&c->out_lock);
     { MppFrame f = NULL; while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) { assign_mpp_frame(f, c, d); f = NULL; } }
     if (enqueue) { c->decode_queue[c->dq_tail] = sid; c->dq_tail = (c->dq_tail + 1) & 63; }
@@ -1844,7 +1858,7 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
     LOG("av1: submit surface=0x%x type=%u show=%u mask=0x%02x tiles=%d bytes=%zu%s%s%s", (unsigned)p->surface, fh.frame_type, fh.show_frame, mask, p->ntiles, n, p->forced ? " (re-submit)" : "", force_show ? " (forced early)" : "", hold ? " (held)" : "");
     const char *dump = getenv("RKVA_DUMP_AV1");
     if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(buf, 1, n, df); fclose(df); } }
-    VAStatus st = av1_put(c, d, buf, n, p->out_surface, !hidden);
+    VAStatus st = av1_put(c, d, buf, n, p->out_surface, p->out_gen, !hidden);
     if (st == VA_STATUS_SUCCESS && !resub && hidden && mask && fh.frame_type == GST_AV1_KEY_FRAME) {
         /* A hidden KEY frame (libaom forward keyframes, Chromium 48delayed): show_existing of a KEY makes the decoder
            refresh every slot and reset — the stream only does that when it really shows it later.  For the client's
@@ -1856,10 +1870,10 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
         if (!n2) { LOG("av1: hidden KEY: intra-only copy header write failed"); free(b2); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
         LOG("av1: hidden KEY surface=0x%x: output copy as shown INTRA_ONLY (%zu bytes)", (unsigned)p->surface, n2);
         if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(b2, 1, n2, df); fclose(df); } }
-        st = av1_put(c, d, b2, n2, p->out_surface, true); free(b2);
+        st = av1_put(c, d, b2, n2, p->out_surface, p->out_gen, true); free(b2);
     } else if (st == VA_STATUS_SUCCESS && !resub && hidden && mask) {
         uint8_t se[64]; size_t sn = av1_show_existing_closed(&c->av1_seq, __builtin_ctz(mask), fh.frame_type, se, sizeof se);
-        if (sn) { if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(se, 1, sn, df); fclose(df); } } st = av1_put(c, d, se, sn, p->out_surface, true); }
+        if (sn) { if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(se, 1, sn, df); fclose(df); } } st = av1_put(c, d, se, sn, p->out_surface, p->out_gen, true); }
     }
     free(buf);
     if (st != VA_STATUS_SUCCESS) return st;
@@ -1886,7 +1900,7 @@ static VAStatus av1_resolve_pending(RKContext *c, RKDriver *d, const VADecPictur
     if (p->forced && p->held) {                                        /* MPP holds the early decode: commit its slots */
         uint8_t cb[8]; size_t cn = av1_write_rkva(cb, 'C', mask);
         LOG("av1: commit surface=0x%x mask=0x%02x (held, no re-decode)", (unsigned)p->surface, mask);
-        st = av1_put(c, d, cb, cn, p->out_surface, false);
+        st = av1_put(c, d, cb, cn, p->out_surface, p->out_gen, false);
         RKSurface *me = surface_by_id(d, p->ref_surface);
         if (st == VA_STATUS_SUCCESS && me) me->av1_mask = mask;
     } else if (!p->forced || mask) st = av1_submit(c, d, mask, false);  /* forced + mask 0: the early decode was final */
@@ -1937,7 +1951,7 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
             int slot = ks->av1_mask ? __builtin_ctz(ks->av1_mask) : 0;
             uint8_t se[64]; size_t sn = av1_show_existing_closed(&c->av1_seq, slot, 0, se, sizeof se);
             LOG("av1: shown-existing KEY surface 0x%x (slot %d) → full refresh", (unsigned)k, slot);
-            if (sn) { av1_put(c, d, se, sn, k, true); ks->av1_mask = 0xff; }
+            if (sn) { av1_put(c, d, se, sn, k, ks->gen, true); ks->av1_mask = 0xff; }
         }
     }
     /* 2. collect this picture's tiles: slice parameter elements paired with the slice data buffer that follows them
@@ -1997,10 +2011,11 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
         RKSurface *ds = surface_by_id(d, pp->current_display_picture);
         if (ds) {
             p->out_surface = pp->current_display_picture;
-            pthread_mutex_lock(&ds->lock); ds->decoded = false; ds->ctx_id = (VAContextID)(CONTEXT_ID_BASE + (unsigned)(c - d->contexts)); pthread_mutex_unlock(&ds->lock);
+            pthread_mutex_lock(&ds->lock); ds->decoded = false; ds->ctx_id = (VAContextID)(CONTEXT_ID_BASE + (unsigned)(c - d->contexts)); if (++ds->gen == 0) ds->gen = 1; pthread_mutex_unlock(&ds->lock);
             LOG("av1: film grain: picture for 0x%x lands on display surface 0x%x", (unsigned)p->surface, (unsigned)p->out_surface);
         }
     }
+    { RKSurface *os = surface_by_id(d, p->out_surface); p->out_gen = os ? os->gen : 0; }
     /* 3. a shown KEY frame refreshes every slot by definition: no need to wait */
     if (pp->pic_info_fields.bits.frame_type == 0 && pp->pic_info_fields.bits.show_frame) {
         st = av1_submit(c, d, 0xff, false); p->valid = false; return st == VA_STATUS_SUCCESS ? st : av1_refuse(c, d, pp, st);
