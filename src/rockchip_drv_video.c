@@ -231,6 +231,7 @@ typedef struct {
        every frame).  Chromium and GStreamer import each surface once, at pool creation, and Chromium never calls
        vaSyncSurface per frame either: holding MPP's frame would leave them showing the surface's own, stale buffer. */
     bool            zc_ok;
+    int             zc_score;       /* +2 per held frame dropped unexported, -1 per exported one; > 16 turns zc_ok off */
     /* AV1: which picture MPP holds in each of its 8 reference slots (surface + its gen), as the refresh masks we sent
        say.  The synthesised show_existing of a KEY must name a slot that really holds that KEY: the old guess (slot 0
        when the KEY's mask had been cleared) showed whatever MPP had there -- with the deferred refresh, a picture MPP had
@@ -368,6 +369,23 @@ static RKSurface *surface_by_id(RKDriver *d, VASurfaceID id) {
 static RKBuffer *buffer_by_id(RKDriver *d, VABufferID id) {
     unsigned idx = id - BUFFER_ID_BASE;
     return (idx < MAX_BUFFERS && d->buffers[idx].used) ? &d->buffers[idx] : NULL;
+}
+
+/* Zero-copy eligibility is reversible: a client that keeps rendering into surfaces whose held frame it never exported
+   (nor synced, which would have copied it) is reading them through an old import -- Chromium/GStreamer after a stray
+   re-export.  Score it: +2 per such frame, -1 per exported one; above 16, zero-copy goes off for the context until the
+   re-export rule turns it on again.  Firefox leaves ~10 % unexported (AV1 hidden frames never shown) and stays on. */
+static void zc_note_drop(RKDriver *d, VAContextID cid, bool unexported) {
+    RKContext *c = context_by_id(d, cid);
+    if (!c || !__atomic_load_n(&c->zc_ok, __ATOMIC_ACQUIRE)) return;
+    int sc = __atomic_load_n(&c->zc_score, __ATOMIC_RELAXED);
+    sc = unexported ? sc + 2 : (sc > 0 ? sc - 1 : 0);
+    if (sc > 16) {
+        __atomic_store_n(&c->zc_ok, false, __ATOMIC_RELEASE);
+        sc = 0;
+        LOG("zero-copy: context 0x%x renders into surfaces whose frames it never exported: zero-copy off", cid);
+    }
+    __atomic_store_n(&c->zc_score, sc, __ATOMIC_RELAXED);
 }
 
 /* zero-copy helpers (defined with assign_mpp_frame) */
@@ -1037,12 +1055,15 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
     if (s) {
         MppFrame za, zb;
         pthread_mutex_lock(&s->lock);
+        VAContextID zc_ctx = s->ctx_id;
+        bool zc_held = s->zc_frame != NULL, zc_unexported = zc_held && !s->zc_exported;
         s->decoded = false;
         s->ctx_id  = ctx_id;
         if (++s->gen == 0) s->gen = 1;
         surface_zc_take_locked(s, &za, &zb);     /* the client renders into it again: done with the old picture */
         pthread_mutex_unlock(&s->lock);
         zc_drop2(za, zb);
+        if (zc_held) zc_note_drop(d, zc_ctx, zc_unexported);
     }
     return VA_STATUS_SUCCESS;
 }
