@@ -216,12 +216,19 @@ typedef struct {
         VASurfaceID ref_surface;  /* pp.current_frame: how later pictures refer to this one (== surface in every client seen) */
         VASurfaceID out_surface;  /* where the picture lands: pp.current_display_picture when the client gave a separate one (film grain), else surface */
         uint32_t    out_gen;      /* out_surface's gen when this picture was handed to us */
+        uint32_t    ref_gen;      /* ref_surface's gen then */
         VADecPictureParameterBufferAV1 pp;
         uint8_t    *tiles_buf;    /* copies of the tile payloads (the client destroys its buffers after EndPicture) */
         size_t      tiles_len, tiles_cap;
         Av1Tile     tiles[512];
         int         ntiles;
     } av1_pending;
+    /* AV1: which picture MPP holds in each of its 8 reference slots (surface + its gen), as the refresh masks we sent
+       say.  The synthesised show_existing of a KEY must name a slot that really holds that KEY: the old guess (slot 0
+       when the KEY's mask had been cleared) showed whatever MPP had there -- with the deferred refresh, a picture MPP had
+       already output, which MPP then released twice (mpp_buffer_ref_dec "non-positive ref_count", Chromium 48delayed). */
+    VASurfaceID     av1_mslot[8];
+    uint32_t        av1_mslot_gen[8];
     /* AV1 packets go to MPP from a per-context submit thread (see av1_put): the client's EndPicture never waits on
        MPP_ERR_BUFFER_FULL.  sub_lock/sub_cv live while sub_started. */
     struct RkPkt   *sub_head, *sub_tail;
@@ -1778,6 +1785,10 @@ static size_t av1_show_existing_closed(const GstAV1SequenceHeaderOBU *seq, int s
     return n;
 }
 
+static void av1_slots_store(RKContext *c, uint8_t mask, VASurfaceID sid, uint32_t gen) {
+    for (int i = 0; i < 8; i++) if (mask & (1u << i)) { c->av1_mslot[i] = sid; c->av1_mslot_gen[i] = gen; }
+}
+
 static void av1_mark_decoded(RKDriver *d, VASurfaceID sid) {
     RKSurface *t = surface_by_id(d, sid);
     if (!t) return;
@@ -1954,6 +1965,7 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
     if (p->out_surface != p->surface) av1_mark_decoded(d, p->surface);   /* film grain: the reconstruct surface is never read */
     RKSurface *me = surface_by_id(d, p->ref_surface);
     if (me) { av1_ref_from_frame(pp, &fh, &me->av1); me->av1_mask = mask; }
+    av1_slots_store(c, fh.refresh_frame_flags, p->ref_surface, p->ref_gen);   /* what MPP's slots now hold */
     return VA_STATUS_SUCCESS;
 }
 
@@ -1975,6 +1987,7 @@ static VAStatus av1_resolve_pending(RKContext *c, RKDriver *d, const VADecPictur
         st = av1_put(c, d, cb, cn, p->out_surface, p->out_gen, false);
         RKSurface *me = surface_by_id(d, p->ref_surface);
         if (st == VA_STATUS_SUCCESS && me) me->av1_mask = mask;
+        if (st == VA_STATUS_SUCCESS) av1_slots_store(c, mask, p->ref_surface, p->ref_gen);
     } else if (!p->forced || mask) st = av1_submit(c, d, mask, false);  /* forced + mask 0: the early decode was final */
     if (st != VA_STATUS_SUCCESS) { av1_mark_decoded(d, p->surface); if (p->out_surface != p->surface) av1_mark_decoded(d, p->out_surface); }
     else { RKSurface *me = surface_by_id(d, p->ref_surface); if (me) me->av1_mask = 0; }
@@ -2020,10 +2033,15 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
         for (int i = 1; i < 8 && all; i++) all = (pp->ref_frame_map[i] == k);
         RKSurface *ks = all ? surface_by_id(d, k) : NULL;
         if (ks && ks->av1.valid && ks->av1.frame_type == 0 && ks->av1_mask != 0xff && c->av1_seq_sent) {
-            int slot = ks->av1_mask ? __builtin_ctz(ks->av1_mask) : 0;
-            uint8_t se[64]; size_t sn = av1_show_existing_closed(&c->av1_seq, slot, 0, se, sizeof se);
-            LOG("av1: shown-existing KEY surface 0x%x (slot %d) → full refresh", (unsigned)k, slot);
-            if (sn) { av1_put(c, d, se, sn, k, ks->gen, true); ks->av1_mask = 0xff; }
+            int slot = -1;
+            for (int i = 0; i < 8 && slot < 0; i++) if (c->av1_mslot[i] == k && c->av1_mslot_gen[i] == ks->gen) slot = i;
+            if (slot < 0) {
+                LOG("av1: shown-existing KEY surface 0x%x: no MPP slot holds it, show_existing not sent", (unsigned)k);
+            } else {
+                uint8_t se[64]; size_t sn = av1_show_existing_closed(&c->av1_seq, slot, 0, se, sizeof se);
+                LOG("av1: shown-existing KEY surface 0x%x (slot %d) → full refresh", (unsigned)k, slot);
+                if (sn && av1_put(c, d, se, sn, k, ks->gen, true) == VA_STATUS_SUCCESS) { ks->av1_mask = 0xff; av1_slots_store(c, 0xff, k, ks->gen); }
+            }
         }
     }
     /* 2. collect this picture's tiles: slice parameter elements paired with the slice data buffer that follows them
@@ -2088,6 +2106,7 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
         }
     }
     { RKSurface *os = surface_by_id(d, p->out_surface); p->out_gen = os ? os->gen : 0; }
+    { RKSurface *rs = surface_by_id(d, p->ref_surface); p->ref_gen = rs ? rs->gen : 0; }
     /* 3. a shown KEY frame refreshes every slot by definition: no need to wait */
     if (pp->pic_info_fields.bits.frame_type == 0 && pp->pic_info_fields.bits.show_frame) {
         st = av1_submit(c, d, 0xff, false); p->valid = false; return st == VA_STATUS_SUCCESS ? st : av1_refuse(c, d, pp, st);
