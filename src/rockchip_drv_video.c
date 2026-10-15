@@ -127,7 +127,7 @@ static void log_init(void) {
 }
 #include <time.h>
 #include <sys/syscall.h>
-/* exp/4k60: monotonic microsecond clock for the per-step timing in the log */
+/* monotonic microsecond clock for the per-step timing in the log */
 static inline long long rk_now_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (long long)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000; }
 #define LOG(fmt, ...) do { if (g_log_fp) { \
     long long _t = rk_now_us(); \
@@ -2077,7 +2077,9 @@ static void av1_mark_decoded(RKDriver *d, VASurfaceID sid) {
  * used to block the client's EndPicture until the hardware had decoded earlier pictures -- 17 + 12 ms inside one
  * Firefox decode call on the YouTube BBB 4K60 stream, which Firefox counts as a late decode, and after 16 of those it
  * abandons hardware decoding.  MPP still sees its packets one at a time, in order, exactly as before. */
-typedef struct RkPkt { struct RkPkt *next; size_t len; VASurfaceID sid; RK_S64 pts; uint8_t data[]; } RkPkt;
+typedef struct RkPkt { struct RkPkt *next; size_t len; VASurfaceID sid; RK_S64 pts; uint8_t *data; uint8_t inl[]; } RkPkt;
+/* data is inl[] (small packets copied in) or a heap buffer the queue owns (av1_put_take) */
+static void rk_pkt_free(RkPkt *k) { if (k->data != k->inl) free(k->data); free(k); }
 /* Bound on the queue: deep enough that a temporal unit of hidden pictures never waits, shallow enough that a client
    which never syncs (ffmpeg -hwaccel_output_format vaapi -f null) is held to the hardware's pace instead of queueing
    the whole stream in memory and having it dropped at DestroyContext. */
@@ -2092,7 +2094,7 @@ static void *av1_submit_thread(void *arg) {
         RkPkt *k = c->sub_head;
         if (!k) { pthread_mutex_unlock(&c->sub_lock); break; }           /* stop requested and nothing left */
         if (c->sub_stop) {                                               /* teardown: drop what is left */
-            while (k) { RkPkt *n = k->next; free(k); k = n; }
+            while (k) { RkPkt *n = k->next; rk_pkt_free(k); k = n; }
             c->sub_head = c->sub_tail = NULL; c->sub_count = 0;
             pthread_cond_broadcast(&c->sub_room);
             pthread_mutex_unlock(&c->sub_lock);
@@ -2132,7 +2134,7 @@ static void *av1_submit_thread(void *arg) {
         c->sub_count--;
         pthread_cond_signal(&c->sub_room);
         pthread_mutex_unlock(&c->sub_lock);
-        free(k);
+        rk_pkt_free(k);
     }
     return NULL;
 }
@@ -2146,16 +2148,14 @@ static void av1_submit_stop(RKContext *c) {
     c->sub_started = false; c->sub_stop = false; c->sub_head = c->sub_tail = NULL; c->sub_count = 0;
 }
 
-static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VASurfaceID sid, uint32_t gen, bool enqueue) {
-    RkPkt *k = malloc(sizeof *k + len);
-    if (!k) return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    k->next = NULL; k->len = len; k->sid = sid; k->pts = (RK_S64)(((uint64_t)gen << 32) | (uint64_t)sid); memcpy(k->data, data, len);
+static VAStatus av1_queue_pkt(RKContext *c, RKDriver *d, RkPkt *k, VASurfaceID sid, uint32_t gen, bool enqueue) {
+    k->next = NULL; k->sid = sid; k->pts = (RK_S64)(((uint64_t)gen << 32) | (uint64_t)sid);
     if (!c->sub_started) {
         c->sub_drv = d;
         pthread_mutex_init(&c->sub_lock, NULL); pthread_cond_init(&c->sub_cv, NULL); pthread_cond_init(&c->sub_room, NULL);
         c->sub_stop = false; c->sub_head = c->sub_tail = NULL; c->sub_count = 0;
         if (pthread_create(&c->sub_thread, NULL, av1_submit_thread, c) != 0) {
-            pthread_cond_destroy(&c->sub_room); pthread_cond_destroy(&c->sub_cv); pthread_mutex_destroy(&c->sub_lock); free(k);
+            pthread_cond_destroy(&c->sub_room); pthread_cond_destroy(&c->sub_cv); pthread_mutex_destroy(&c->sub_lock); rk_pkt_free(k);
             LOG("av1_put: cannot start the submit thread");
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
@@ -2172,6 +2172,21 @@ static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VA
     pthread_cond_signal(&c->sub_cv);
     pthread_mutex_unlock(&c->sub_lock);
     return VA_STATUS_SUCCESS;
+}
+/* Small packets (show_existing, commit): copied into the queue entry. */
+static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VASurfaceID sid, uint32_t gen, bool enqueue) {
+    RkPkt *k = malloc(sizeof *k + len);
+    if (!k) return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    k->len = len; k->data = k->inl; memcpy(k->inl, data, len);
+    return av1_queue_pkt(c, d, k, sid, gen, enqueue);
+}
+/* A heap buffer (a frame OBU, tens of KB at 4K): the queue takes ownership instead of copying it again; freed after
+   the put, or here on failure. */
+static VAStatus av1_put_take(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VASurfaceID sid, uint32_t gen, bool enqueue) {
+    RkPkt *k = malloc(sizeof *k);
+    if (!k) { free(data); return VA_STATUS_ERROR_ALLOCATION_FAILED; }
+    k->len = len; k->data = data;
+    return av1_queue_pkt(c, d, k, sid, gen, enqueue);
 }
 
 /* Decode the held picture with refresh_frame_flags = mask.  forced_only: this is the early (mask 0) decode. */
@@ -2225,7 +2240,8 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
     LOG("av1: submit surface=0x%x type=%u show=%u mask=0x%02x tiles=%d bytes=%zu%s%s%s", (unsigned)p->surface, fh.frame_type, fh.show_frame, mask, p->ntiles, n, p->forced ? " (re-submit)" : "", force_show ? " (forced early)" : "", hold ? " (held)" : "");
     const char *dump = getenv("RKVA_DUMP_AV1");
     if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(buf, 1, n, df); fclose(df); } }
-    VAStatus st = av1_put(c, d, buf, n, p->out_surface, p->out_gen, !hidden);
+    VAStatus st = av1_put_take(c, d, buf, n, p->out_surface, p->out_gen, !hidden);
+    buf = NULL;                                   /* owned by the submit queue now */
     if (st == VA_STATUS_SUCCESS && !resub && hidden && mask && fh.frame_type == GST_AV1_KEY_FRAME) {
         /* A hidden KEY frame (libaom forward keyframes, Chromium 48delayed): show_existing of a KEY makes the decoder
            refresh every slot and reset — the stream only does that when it really shows it later.  For the client's
@@ -2237,7 +2253,7 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
         if (!n2) { LOG("av1: hidden KEY: intra-only copy header write failed"); free(b2); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
         LOG("av1: hidden KEY surface=0x%x: output copy as shown INTRA_ONLY (%zu bytes)", (unsigned)p->surface, n2);
         if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(b2, 1, n2, df); fclose(df); } }
-        st = av1_put(c, d, b2, n2, p->out_surface, p->out_gen, true); free(b2);
+        st = av1_put_take(c, d, b2, n2, p->out_surface, p->out_gen, true);
     } else if (st == VA_STATUS_SUCCESS && !resub && hidden && mask) {
         uint8_t se[64]; size_t sn = av1_show_existing_closed(&c->av1_seq, __builtin_ctz(mask), fh.frame_type, se, sizeof se);
         if (sn) { if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(se, 1, sn, df); fclose(df); } } st = av1_put(c, d, se, sn, p->out_surface, p->out_gen, true); }
@@ -2566,7 +2582,6 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
     LOG("ExportSurfaceHandle: surface=0x%x mem_type=0x%x flags=0x%x",
         id, mem_type, flags);
     if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
-    (void)flags;
 
     if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
         LOG("ExportSurfaceHandle: unsupported mem_type 0x%x", mem_type);
