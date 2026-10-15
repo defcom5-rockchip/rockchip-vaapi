@@ -1,3 +1,20 @@
+rockchip-vaapi (3.5.0~rc2-1) resolute; urgency=medium
+
+  * Release candidate 2 for 3.5.0.
+  * AV1: pace vaEndPicture for a client that never waits on its pictures
+    (afbec6b). Chromium syncs a surface only when it imports it and then
+    composites its dma-buf unsynchronised; with the submit thread of rc1 it
+    could run up to 16 pictures ahead of the decoder and showed old pictures,
+    or green on a surface's first use, at start, seek and loop. Until a
+    decoder's client waits on a picture it rendered (vaSyncSurface, or an
+    export after decoding: FFmpeg, mpv, Firefox), and again after 32 pictures
+    without such a wait, vaEndPicture returns once the picture from two
+    pictures earlier is in its surface (bounded at 250 ms). RKVA_PACE=n sets
+    the depth, 0 turns pacing off. AV1 only.
+  * Docs: why and when AV1 pacing applies, RKVA_PACE (97cf350).
+
+ -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Thu, 15 Oct 2026 15:06:48 +0000
+
 rockchip-vaapi (3.5.0~rc1-1) resolute; urgency=medium
 
   * Release candidate 1 for 3.5.0: 4K60 AV1 in Firefox.
