@@ -58,8 +58,9 @@ Releases are triggered by the human maintainer, never autonomously.
    `sub_lock` (a leaf lock; at most 16 queued packets). An AV1 context whose
    client has not waited on a picture it rendered (vaSyncSurface, or an export
    after decoding) is paced: EndPicture returns only once the picture from
-   `RKVA_PACE` (2) pictures earlier is in its surface (capped at 100 ms; in
-   poll mode the waiter drains MPP itself). Chromium syncs a surface only at
+   `RKVA_PACE` (2) pictures earlier is in its surface (capped at 150 ms, 300 ms
+   for a decoder's first pictures; in poll mode the waiter drains MPP itself).
+   Chromium syncs a surface only at
    import and then samples its dma-buf unsynchronised: without pacing it shows
    old pictures or green (rc1). **The pace wait holds no driver lock**: never
    move it under `av1_lock` or `out_lock` (the submit and output threads need
@@ -141,7 +142,7 @@ Client notes:
   `RKVA_AV1_NO_DEFER=1` (re-decode early-synced AV1 pictures even with a capable MPP),
   `RKVA_PACE=n` (AV1 pictures in flight for a client that never waits, default 2, 0 = no pacing: Chromium
   then shows old pictures or green again). `pace:` log lines: on/off per context, one summary per 600 paced
-  pictures, and any wait that hit the 100 ms cap ("not decoded after").
+  pictures, and any wait that hit the cap ("not decoded after").
 
 ## Workflow
 - Development on feature branches; `main` is released truth.

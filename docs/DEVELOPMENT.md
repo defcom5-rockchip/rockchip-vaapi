@@ -357,9 +357,10 @@ What the VA parameters do not say, and how it is handled:
   picture, or green on a surface's first use (3.5.0~rc1, caught by eye in a blind A/B and by a frame checker that
   compares every presented frame with 3.0.0's). Until a context's client has waited on a picture it rendered, and
   again after 32 pictures without such a wait, EndPicture waits until the picture from `RKVA_PACE` (default 2)
-  pictures earlier is in its surface. The wait holds no driver lock, uses a monotonic 100 ms cap (Chromium holds its
-  process-wide VA lock across vaEndPicture), ends early when the surface is re-targeted or destroyed or the decoder
-  destroyed, and in poll mode (`RKVA_SYNC_POLL=1`, or no output thread) drains MPP itself. AV1 only: the other codecs
+  pictures earlier is in its surface. The wait holds no driver lock and uses a monotonic cap of 150 ms (300 ms for a
+  decoder's first 4 pictures, which include MPP's info change; Chromium holds its process-wide VA lock across
+  vaEndPicture; measured waits at 4K60: mean 12-14 ms, max 62 ms playing, 91 ms around seeks, first output up to
+  133 ms after mpp_init). It ends early when the surface is re-targeted or destroyed or the decoder destroyed, and in poll mode (`RKVA_SYNC_POLL=1`, or no output thread) drains MPP itself. AV1 only: the other codecs
   still feed MPP from EndPicture, which blocks on MPP's input queue as in 3.0.0 (MPP runs with IMMEDIATE_OUT, so
   H.264/HEVC come out in decode order). Not covered: the newest picture of such a client is still held until its
   successor arrives (KI-15).

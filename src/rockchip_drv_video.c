@@ -266,7 +266,10 @@ typedef struct {
 
 static unsigned g_ctx_life;   /* source of RKContext.life */
 #define PACE_AFTER 32         /* pictures without a wait before AV1 pacing comes back on (see av1_pace) */
-#define PACE_CAP_MS 100       /* longest pacing wait: Chromium holds its process-wide VA lock across vaEndPicture */
+#define PACE_CAP_MS 150       /* longest pacing wait: Chromium holds its process-wide VA lock across vaEndPicture.
+                                 Measured at 4K60 in Chromium: mean 12-14 ms, max 62 ms playing, 91 ms around seeks */
+#define PACE_CAP_START_MS 300 /* for a decoder's first 4 pictures: MPP's info change and buffer allocation put the
+                                 first output up to 133 ms after mpp_init at 4K (mpv, 53 starts) */
 #define PACE_SUMMARY 600      /* paced pictures per "pace:" summary line */
 
 /* Clear a context slot but keep its out_lock (the last member, see above). */
@@ -2455,7 +2458,8 @@ static VAStatus do_av1_decode(RKContext *c, RKDriver *d) {
  * most that many pictures in flight, about what 3.0.0 had from MPP's own input back-pressure.  AV1 only: the other
  * codecs still feed MPP from EndPicture, which blocks on MPP's input queue as in 3.0.0.  The wait holds no driver lock
  * (never move it under av1_lock or out_lock: the submit and output threads need both to finish the picture), is capped
- * at PACE_CAP_MS (Chromium holds its process-wide VA lock across vaEndPicture), and ends early when the surface is
+ * at PACE_CAP_MS (PACE_CAP_START_MS for a decoder's first pictures; Chromium holds its process-wide VA lock across
+ * vaEndPicture), and ends early when the surface is
  * re-targeted (gen), destroyed (dying) or the decoder destroyed (life).  Without the output thread (RKVA_SYNC_POLL=1,
  * or it failed to start) the waiter drains MPP itself, 1 ms apart, as vaSyncSurface does in that mode. */
 static int pace_depth(void) {
@@ -2493,8 +2497,9 @@ static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid
     if (!w) return;
     unsigned life = __atomic_load_n(&c->life, __ATOMIC_ACQUIRE);
     bool poll = !c->out_started;               /* no output thread: nobody else drains MPP */
+    long cap_ms = (c->pace_n - 1 - (unsigned)depth) < 4 ? PACE_CAP_START_MS : PACE_CAP_MS;
     struct timespec dl; clock_gettime(CLOCK_MONOTONIC, &dl);
-    dl.tv_nsec += PACE_CAP_MS * 1000000L; while (dl.tv_nsec >= 1000000000L) { dl.tv_sec++; dl.tv_nsec -= 1000000000L; }
+    dl.tv_nsec += cap_ms * 1000000L; while (dl.tv_nsec >= 1000000000L) { dl.tv_sec++; dl.tv_nsec -= 1000000000L; }
     long long t0 = rk_now_us(); bool late = false;
     pthread_mutex_lock(&w->lock);
     if (w->dying) { pthread_mutex_unlock(&w->lock); return; }
