@@ -222,6 +222,14 @@ typedef struct {
         Av1Tile     tiles[512];
         int         ntiles;
     } av1_pending;
+    /* AV1 packets go to MPP from a per-context submit thread (see av1_put): the client's EndPicture never waits on
+       MPP_ERR_BUFFER_FULL.  sub_lock/sub_cv live while sub_started. */
+    struct RkPkt   *sub_head, *sub_tail;
+    bool            sub_started, sub_stop;
+    void           *sub_drv;
+    pthread_t       sub_thread;
+    pthread_mutex_t sub_lock;
+    pthread_cond_t  sub_cv;
     pthread_mutex_t out_lock;
     pthread_mutex_t av1_lock;   /* serialises the AV1 submit policy between EndPicture (decoder thread) and vaSyncSurface (any
                                    thread).  Driver lifetime like out_lock.  Lock order: av1_lock, then out_lock, then a surface. */
@@ -360,6 +368,8 @@ static int profile_idc(VAProfile p) {
 
 /* ── VADriverVTable implementations ──────────────────────────── */
 
+static void av1_submit_stop(RKContext *c);   /* AV1 submit thread, see av1_put */
+
 /* Tear an MPP decoder down without stranding its buffers.
  *
  * mpp_destroy() alone was not enough when a client abandoned a context early.
@@ -409,6 +419,7 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     for (int i = 0; i < MAX_CONTEXTS; i++) {
         RKContext *c = &d->contexts[i];
         pthread_mutex_lock(&c->av1_lock);
+        if (c->used) av1_submit_stop(c);
         pthread_mutex_lock(&c->out_lock);
         if (c->used) { free(c->av1_pending.tiles_buf); c->av1_pending.tiles_buf = NULL; rk_mpp_teardown_locked(c); }
         pthread_mutex_unlock(&c->out_lock); pthread_mutex_unlock(&c->av1_lock);
@@ -852,6 +863,7 @@ static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
     /* av1_lock before out_lock, the order EndPicture and a forcing vaSyncSurface use (av1_submit takes out_lock
        repeatedly under av1_lock); the reverse order deadlocked a sync on a held AV1 picture against this teardown. */
     pthread_mutex_lock(&c->av1_lock);
+    if (c->used) av1_submit_stop(c);           /* before out_lock: the submit thread takes it */
     pthread_mutex_lock(&c->out_lock);
     if (!c->used) {                            /* lost a race with another DestroyContext */
         pthread_mutex_unlock(&c->out_lock); pthread_mutex_unlock(&c->av1_lock);
@@ -1771,40 +1783,91 @@ static void av1_mark_decoded(RKDriver *d, VASurfaceID sid) {
     pthread_mutex_lock(&t->lock); t->decoded = true; pthread_cond_signal(&t->cond); pthread_mutex_unlock(&t->lock);
 }
 
-/* Send one packet (pts = the surface its output belongs to); enqueue that surface in the FIFO when `enqueue`. */
+/* Send one packet (pts = the surface its output belongs to); enqueue that surface in the FIFO when `enqueue`.
+ *
+ * The packet is queued for the context's submit thread, which feeds MPP and absorbs MPP_ERR_BUFFER_FULL.  MPP's AV1
+ * input queue holds 3 packets; a temporal unit with several hidden pictures (each followed by a show_existing header)
+ * used to block the client's EndPicture until the hardware had decoded earlier pictures -- 17 + 12 ms inside one
+ * Firefox decode call on the YouTube BBB 4K60 stream, which Firefox counts as a late decode, and after 16 of those it
+ * abandons hardware decoding.  MPP still sees its packets one at a time, in order, exactly as before. */
+typedef struct RkPkt { struct RkPkt *next; size_t len; VASurfaceID sid; RK_S64 pts; uint8_t data[]; } RkPkt;
+
+static void *av1_submit_thread(void *arg) {
+    RKContext *c = arg;
+    RKDriver  *d = NULL;
+    for (;;) {
+        pthread_mutex_lock(&c->sub_lock);
+        while (!c->sub_head && !c->sub_stop) pthread_cond_wait(&c->sub_cv, &c->sub_lock);
+        RkPkt *k = c->sub_head;
+        if (!k) { pthread_mutex_unlock(&c->sub_lock); break; }           /* stop requested and nothing left */
+        if (c->sub_stop) {                                               /* teardown: drop what is left */
+            while (k) { RkPkt *n = k->next; free(k); k = n; }
+            c->sub_head = c->sub_tail = NULL;
+            pthread_mutex_unlock(&c->sub_lock);
+            break;
+        }
+        pthread_mutex_unlock(&c->sub_lock);
+        d = (RKDriver *)c->sub_drv;
+        MppPacket pkt = NULL;
+        mpp_packet_init(&pkt, k->data, k->len);
+        mpp_packet_set_length(pkt, k->len);
+        mpp_packet_set_pts(pkt, k->pts);
+        MPP_RET ret = MPP_OK;
+        long long t_put0 = rk_now_us(); int attempts = 0;
+        for (int attempt = 0; attempt < 4000 && !c->sub_stop; attempt++) {
+            attempts = attempt + 1;
+            ret = c->mpi->decode_put_packet(c->mpp, pkt);
+            if (ret == MPP_OK || ret != MPP_ERR_BUFFER_FULL) break;
+            MppFrame df = NULL;
+            pthread_mutex_lock(&c->out_lock);
+            while (c->mpi->decode_get_frame(c->mpp, &df) == MPP_OK && df) { assign_mpp_frame(df, c, d); df = NULL; }
+            pthread_mutex_unlock(&c->out_lock);
+            usleep(500);
+        }
+        mpp_packet_deinit(&pkt);
+        LOG("av1_put: surface=0x%x %zu bytes put in %lld us (%d attempts)", (unsigned)k->sid, k->len, rk_now_us() - t_put0, attempts);
+        if (ret != MPP_OK) { LOG("av1_put: decode_put_packet failed: %d", ret); av1_mark_decoded(d, k->sid); }
+        pthread_mutex_lock(&c->sub_lock);
+        c->sub_head = k->next; if (!c->sub_head) c->sub_tail = NULL;
+        pthread_mutex_unlock(&c->sub_lock);
+        free(k);
+    }
+    return NULL;
+}
+
+/* Stop the submit thread (pending packets are dropped).  Caller must NOT hold out_lock: the thread takes it. */
+static void av1_submit_stop(RKContext *c) {
+    if (!c->sub_started) return;
+    pthread_mutex_lock(&c->sub_lock); c->sub_stop = true; pthread_cond_signal(&c->sub_cv); pthread_mutex_unlock(&c->sub_lock);
+    pthread_join(c->sub_thread, NULL);
+    pthread_cond_destroy(&c->sub_cv); pthread_mutex_destroy(&c->sub_lock);
+    c->sub_started = false; c->sub_stop = false; c->sub_head = c->sub_tail = NULL;
+}
+
 static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VASurfaceID sid, uint32_t gen, bool enqueue) {
-    MppPacket pkt = NULL;
-    mpp_packet_init(&pkt, data, len);
-    mpp_packet_set_length(pkt, len);
-    mpp_packet_set_pts(pkt, (RK_S64)(((uint64_t)gen << 32) | (uint64_t)sid));
+    RkPkt *k = malloc(sizeof *k + len);
+    if (!k) return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    k->next = NULL; k->len = len; k->sid = sid; k->pts = (RK_S64)(((uint64_t)gen << 32) | (uint64_t)sid); memcpy(k->data, data, len);
+    if (!c->sub_started) {
+        c->sub_drv = d;
+        pthread_mutex_init(&c->sub_lock, NULL); pthread_cond_init(&c->sub_cv, NULL);
+        c->sub_stop = false; c->sub_head = c->sub_tail = NULL;
+        if (pthread_create(&c->sub_thread, NULL, av1_submit_thread, c) != 0) {
+            pthread_cond_destroy(&c->sub_cv); pthread_mutex_destroy(&c->sub_lock); free(k);
+            LOG("av1_put: cannot start the submit thread");
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
+        c->sub_started = true;
+    }
     pthread_mutex_lock(&c->out_lock);
     { MppFrame f = NULL; while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) { assign_mpp_frame(f, c, d); f = NULL; } }
     if (enqueue) { c->decode_queue[c->dq_tail] = sid; c->dq_tail = (c->dq_tail + 1) & 63; }
     pthread_mutex_unlock(&c->out_lock);
-    MPP_RET ret = MPP_OK;
-    long long t_put0 = rk_now_us(); int attempts = 0;
-    for (int attempt = 0; attempt < 400; attempt++) {
-        attempts = attempt + 1;
-        ret = c->mpi->decode_put_packet(c->mpp, pkt);
-        if (ret == MPP_OK || ret != MPP_ERR_BUFFER_FULL) break;
-        MppFrame df = NULL;
-        pthread_mutex_lock(&c->out_lock);
-        while (c->mpi->decode_get_frame(c->mpp, &df) == MPP_OK && df) { assign_mpp_frame(df, c, d); df = NULL; }
-        pthread_mutex_unlock(&c->out_lock);
-        usleep(500);
-    }
-    mpp_packet_deinit(&pkt);
-    LOG("av1_put: surface=0x%x %zu bytes put in %lld us (%d attempts)", (unsigned)sid, len, rk_now_us() - t_put0, attempts);
-    if (ret != MPP_OK) {
-        LOG("av1_put: decode_put_packet failed: %d", ret);
-        if (enqueue) {
-            pthread_mutex_lock(&c->out_lock);
-            int last = (c->dq_tail - 1) & 63;
-            if (c->dq_tail != c->dq_head && c->decode_queue[last] == sid) c->dq_tail = last;
-            pthread_mutex_unlock(&c->out_lock);
-        }
-        return VA_STATUS_ERROR_DECODING_ERROR;
-    }
+    pthread_mutex_lock(&c->sub_lock);
+    if (c->sub_tail) c->sub_tail->next = k; else c->sub_head = k;
+    c->sub_tail = k;
+    pthread_cond_signal(&c->sub_cv);
+    pthread_mutex_unlock(&c->sub_lock);
     return VA_STATUS_SUCCESS;
 }
 
