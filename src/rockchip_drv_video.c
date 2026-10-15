@@ -773,8 +773,19 @@ static VAStatus rk_DestroySurfaces(VADriverContextP ctx,
     for (int i = 0; i < n; i++) {
         RKSurface *s = surface_by_id(d, list[i]);
         if (!s) continue;
+        /* The decoder that last rendered into this surface routes its frames asynchronously now (output thread,
+           AV1 submit thread), always under its out_lock: hold that lock across the teardown so no frame is routed
+           into a surface being destroyed.  Afterwards surface_by_id() no longer finds it and such a frame is dropped. */
+        pthread_mutex_lock(&s->lock);
+        VAContextID cid = s->ctx_id;
+        MppFrame za, zb;
+        surface_zc_take_locked(s, &za, &zb);
+        pthread_mutex_unlock(&s->lock);
+        RKContext *c = cid ? context_by_id(d, cid) : NULL;
+        if (c) pthread_mutex_lock(&c->out_lock);
+        zc_drop2(za, zb);
         if (s->frame)      mpp_frame_deinit(&s->frame);
-        if (s->zc_frame)   mpp_frame_deinit(&s->zc_frame);
+        if (s->zc_frame)   mpp_frame_deinit(&s->zc_frame);   /* routed between the take and out_lock */
         if (s->zc_prev)    mpp_frame_deinit(&s->zc_prev);
         if (s->prime_fd >= 0) close(s->prime_fd);
         if (s->priv_buf)   { mpp_buffer_put(s->priv_buf);        s->priv_buf   = NULL; }
@@ -782,6 +793,7 @@ static VAStatus rk_DestroySurfaces(VADriverContextP ctx,
         pthread_cond_destroy(&s->cond);
         pthread_mutex_destroy(&s->lock);
         surface_slot_release(d, s);
+        if (c) pthread_mutex_unlock(&c->out_lock);
     }
     return VA_STATUS_SUCCESS;
 }
