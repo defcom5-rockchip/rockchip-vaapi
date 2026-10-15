@@ -265,6 +265,20 @@ typedef struct {
 
     /* filled after decode */
     MppFrame     frame;          /* always NULL (kept for ABI compat) */
+
+    /* 8-bit zero-copy (RKVA_ZERO_COPY, default on): the decoded MppFrame is kept instead of being copied into
+     * priv_buf, and ExportSurfaceHandle hands out MPP's own buffer with MPP's strides.  It is released when the
+     * client renders into the surface again (BeginPicture -- the VA contract: a client does not reuse a surface it
+     * is still displaying), on DestroySurfaces/DestroyContext/Terminate.  A client that reads the surface without
+     * exporting it after this decode (Chromium imports once at pool creation; vaDeriveImage/vaGetImage users)
+     * gets the old copy instead: surface_zc_materialize() copies into priv_buf at vaSyncSurface/DeriveImage/
+     * GetImage time.  MPP never writes a buffer while a frame holds it (refcounted), so a reference picture that is
+     * exported stays intact.  zc_prev keeps an exported frame alive if a second output lands on the same surface. */
+    MppFrame     zc_frame, zc_prev;
+    int          zc_fd;          /* zc_frame's buffer fd (owned by MPP, valid while the frame is held) */
+    int          zc_hs, zc_vs;   /* MPP's strides for that frame */
+    size_t       zc_size;
+    bool         zc_exported;    /* handed to the client by ExportSurfaceHandle since it arrived */
     int          prime_fd;       /* dup'd fd to priv_buf, stable for surface lifetime */
     int          hstride;
     int          vstride;
@@ -351,6 +365,11 @@ static RKBuffer *buffer_by_id(RKDriver *d, VABufferID id) {
     return (idx < MAX_BUFFERS && d->buffers[idx].used) ? &d->buffers[idx] : NULL;
 }
 
+/* zero-copy helpers (defined with assign_mpp_frame) */
+static void surface_zc_materialize(RKDriver *d, RKSurface *s, bool keep_exported);
+static void surface_zc_take_locked(RKSurface *s, MppFrame *a, MppFrame *b);
+static void zc_drop2(MppFrame a, MppFrame b);
+
 static MppCodingType profile_to_coding(VAProfile p) {
     switch (p) {
     case VAProfileH264ConstrainedBaseline:
@@ -426,6 +445,8 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     for (int i = 0; i < MAX_SURFACES; i++) {
         if (!d->surfaces[i].used) continue;
         if (d->surfaces[i].frame) mpp_frame_deinit(&d->surfaces[i].frame);
+        if (d->surfaces[i].zc_frame) mpp_frame_deinit(&d->surfaces[i].zc_frame);
+        if (d->surfaces[i].zc_prev)  mpp_frame_deinit(&d->surfaces[i].zc_prev);
         if (d->surfaces[i].prime_fd >= 0) close(d->surfaces[i].prime_fd);
         if (d->surfaces[i].priv_buf)   mpp_buffer_put(d->surfaces[i].priv_buf);
         if (d->surfaces[i].priv_group) mpp_buffer_group_put(d->surfaces[i].priv_group);
@@ -722,6 +743,8 @@ static VAStatus rk_DestroySurfaces(VADriverContextP ctx,
         RKSurface *s = surface_by_id(d, list[i]);
         if (!s) continue;
         if (s->frame)      mpp_frame_deinit(&s->frame);
+        if (s->zc_frame)   mpp_frame_deinit(&s->zc_frame);
+        if (s->zc_prev)    mpp_frame_deinit(&s->zc_prev);
         if (s->prime_fd >= 0) close(s->prime_fd);
         if (s->priv_buf)   { mpp_buffer_put(s->priv_buf);        s->priv_buf   = NULL; }
         if (s->priv_group) { mpp_buffer_group_put(s->priv_group); s->priv_group = NULL; }
@@ -887,6 +910,17 @@ static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
     LOG("DestroyContext: reset + drain + destroy");
+    /* zero-copy frames of this decoder: copy each into its surface's own buffer (a later export or image of the
+       surface stays right) and give MPP its buffers back before the decoder goes.  An export the client still holds
+       keeps its dma-buf alive by itself. */
+    for (int i = 0; i < MAX_SURFACES; i++) {
+        RKSurface *zs = &d->surfaces[i];
+        if (!zs->used || zs->ctx_id != id || (!zs->zc_frame && !zs->zc_prev)) continue;
+        surface_zc_materialize(d, zs, false);
+        MppFrame za, zb;
+        pthread_mutex_lock(&zs->lock); surface_zc_take_locked(zs, &za, &zb); pthread_mutex_unlock(&zs->lock);
+        zc_drop2(za, zb);
+    }
     free(c->av1_pending.tiles_buf); c->av1_pending.tiles_buf = NULL; c->av1_pending.valid = false;
     rk_mpp_teardown_locked(c);
     CTX_CLEAR(c);                              /* used = false; out_lock and av1_lock untouched */
@@ -988,11 +1022,14 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
      * new decoded pixels into priv_buf without touching prime_fd. */
     RKSurface *s = surface_by_id(d, render_target);
     if (s) {
+        MppFrame za, zb;
         pthread_mutex_lock(&s->lock);
         s->decoded = false;
         s->ctx_id  = ctx_id;
         if (++s->gen == 0) s->gen = 1;
+        surface_zc_take_locked(s, &za, &zb);     /* the client renders into it again: done with the old picture */
         pthread_mutex_unlock(&s->lock);
+        zc_drop2(za, zb);
     }
     return VA_STATUS_SUCCESS;
 }
@@ -1084,51 +1121,11 @@ static inline void nv15_row_to_p010(const uint8_t *srow, uint16_t *drow, int n)
     }
 }
 
-/* Caller must hold c->out_lock: this pops c->decode_queue. */
-static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
+/* Copy (or repack) one decoded MPP frame into the surface's own buffer, priv_buf, at the layout ExportSurfaceHandle
+ * reported.  Returns the assign_mpp_frame `copied=` code (0 = nothing copied); out_w and out_h get the picture size
+ * actually written.  Does not consume the frame. */
+static int rk_copy_into_surface(MppFrame frame, RKSurface *s, VASurfaceID sid, int *out_w, int *out_h)
 {
-    if (mpp_frame_get_info_change(frame)) {
-        LOG("assign_mpp_frame: info_change → acknowledged, render_target=0x%x",
-            (unsigned)c->render_target);
-        c->mpi->control(c->mpp, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
-        mpp_frame_deinit(&frame);
-        return;
-    }
-
-    RK_S64      raw_pts = mpp_frame_get_pts(frame);
-    VASurfaceID sid     = (VASurfaceID)raw_pts;
-    RKSurface  *s       = sid ? surface_by_id(d, sid) : NULL;
-
-    if (!s) {
-        if (c->dq_head != c->dq_tail) {
-            sid = c->decode_queue[c->dq_head];
-            c->dq_head = (c->dq_head + 1) & 63;
-            LOG("assign_mpp_frame: PTS=0x%llx unmapped, FIFO → surface=0x%x",
-                (unsigned long long)raw_pts, (unsigned)sid);
-        }
-        s = sid ? surface_by_id(d, sid) : NULL;
-    } else {
-        /* PTS valid — advance FIFO head only if this surface is at the front */
-        if (c->dq_head != c->dq_tail && c->decode_queue[c->dq_head] == sid)
-            c->dq_head = (c->dq_head + 1) & 63;
-    }
-
-    if (!s) {
-        LOG("assign_mpp_frame: PTS=0x%llx surface not found, dropped",
-            (unsigned long long)raw_pts);
-        mpp_frame_deinit(&frame);
-        return;
-    }
-    {   /* AV1 packets carry the surface generation in the PTS high word (0 = untagged, other codecs) */
-        uint32_t pgen = (uint32_t)((uint64_t)raw_pts >> 32);
-        if (pgen && (VASurfaceID)raw_pts == sid && pgen != s->gen) {
-            LOG("assign_mpp_frame: surface=0x%x output for an earlier picture (gen %u, surface now %u) dropped",
-                (unsigned)sid, pgen, s->gen);
-            mpp_frame_deinit(&frame);
-            return;
-        }
-    }
-
     MppBuffer      buf    = mpp_frame_get_buffer(frame);
     int            fwidth = (int)mpp_frame_get_width(frame);
     int            fheight= (int)mpp_frame_get_height(frame);
@@ -1145,7 +1142,6 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     int  copied = 0;
     void *src = buf ? mpp_buffer_get_ptr(buf) : NULL;
     void *dst = s->priv_buf ? mpp_buffer_get_ptr(s->priv_buf) : NULL;
-    long long t_copy0 = rk_now_us();
     /* The destination layout must match what ExportSurfaceHandle already
        reported, not MPP's frame stride.  Clients import the dma-buf once --
        Chromium does so at frame-pool creation, before any decode -- and never
@@ -1321,6 +1317,127 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
                    (size_t)row_bytes);
         copied = 1;
     }
+    *out_w = copy_w; *out_h = copy_h;
+    return copied;
+}
+
+static bool zc_enabled(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("RKVA_ZERO_COPY"); v = (e && e[0] == '0') ? 0 : 1; }
+    return v == 1;
+}
+
+/* Copy a held zero-copy frame into priv_buf for a reader of the surface's own buffer; release the frame unless the
+ * client was handed MPP's buffer (keep_exported).  Caller must not hold s->lock. */
+static void surface_zc_materialize(RKDriver *d, RKSurface *s, bool keep_exported) {
+    MppFrame drop = NULL;
+    pthread_mutex_lock(&s->lock);
+    if (s->zc_frame) {
+        int w = 0, h = 0;
+        long long t0 = rk_now_us();
+        int copied = rk_copy_into_surface(s->zc_frame, s, (VASurfaceID)(SURFACE_ID_BASE + (unsigned)(s - d->surfaces)), &w, &h);
+        if (w > 0) s->width = w;
+        if (h > 0) s->height = h;
+        LOG("zero-copy: surface=0x%x read without an export: copied=%d copy_us=%lld%s",
+            (unsigned)(SURFACE_ID_BASE + (unsigned)(s - d->surfaces)), copied, rk_now_us() - t0,
+            (keep_exported && s->zc_exported) ? " (frame kept: exported)" : "");
+        if (!(keep_exported && s->zc_exported)) { drop = s->zc_frame; s->zc_frame = NULL; s->zc_exported = false; }
+    }
+    pthread_mutex_unlock(&s->lock);
+    if (drop) mpp_frame_deinit(&drop);
+}
+
+/* The client renders into the surface again / destroys it: drop the frames it held.  Caller holds s->lock;
+ * the frames are returned for deinit after the unlock. */
+static void surface_zc_take_locked(RKSurface *s, MppFrame *a, MppFrame *b) {
+    *a = s->zc_frame; *b = s->zc_prev;
+    s->zc_frame = NULL; s->zc_prev = NULL; s->zc_exported = false;
+}
+static void zc_drop2(MppFrame a, MppFrame b) { if (a) mpp_frame_deinit(&a); if (b) mpp_frame_deinit(&b); }
+
+/* Caller must hold c->out_lock: this pops c->decode_queue. */
+static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
+{
+    if (mpp_frame_get_info_change(frame)) {
+        LOG("assign_mpp_frame: info_change → acknowledged, render_target=0x%x",
+            (unsigned)c->render_target);
+        c->mpi->control(c->mpp, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
+        mpp_frame_deinit(&frame);
+        return;
+    }
+
+    RK_S64      raw_pts = mpp_frame_get_pts(frame);
+    VASurfaceID sid     = (VASurfaceID)raw_pts;
+    RKSurface  *s       = sid ? surface_by_id(d, sid) : NULL;
+
+    if (!s) {
+        if (c->dq_head != c->dq_tail) {
+            sid = c->decode_queue[c->dq_head];
+            c->dq_head = (c->dq_head + 1) & 63;
+            LOG("assign_mpp_frame: PTS=0x%llx unmapped, FIFO → surface=0x%x",
+                (unsigned long long)raw_pts, (unsigned)sid);
+        }
+        s = sid ? surface_by_id(d, sid) : NULL;
+    } else {
+        /* PTS valid — advance FIFO head only if this surface is at the front */
+        if (c->dq_head != c->dq_tail && c->decode_queue[c->dq_head] == sid)
+            c->dq_head = (c->dq_head + 1) & 63;
+    }
+
+    if (!s) {
+        LOG("assign_mpp_frame: PTS=0x%llx surface not found, dropped",
+            (unsigned long long)raw_pts);
+        mpp_frame_deinit(&frame);
+        return;
+    }
+    {   /* AV1 packets carry the surface generation in the PTS high word (0 = untagged, other codecs) */
+        uint32_t pgen = (uint32_t)((uint64_t)raw_pts >> 32);
+        if (pgen && (VASurfaceID)raw_pts == sid && pgen != s->gen) {
+            LOG("assign_mpp_frame: surface=0x%x output for an earlier picture (gen %u, surface now %u) dropped",
+                (unsigned)sid, pgen, s->gen);
+            mpp_frame_deinit(&frame);
+            return;
+        }
+    }
+
+    MppBuffer      buf    = mpp_frame_get_buffer(frame);
+    int            fwidth = (int)mpp_frame_get_width(frame);
+    int            fheight= (int)mpp_frame_get_height(frame);
+    int            fhs    = (int)mpp_frame_get_hor_stride(frame);
+    int            fvs    = (int)mpp_frame_get_ver_stride(frame);
+    MppFrameFormat ffmt   = mpp_frame_get_fmt(frame);
+
+    /* 8-bit zero-copy: keep MPP's frame (see RKSurface.zc_frame) */
+    int zfd = buf ? mpp_buffer_get_fd(buf) : -1;
+    if (zc_enabled() && !MPP_FRAME_FMT_IS_YUV_10BIT(ffmt) && (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP &&
+        zfd > 0 && fwidth > 0 && fheight > 0 && fhs >= fwidth && fvs >= fheight &&
+        fwidth <= (s->hstride ? s->hstride : s->width) && fheight <= (s->vstride ? s->vstride : s->height) &&
+        mpp_buffer_get_size(buf) >= (size_t)fhs * fvs * 3 / 2) {
+        MppFrame drop = NULL;
+        pthread_mutex_lock(&s->lock);
+        if (s->zc_frame) {                       /* a second output for this picture (should not happen) */
+            if (s->zc_exported) { drop = s->zc_prev; s->zc_prev = s->zc_frame; }   /* the client may be showing it */
+            else drop = s->zc_frame;
+            LOG("assign_mpp_frame: surface=0x%x already held a frame (exported=%d)", (unsigned)sid, s->zc_exported);
+        }
+        s->zc_frame = frame; s->zc_fd = zfd; s->zc_hs = fhs; s->zc_vs = fvs; s->zc_size = mpp_buffer_get_size(buf);
+        s->zc_exported = false;
+        s->frame  = NULL;
+        s->fmt    = ffmt;
+        s->width  = fwidth;
+        s->height = fheight;
+        s->decoded = true;
+        pthread_cond_broadcast(&s->cond);
+        pthread_mutex_unlock(&s->lock);
+        if (drop) mpp_frame_deinit(&drop);
+        LOG("assign_mpp_frame: surface=0x%x MPP %dx%d stride=%dx%d fmt=0x%x zero-copy fd=%d",
+            (unsigned)sid, fwidth, fheight, fhs, fvs, (unsigned)ffmt, zfd);
+        return;
+    }
+
+    int copy_w = 0, copy_h = 0;
+    long long t_copy0 = rk_now_us();
+    int copied = rk_copy_into_surface(frame, s, sid, &copy_w, &copy_h);
     long long t_copy1 = rk_now_us();
     mpp_frame_deinit(&frame);
 
@@ -2162,7 +2279,9 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
         RKSurface *ds = surface_by_id(d, pp->current_display_picture);
         if (ds) {
             p->out_surface = pp->current_display_picture;
-            pthread_mutex_lock(&ds->lock); ds->decoded = false; ds->ctx_id = (VAContextID)(CONTEXT_ID_BASE + (unsigned)(c - d->contexts)); if (++ds->gen == 0) ds->gen = 1; pthread_mutex_unlock(&ds->lock);
+            MppFrame za, zb;
+            pthread_mutex_lock(&ds->lock); ds->decoded = false; ds->ctx_id = (VAContextID)(CONTEXT_ID_BASE + (unsigned)(c - d->contexts)); if (++ds->gen == 0) ds->gen = 1; surface_zc_take_locked(ds, &za, &zb); pthread_mutex_unlock(&ds->lock);
+            zc_drop2(za, zb);
             LOG("av1: film grain: picture for 0x%x lands on display surface 0x%x", (unsigned)p->surface, (unsigned)p->out_surface);
         }
     }
@@ -2201,7 +2320,9 @@ static VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
     return st;
 }
 
-static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
+/* Wait until the surface's picture is decoded (vaSyncSurface without the zero-copy settle: ExportSurfaceHandle
+   uses this, since its own export makes the copy unnecessary). */
+static VAStatus rk_sync_wait(VADriverContextP ctx, VASurfaceID id) {
     RKDriver  *d = drv_from_ctx(ctx);
     RKSurface *s = surface_by_id(d, id);
     if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
@@ -2289,6 +2410,21 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
     return final_ok ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_DECODING_ERROR;
 }
 
+static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
+    VAStatus st = rk_sync_wait(ctx, id);
+    RKDriver  *d = drv_from_ctx(ctx);
+    RKSurface *s = surface_by_id(d, id);
+    if (st == VA_STATUS_SUCCESS && s) {
+        /* zero-copy: synced but not exported since this decode -- the client reads the surface through an older
+           import of priv_buf (Chromium) or will map it: give priv_buf the picture */
+        pthread_mutex_lock(&s->lock);
+        bool need = s->zc_frame && !s->zc_exported;
+        pthread_mutex_unlock(&s->lock);
+        if (need) surface_zc_materialize(d, s, false);
+    }
+    return st;
+}
+
 static VAStatus rk_SyncSurface2(VADriverContextP ctx,
                                   VASurfaceID id, uint64_t timeout_ns) {
     (void)timeout_ns;
@@ -2333,15 +2469,19 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
     bool needs_sync = !s->decoded && (s->ctx_id != 0);
     pthread_mutex_unlock(&s->lock);
     if (needs_sync)
-        rk_SyncSurface(ctx, id);
+        rk_sync_wait(ctx, id);
 
     pthread_mutex_lock(&s->lock);
-    int fd       = s->prime_fd;
-    int hs       = s->hstride ? s->hstride : s->width;
-    int vs       = s->vstride ? s->vstride : s->height;
+    bool zc      = (s->zc_frame != NULL);
+    int fd       = zc ? s->zc_fd : s->prime_fd;
+    int hs       = zc ? s->zc_hs : (s->hstride ? s->hstride : s->width);
+    int vs       = zc ? s->zc_vs : (s->vstride ? s->vstride : s->height);
+    size_t zsize = s->zc_size;
     bool decoded = s->decoded;
-    bool is_placeholder = (s->priv_buf != NULL);
+    bool is_placeholder = !zc && (s->priv_buf != NULL);
     bool is_10bit = surf_is_10bit(s);
+    int export_fd = fd >= 0 ? dup(fd) : -1;   /* under the lock: the held frame cannot be released meanwhile */
+    if (zc && export_fd >= 0) s->zc_exported = true;
     pthread_mutex_unlock(&s->lock);
 
     if (fd < 0) {
@@ -2349,14 +2489,13 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    int export_fd = dup(fd);
     if (export_fd < 0) {
         LOG("ExportSurfaceHandle: dup(%d) failed errno=%d, ERROR_ALLOCATION_FAILED", fd, errno);
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
 
-    LOG("ExportSurfaceHandle: surface=0x%x %dx%d stride=%dx%d export_fd=%d decoded=%d placeholder=%d 10bit=%d rt10=%d",
-        id, s->width, s->height, hs, vs, export_fd, decoded, is_placeholder, is_10bit, s->rt_10bit);
+    LOG("ExportSurfaceHandle: surface=0x%x %dx%d stride=%dx%d export_fd=%d decoded=%d placeholder=%d 10bit=%d rt10=%d%s",
+        id, s->width, s->height, hs, vs, export_fd, decoded, is_placeholder, is_10bit, s->rt_10bit, zc ? " zero-copy" : "");
 
     VADRMPRIMESurfaceDescriptor *desc = descriptor;
     memset(desc, 0, sizeof(*desc));
@@ -2373,7 +2512,7 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
     if (!is_10bit && composed) {
         desc->fourcc     = VA_FOURCC_NV12;
         desc->num_layers = 1;
-        desc->objects[0].size           = (uint32_t)(hs * vs * 3 / 2);
+        desc->objects[0].size           = zc ? (uint32_t)zsize : (uint32_t)(hs * vs * 3 / 2);
         desc->layers[0].drm_format      = RK_DRM_FORMAT_NV12;
         desc->layers[0].num_planes      = 2;
         desc->layers[0].object_index[0] = 0;
@@ -2433,7 +2572,7 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
          *   layer 1 → DRM_FORMAT_GR88 (UV, interleaved chroma, 2 bytes/px)
          */
         desc->fourcc                         = VA_FOURCC_NV12;
-        desc->objects[0].size                = (uint32_t)(hs * vs * 3 / 2);
+        desc->objects[0].size                = zc ? (uint32_t)zsize : (uint32_t)(hs * vs * 3 / 2);
         /* Y plane */
         desc->layers[0].drm_format           = RK_DRM_FORMAT_R8;
         desc->layers[0].num_planes           = 1;
@@ -2507,6 +2646,7 @@ static VAStatus rk_DeriveImage(VADriverContextP ctx,
     RKDriver  *d = drv_from_ctx(ctx);
     RKSurface *s = surface_by_id(d, sid);
     if (!s || !s->priv_buf) return VA_STATUS_ERROR_INVALID_SURFACE;
+    surface_zc_materialize(d, s, true);      /* the image aliases priv_buf */
 
     void *ptr = mpp_buffer_get_ptr(s->priv_buf);
     if (!ptr) return VA_STATUS_ERROR_INVALID_SURFACE;
@@ -2569,6 +2709,7 @@ static VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
     RKSurface *s  = surface_by_id(d, surface_id);
     RKBuffer  *ib = buffer_by_id(d, (VABufferID)image_id);
     if (!s || !ib || !s->priv_buf || !ib->data) return VA_STATUS_ERROR_INVALID_SURFACE;
+    surface_zc_materialize(d, s, true);      /* read from priv_buf below */
 
     int hs  = s->hstride ? s->hstride : s->width;
     int vs  = s->vstride ? s->vstride : s->height;
