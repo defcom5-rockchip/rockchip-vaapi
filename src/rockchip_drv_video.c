@@ -242,6 +242,12 @@ typedef struct {
        already output, which MPP then released twice (mpp_buffer_ref_dec "non-positive ref_count", Chromium 48delayed). */
     VASurfaceID     av1_mslot[8];
     uint32_t        av1_mslot_gen[8];
+    /* AV1 pacing for a client that never waits on its pictures (see av1_pace): EndPictures since the client last
+       waited on a surface this context rendered into, and the last 8 pictures' surfaces with their gen. */
+    int             pics_since_wait;
+    unsigned        pace_n;
+    VASurfaceID     pace_sid[8];
+    uint32_t        pace_gen[8];
     /* AV1 packets go to MPP from a per-context submit thread (see av1_put): the client's EndPicture never waits on
        MPP_ERR_BUFFER_FULL.  sub_lock/sub_cv live while sub_started. */
     struct RkPkt   *sub_head, *sub_tail;
@@ -257,6 +263,7 @@ typedef struct {
 } RKContext;
 
 static unsigned g_ctx_life;   /* source of RKContext.life */
+#define PACE_AFTER 32         /* pictures without a wait before AV1 pacing comes back on (see av1_pace) */
 
 /* Clear a context slot but keep its out_lock (the last member, see above). */
 #define CTX_CLEAR(c) memset((c), 0, offsetof(RKContext, out_lock))
@@ -942,6 +949,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         c->sps_sent  = false;
         c->av1_defer = av1_defer;
         do c->life = __atomic_add_fetch(&g_ctx_life, 1, __ATOMIC_RELAXED); while (c->life == 0);
+        c->pics_since_wait = PACE_AFTER;      /* paced until the client is seen to wait on a picture */
         c->used      = true;
         pthread_mutex_unlock(&c->out_lock);
         out_thread_start(c, d);
@@ -2423,6 +2431,59 @@ static VAStatus do_av1_decode(RKContext *c, RKDriver *d) {
     return st;
 }
 
+/* AV1 pacing.  With the submit thread, EndPicture returns before MPP has even received the picture.  A client that
+ * waits on its pictures (vaSyncSurface, or vaExportSurfaceHandle after decoding: FFmpeg, mpv, Firefox) never sees the
+ * difference.  Chromium does: it calls vaSyncSurface only on a surface it has not rendered into yet (once, when it
+ * imports the surface) and then samples each picture's dma-buf whenever it composites it, relying on the decode being
+ * done by then.  When it decodes ahead (start, seek, loop) the submit queue ran up to 16 pictures (~180 ms at 4K)
+ * ahead of MPP's output, and it showed the surface's previous picture, or zeros (green) on a surface's first use.
+ * So until a context's client has waited on a picture it rendered, and again after PACE_AFTER pictures without such
+ * a wait, EndPicture returns only once the picture from RKVA_PACE (default 2) pictures earlier is in its surface: at
+ * most that many pictures in flight, about what 3.0.0 had from MPP's own input back-pressure.  AV1 only: the other
+ * codecs feed MPP from EndPicture, which blocks on MPP's input queue as before, and H.264/HEVC output in display order
+ * (a reordered picture may stay in MPP's DPB for many pictures, so waiting on it would stall).  Needs the output
+ * thread (not with RKVA_SYNC_POLL=1). */
+static int pace_depth(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("RKVA_PACE"); int n = e ? atoi(e) : 2; v = n < 0 ? 0 : n > 7 ? 7 : n; }
+    return v;
+}
+/* the client waited on (or re-exported) a surface that context cid rendered into */
+static void pace_note_wait(RKDriver *d, VAContextID cid) {
+    RKContext *c = context_by_id(d, cid);
+    if (!c || c->coding != MPP_VIDEO_CodingAV1) return;
+    if (__atomic_exchange_n(&c->pics_since_wait, 0, __ATOMIC_RELAXED) > PACE_AFTER && pace_depth())
+        LOG("pace: context 0x%x: the client waits on its pictures: pacing off", cid);
+}
+static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid) {
+    int depth = pace_depth();
+    if (depth == 0 || !c->out_started) return;
+    RKSurface *s = surface_by_id(d, sid);
+    unsigned i = c->pace_n++ & 7;
+    c->pace_sid[i] = sid; c->pace_gen[i] = 0;
+    if (s) { pthread_mutex_lock(&s->lock); c->pace_gen[i] = s->gen; pthread_mutex_unlock(&s->lock); }
+    int since = __atomic_add_fetch(&c->pics_since_wait, 1, __ATOMIC_RELAXED);
+    if (since > (1 << 30)) __atomic_store_n(&c->pics_since_wait, PACE_AFTER + 1, __ATOMIC_RELAXED);
+    if (since == PACE_AFTER + 1 && c->pace_n > PACE_AFTER)
+        LOG("pace: context 0x%x: no wait on a picture for %d pictures: pacing on (%d in flight)", cid, PACE_AFTER, depth);
+    if (since <= PACE_AFTER || c->pace_n <= (unsigned)depth) return;
+    unsigned j = (c->pace_n - 1 - (unsigned)depth) & 7;
+    RKSurface *w = surface_by_id(d, c->pace_sid[j]);
+    if (!w) return;
+    uint32_t gen = c->pace_gen[j];
+    unsigned life = __atomic_load_n(&c->life, __ATOMIC_ACQUIRE);
+    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
+    dl.tv_nsec += 250 * 1000000L; if (dl.tv_nsec >= 1000000000L) { dl.tv_sec++; dl.tv_nsec -= 1000000000L; }
+    long long t0 = rk_now_us(); bool late = false;
+    pthread_mutex_lock(&w->lock);
+    while (!w->decoded && w->gen == gen && __atomic_load_n(&c->life, __ATOMIC_ACQUIRE) == life)
+        if (pthread_cond_timedwait(&w->cond, &w->lock, &dl) == ETIMEDOUT) { late = !w->decoded && w->gen == gen; break; }
+    pthread_mutex_unlock(&w->lock);
+    long long us = rk_now_us() - t0;
+    if (late) LOG("pace: surface=0x%x not decoded after %lld us: not waiting longer", (unsigned)c->pace_sid[j], us);
+    else if (us >= 1000) LOG("pace: waited %lld us for surface=0x%x", us, (unsigned)c->pace_sid[j]);
+}
+
 static VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
     LOG("EndPicture: ctx=0x%x", ctx_id);
     RKDriver  *d = drv_from_ctx(ctx);
@@ -2433,9 +2494,15 @@ static VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
     long long t_ep0 = rk_now_us();
     if (c->coding == MPP_VIDEO_CodingAVC)
         st = do_h264_decode(c, d);
-    else if (c->coding == MPP_VIDEO_CodingAV1)
+    else if (c->coding == MPP_VIDEO_CodingAV1) {
         st = do_av1_decode(c, d);
-    else
+        if (st == VA_STATUS_SUCCESS) {
+            pthread_mutex_lock(&c->av1_lock);
+            VASurfaceID os = c->av1_pending.surface == c->render_target ? c->av1_pending.out_surface : c->render_target;
+            pthread_mutex_unlock(&c->av1_lock);
+            av1_pace(c, d, ctx_id, os);
+        }
+    } else
         st = do_generic_decode(c, d);
     LOG("EndPicture: done in %lld us", rk_now_us() - t_ep0);
 
@@ -2453,6 +2520,7 @@ static VAStatus rk_sync_wait(VADriverContextP ctx, VASurfaceID id) {
     bool ready  = s->decoded || (s->ctx_id == 0);  /* not started = placeholder valid */
     VAContextID cid = s->ctx_id;
     pthread_mutex_unlock(&s->lock);
+    if (cid) pace_note_wait(d, cid);
 
     if (ready) {
         LOG("SyncSurface: surface=0x%x prime_fd=%d ready", id, s->prime_fd);
@@ -2610,9 +2678,12 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
      * EndPicture is async; without this the EGLImage gets stale data. */
     pthread_mutex_lock(&s->lock);
     bool needs_sync = !s->decoded && (s->ctx_id != 0);
+    VAContextID pcid = s->ctx_id;
     pthread_mutex_unlock(&s->lock);
     if (needs_sync)
         rk_sync_wait(ctx, id);
+    else if (pcid)
+        pace_note_wait(d, pcid);     /* a re-export after decoding is a wait too: the client takes the picture now */
     /* A writable export never gets MPP's buffer: that frame may be one of MPP's reference pictures.  Copy it into the
        surface's own buffer and export that (a read-only export handed out earlier keeps the frame alive). */
     if (flags & VA_EXPORT_SURFACE_WRITE_ONLY)
