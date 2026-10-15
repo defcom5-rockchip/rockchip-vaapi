@@ -101,7 +101,6 @@ static inline bool rga_legacy_init(void)
 #include <pthread.h>
 #include <sys/ioctl.h>
 #include <errno.h>
-#include <dlfcn.h>
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -212,6 +211,7 @@ typedef struct {
         bool        valid;        /* a frame is held back until the next one reveals its refresh_frame_flags */
         bool        forced;       /* already decoded once with refresh_frame_flags = 0 (client synced it early) */
         bool        held;         /* that early decode asked MPP to hold the picture: its slots are committed later, no re-decode */
+        uint8_t     hold_token;   /* the 'H' token; the 'C' must carry it */
         VASurfaceID surface;
         VASurfaceID ref_surface;  /* pp.current_frame: how later pictures refer to this one (== surface in every client seen) */
         VASurfaceID out_surface;  /* where the picture lands: pp.current_display_picture when the client gave a separate one (film grain), else surface */
@@ -231,6 +231,8 @@ typedef struct {
        every frame).  Chromium and GStreamer import each surface once, at pool creation, and Chromium never calls
        vaSyncSurface per frame either: holding MPP's frame would leave them showing the surface's own, stale buffer. */
     bool            zc_ok;
+    bool            av1_defer;      /* MPP accepted the deferred-refresh commands on this decoder */
+    uint8_t         rkva_token;     /* last hold token sent */
     unsigned        life;           /* unique per claim (g_ctx_life), 0 once cleared: a waiter that sees it change
                                        knows its decoder was destroyed */
     int             zc_score;       /* +2 per held frame dropped unexported, -1 per exported one; > 16 turns zc_ok off */
@@ -427,6 +429,11 @@ static int profile_idc(VAProfile p) {
 /* ── VADriverVTable implementations ──────────────────────────── */
 
 static void av1_submit_stop(RKContext *c);   /* AV1 submit thread, see av1_put */
+static bool av1_defer_ok(void);              /* AV1 deferred refresh, see av1_defer_probe */
+/* MPP's deferred-refresh entry points (mpp_rkva.h, protocol 2), weak: NULL against an MPP without them */
+extern RK_S32  mpp_av1d_rkva_deferred_refresh(void) __attribute__((weak));
+extern MPP_RET mpp_av1d_rkva_enable(MppCtx ctx) __attribute__((weak));
+#define RKVA_MPP_PROTOCOL 2
 static void out_thread_start(RKContext *c, RKDriver *d);   /* output thread, see out_thread_main */
 static void out_thread_stop(RKContext *c);
 
@@ -913,6 +920,12 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
             (int)r, r == MPP_OK ? "" : " (unsupported; reorder deadlock may persist)");
     }
 
+    bool av1_defer = false;
+    if (coding == MPP_VIDEO_CodingAV1 && av1_defer_ok()) {
+        av1_defer = (mpp_av1d_rkva_enable(mpp) == MPP_OK);
+        LOG("CreateContext: AV1 deferred refresh %s", av1_defer ? "enabled" : "refused by MPP (re-decode)");
+    }
+
     for (unsigned i = 0; i < MAX_CONTEXTS; i++) {
         RKContext *c = &d->contexts[i];
         if (c->used) continue;                 /* busy: don't queue behind its frame copy or teardown */
@@ -927,6 +940,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         c->height    = height;
         c->coding    = coding;
         c->sps_sent  = false;
+        c->av1_defer = av1_defer;
         do c->life = __atomic_add_fetch(&g_ctx_life, 1, __ATOMIC_RELAXED); while (c->life == 0);
         c->used      = true;
         pthread_mutex_unlock(&c->out_lock);
@@ -2001,26 +2015,34 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
  * client's surface; the client never sends show_existing to a VA driver.
  * ============================================================================================================ */
 
-/* Deferred refresh (needs an MPP with mpp_av1d_rkva_deferred_refresh(), see av1d_parser.c there): the early decode of a
-   picture the client synced before its successor arrived carries an 'H' padding OBU, and MPP keeps the picture with the
-   slot state it would have saved; when the successor reveals refresh_frame_flags, a 'C' padding OBU stores it into
-   those slots.  Without it the picture is decoded a second time with the real mask (one extra av1d job per shown
-   reference frame, the 4K60 bottleneck in Firefox).  RKVA_AV1_NO_DEFER=1 forces the old re-decode. */
+/* Deferred refresh (needs an MPP speaking protocol 2 of mpp_rkva.h, RK3588 only): the early decode of a picture the
+   client synced before its successor arrived carries an 'H' padding OBU with a token, and MPP keeps the picture with the
+   slot state it would have saved; when the successor reveals refresh_frame_flags, a 'C' padding OBU (mask, token) stores
+   it into those slots.  Without it the picture is decoded a second time with the real mask (one extra av1d job per
+   shown reference frame, the 4K60 bottleneck in Firefox).  The MPP entry points are weak references: against an MPP
+   without them (any stock build) they are NULL and the driver keeps its re-decode.  MPP ignores the commands until
+   mpp_av1d_rkva_enable() accepted them on that decoder (CreateContext).  RKVA_AV1_NO_DEFER=1 forces the re-decode. */
 static int av1_defer_state = -1;
 static pthread_once_t av1_defer_once = PTHREAD_ONCE_INIT;
 static void av1_defer_probe(void) {
-    int (*fn)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "mpp_av1d_rkva_deferred_refresh");
-    av1_defer_state = (fn && fn() >= 1 && !getenv("RKVA_AV1_NO_DEFER")) ? 1 : 0;
-    LOG("av1: deferred refresh %s (MPP %s it%s)", av1_defer_state ? "on" : "off", fn ? "supports" : "lacks",
-        getenv("RKVA_AV1_NO_DEFER") ? ", RKVA_AV1_NO_DEFER set" : "");
+    int v = mpp_av1d_rkva_deferred_refresh ? (int)mpp_av1d_rkva_deferred_refresh() : -1;
+    bool off = getenv("RKVA_AV1_NO_DEFER") != NULL;
+    av1_defer_state = (v == RKVA_MPP_PROTOCOL && mpp_av1d_rkva_enable && !off) ? 1 : 0;
+    if (v < 0)       LOG("av1: deferred refresh off (this MPP lacks it: early-synced pictures are decoded twice)");
+    else if (v == 0) LOG("av1: deferred refresh off (MPP has it, not for this SoC)");
+    else             LOG("av1: deferred refresh %s (MPP protocol %d, driver needs %d%s)", av1_defer_state ? "available" : "off",
+                         v, RKVA_MPP_PROTOCOL, off ? ", RKVA_AV1_NO_DEFER set" : "");
 }
 static bool av1_defer_ok(void) { pthread_once(&av1_defer_once, av1_defer_probe); return av1_defer_state == 1; }
-/* The private padding OBU MPP's patched av1d understands: payload "RKVA", command, argument. */
-static size_t av1_write_rkva(uint8_t *dst, char cmd, uint8_t arg) {
+/* The private padding OBU MPP's patched av1d understands: payload "RKVA", command, then one or two argument bytes
+   ('H' token, 'C' mask token). */
+static size_t av1_write_rkva(uint8_t *dst, char cmd, uint8_t a, int nb, uint8_t b) {
     static const uint8_t magic[4] = { 'R', 'K', 'V', 'A' };
-    dst[0] = (uint8_t)((15 << 3) | 0x02); dst[1] = 6;   /* OBU_PADDING, has_size_field, 6 payload bytes */
-    memcpy(dst + 2, magic, 4); dst[6] = (uint8_t)cmd; dst[7] = arg;
-    return 8;
+    size_t pl = 4 + 1 + 1 + (nb > 1 ? 1 : 0);
+    dst[0] = (uint8_t)((15 << 3) | 0x02); dst[1] = (uint8_t)pl;   /* OBU_PADDING, has_size_field */
+    memcpy(dst + 2, magic, 4); dst[6] = (uint8_t)cmd; dst[7] = a;
+    if (nb > 1) dst[8] = b;
+    return 2 + pl;
 }
 
 /* A synthesised show_existing_frame header, closed with a temporal delimiter.  MPP's av1d splitter (av1d_split_frame)
@@ -2193,8 +2215,9 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
     if (getenv("RKVA_AV1_NO_GRAIN")) fh.film_grain_params.apply_grain = 0;   /* experiment switch: send frames without film grain */
     /* early decode of a shown, non-key picture: ask MPP to hold it, so the slot refresh can be committed without a
        second decode (hidden pictures shown early and converted KEYs keep the re-decode: their headers differ) */
-    bool hold = force_show && !resub && mask == 0 && pp->pic_info_fields.bits.show_frame && fh.frame_type != GST_AV1_KEY_FRAME && av1_defer_ok();
-    if (hold) n += av1_write_rkva(buf + n, 'H', 0);
+    bool hold = force_show && !resub && mask == 0 && pp->pic_info_fields.bits.show_frame && fh.frame_type != GST_AV1_KEY_FRAME && c->av1_defer;
+    uint8_t token = (uint8_t)(c->rkva_token + 1);
+    if (hold) n += av1_write_rkva(buf + n, 'H', token, 1, 0);
     size_t fn = av1_write_frame_obu(&fh, &c->av1_seq, p->tiles, p->ntiles, buf + n, cap - n);
     if (!fn) { LOG("av1: frame header write failed"); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
     n += fn;
@@ -2221,7 +2244,7 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
     }
     free(buf);
     if (st != VA_STATUS_SUCCESS) return st;
-    if (hold) p->held = true;
+    if (hold) { p->held = true; p->hold_token = token; c->rkva_token = token; }
     if (!will_output && !resub) av1_mark_decoded(d, p->out_surface);     /* nothing will ever come out for it */
     if (p->out_surface != p->surface) av1_mark_decoded(d, p->surface);   /* film grain: the reconstruct surface is never read */
     RKSurface *me = surface_by_id(d, p->ref_surface);
@@ -2243,7 +2266,7 @@ static VAStatus av1_resolve_pending(RKContext *c, RKDriver *d, const VADecPictur
     uint8_t mask = next ? av1_mask_from_successor(next, p->ref_surface) : 0;
     VAStatus st = VA_STATUS_SUCCESS;
     if (p->forced && p->held) {                                        /* MPP holds the early decode: commit its slots */
-        uint8_t cb[8]; size_t cn = av1_write_rkva(cb, 'C', mask);
+        uint8_t cb[16]; size_t cn = av1_write_rkva(cb, 'C', mask, 2, p->hold_token);
         LOG("av1: commit surface=0x%x mask=0x%02x (held, no re-decode)", (unsigned)p->surface, mask);
         st = av1_put(c, d, cb, cn, p->out_surface, p->out_gen, false);
         RKSurface *me = surface_by_id(d, p->ref_surface);
