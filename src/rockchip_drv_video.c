@@ -231,6 +231,8 @@ typedef struct {
        every frame).  Chromium and GStreamer import each surface once, at pool creation, and Chromium never calls
        vaSyncSurface per frame either: holding MPP's frame would leave them showing the surface's own, stale buffer. */
     bool            zc_ok;
+    unsigned        life;           /* unique per claim (g_ctx_life), 0 once cleared: a waiter that sees it change
+                                       knows its decoder was destroyed */
     int             zc_score;       /* +2 per held frame dropped unexported, -1 per exported one; > 16 turns zc_ok off */
     /* AV1: which picture MPP holds in each of its 8 reference slots (surface + its gen), as the refresh masks we sent
        say.  The synthesised show_existing of a KEY must name a slot that really holds that KEY: the old guess (slot 0
@@ -251,6 +253,8 @@ typedef struct {
     pthread_mutex_t av1_lock;   /* serialises the AV1 submit policy between EndPicture (decoder thread) and vaSyncSurface (any
                                    thread).  Driver lifetime like out_lock.  Lock order: av1_lock, then out_lock, then a surface. */
 } RKContext;
+
+static unsigned g_ctx_life;   /* source of RKContext.life */
 
 /* Clear a context slot but keep its out_lock (the last member, see above). */
 #define CTX_CLEAR(c) memset((c), 0, offsetof(RKContext, out_lock))
@@ -923,6 +927,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         c->height    = height;
         c->coding    = coding;
         c->sps_sent  = false;
+        do c->life = __atomic_add_fetch(&g_ctx_life, 1, __ATOMIC_RELAXED); while (c->life == 0);
         c->used      = true;
         pthread_mutex_unlock(&c->out_lock);
         out_thread_start(c, d);
@@ -966,7 +971,13 @@ static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
     }
     free(c->av1_pending.tiles_buf); c->av1_pending.tiles_buf = NULL; c->av1_pending.valid = false;
     rk_mpp_teardown_locked(c);
-    CTX_CLEAR(c);                              /* used = false; out_lock and av1_lock untouched */
+    CTX_CLEAR(c);                              /* used = false, life = 0; out_lock and av1_lock untouched */
+    /* wake whoever waits in vaSyncSurface on this decoder's surfaces: they see life change and return at once */
+    for (int i = 0; i < MAX_SURFACES; i++) {
+        RKSurface *ws = &d->surfaces[i];
+        if (!ws->used || ws->ctx_id != id) continue;
+        pthread_mutex_lock(&ws->lock); pthread_cond_broadcast(&ws->cond); pthread_mutex_unlock(&ws->lock);
+    }
     pthread_mutex_unlock(&c->out_lock); pthread_mutex_unlock(&c->av1_lock);
     return VA_STATUS_SUCCESS;
 }
@@ -2408,11 +2419,14 @@ static VAStatus rk_sync_wait(VADriverContextP ctx, VASurfaceID id) {
 
     LOG("SyncSurface: surface=0x%x draining MPP ctx=0x%x", id, cid);
     long long t_sync0 = rk_now_us(); int n_frames = 0, n_sleeps = 0, n_waits = 0;
+    unsigned life = __atomic_load_n(&c->life, __ATOMIC_ACQUIRE);
     if (c->out_started) {
-        /* the output thread routes frames and signals s->cond: wait for it, in slices so a context destroyed
-           meanwhile is noticed */
+        /* the output thread routes frames and broadcasts s->cond; DestroyContext broadcasts too after clearing the
+           slot (life changes).  The 50 ms slices are only a safety net. */
+        bool gone = false;
         pthread_mutex_lock(&s->lock);
         while (!s->decoded) {
+            if (life == 0 || __atomic_load_n(&c->life, __ATOMIC_ACQUIRE) != life) { gone = true; break; }
             struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
             if (now.tv_sec > deadline.tv_sec || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) break;
             struct timespec slice = now;
@@ -2420,11 +2434,11 @@ static VAStatus rk_sync_wait(VADriverContextP ctx, VASurfaceID id) {
             if (slice.tv_sec > deadline.tv_sec || (slice.tv_sec == deadline.tv_sec && slice.tv_nsec > deadline.tv_nsec)) slice = deadline;
             pthread_cond_timedwait(&s->cond, &s->lock, &slice);
             n_waits++;
-            if (!__atomic_load_n(&c->used, __ATOMIC_ACQUIRE)) break;
         }
         bool done = s->decoded;
         pthread_mutex_unlock(&s->lock);
         if (done) LOG("SyncSurface: surface=0x%x OK prime_fd=%d waited_us=%lld frames=%d sleeps=%d waits=%d", id, s->prime_fd, rk_now_us() - t_sync0, n_frames, n_sleeps, n_waits);
+        else if (gone) LOG("SyncSurface: surface=0x%x context 0x%x destroyed while waiting", id, cid);
         else LOG("SyncSurface: TIMEOUT surface=0x%x prime_fd=%d", id, s->prime_fd);
     } else for (;;) {
         pthread_mutex_lock(&s->lock);
