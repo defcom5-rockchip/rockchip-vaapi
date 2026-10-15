@@ -2439,7 +2439,9 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
         pthread_mutex_lock(&s->lock);
         bool need = s->zc_frame && !s->zc_exported;
         pthread_mutex_unlock(&s->lock);
-        if (need) surface_zc_materialize(d, s, false);
+        /* keep_exported: an ExportSurfaceHandle on another thread may hand MPP's buffer out between the check
+           above and the copy; materialize re-checks under the lock and then keeps the frame */
+        if (need) surface_zc_materialize(d, s, true);
     }
     return st;
 }
