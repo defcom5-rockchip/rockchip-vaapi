@@ -1705,6 +1705,21 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
  * client's surface; the client never sends show_existing to a VA driver.
  * ============================================================================================================ */
 
+/* A synthesised show_existing_frame header, closed with a temporal delimiter.  MPP's av1d splitter (av1d_split_frame)
+   ends a FRAME_HEADER OBU only when the next frame header or temporal delimiter arrives (tile groups may follow it), so a
+   bare show_existing packet sat in its stream buffer until the client's NEXT picture was put, and then went out under
+   that packet's PTS.  A client that syncs the hidden picture before submitting another one (Firefox, FFmpeg's download
+   path) waited out the 3 s deadline: "Failed to sync surface" at the first 5-picture temporal unit of a 4K60 YouTube
+   stream.  The trailing delimiter makes the splitter emit the header at once, with its own PTS; the delimiter itself
+   is a no-op at the start of the next packet. */
+static size_t av1_show_existing_closed(const GstAV1SequenceHeaderOBU *seq, int slot, uint8_t frame_type, uint8_t *dst, size_t cap) {
+    size_t n = av1_write_show_existing(seq, slot, frame_type, dst, cap);
+    if (!n || n + 2 > cap) return n;
+    dst[n++] = (uint8_t)((2 << 3) | 0x02);   /* OBU_TEMPORAL_DELIMITER, has_size_field */
+    dst[n++] = 0;
+    return n;
+}
+
 static void av1_mark_decoded(RKDriver *d, VASurfaceID sid) {
     RKSurface *t = surface_by_id(d, sid);
     if (!t) return;
@@ -1805,7 +1820,7 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
         if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(b2, 1, n2, df); fclose(df); } }
         st = av1_put(c, d, b2, n2, p->out_surface, true); free(b2);
     } else if (st == VA_STATUS_SUCCESS && !resub && hidden && mask) {
-        uint8_t se[64]; size_t sn = av1_write_show_existing(&c->av1_seq, __builtin_ctz(mask), fh.frame_type, se, sizeof se);
+        uint8_t se[64]; size_t sn = av1_show_existing_closed(&c->av1_seq, __builtin_ctz(mask), fh.frame_type, se, sizeof se);
         if (sn) { if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(se, 1, sn, df); fclose(df); } } st = av1_put(c, d, se, sn, p->out_surface, true); }
     }
     free(buf);
@@ -1873,7 +1888,7 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
         RKSurface *ks = all ? surface_by_id(d, k) : NULL;
         if (ks && ks->av1.valid && ks->av1.frame_type == 0 && ks->av1_mask != 0xff && c->av1_seq_sent) {
             int slot = ks->av1_mask ? __builtin_ctz(ks->av1_mask) : 0;
-            uint8_t se[64]; size_t sn = av1_write_show_existing(&c->av1_seq, slot, 0, se, sizeof se);
+            uint8_t se[64]; size_t sn = av1_show_existing_closed(&c->av1_seq, slot, 0, se, sizeof se);
             LOG("av1: shown-existing KEY surface 0x%x (slot %d) → full refresh", (unsigned)k, slot);
             if (sn) { av1_put(c, d, se, sn, k, true); ks->av1_mask = 0xff; }
         }
