@@ -4,7 +4,7 @@ Hardware-verified on Orange Pi 5B (RK3588S) unless noted. Reports from other
 RK3588/RK3588S boards are welcome — decode silicon is identical across the two,
 so behaviour should match.
 
-Current as of **v3.0.0**.
+Current as of **v3.5.0~rc2**.
 
 ---
 
@@ -348,6 +348,26 @@ AV1-engine job per picture. With any other MPP (stock, distro, non-RK3588) the d
 time with the real mask: correct, but about 1.5 jobs per picture — at 10.5 ms per 4K job that is more than a 4K60
 frame budget, and Firefox drops most 4K60 AV1 frames, then switches to software. `RK_VAAPI_LOG` says which path is in
 use ("deferred refresh available"/"off (this MPP lacks it ...)"); `RKVA_AV1_NO_DEFER=1` forces the re-decode.
+
+## KI-15: AV1 — a client that never waits can show its newest picture before it is decoded (v3.5.0)
+
+**Status:** open · same as or better than 3.0.0
+
+The driver learns a picture's `refresh_frame_flags` from the next picture, so it holds the newest picture until its
+successor arrives, unless the client waits on it (vaSyncSurface, or an export after decoding), which forces an early
+decode. FFmpeg, mpv and Firefox wait on every picture. Chromium waits on a surface only when it imports it, so for
+Chromium the newest picture is decoded only when the next one is submitted. Pacing (`RKVA_PACE`, 3.5.0) bounds how far
+*older* pictures can lag; it cannot help the newest one. In practice:
+
+- **End of stream:** the last frame of a non-looping AV1 video in Chromium is not decoded unless something waits on
+  it, and by our reading of Chromium's code nothing does; it would then show that surface's old content (an earlier
+  picture, or green if the surface was never used). Found by code review; not yet confirmed on screen.
+- **Low-delay playback** (WebRTC calls, WebCodecs, a starved decoder): each newest picture may be composited before it
+  is decoded, which would show as occasional stale frames.
+
+3.0.0 behaves the same way (it also held the newest picture). A fix would decode the newest picture early when a
+client never waits (the deferred-refresh hold of KI-14 makes that cheap); not done yet. To check by eye: play a
+non-looping AV1 clip to its end in Chromium and look at the last frame.
 
 ---
 

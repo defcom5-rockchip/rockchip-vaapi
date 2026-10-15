@@ -58,9 +58,15 @@ Releases are triggered by the human maintainer, never autonomously.
    `sub_lock` (a leaf lock; at most 16 queued packets). An AV1 context whose
    client has not waited on a picture it rendered (vaSyncSurface, or an export
    after decoding) is paced: EndPicture returns only once the picture from
-   `RKVA_PACE` (2) pictures earlier is in its surface. Chromium syncs a surface
-   only at import and then samples its dma-buf unsynchronised: without pacing it
-   shows old pictures or green (rc1). Both threads are stopped
+   `RKVA_PACE` (2) pictures earlier is in its surface (capped at 100 ms; in
+   poll mode the waiter drains MPP itself). Chromium syncs a surface only at
+   import and then samples its dma-buf unsynchronised: without pacing it shows
+   old pictures or green (rc1). **The pace wait holds no driver lock**: never
+   move it under `av1_lock` or `out_lock` (the submit and output threads need
+   both to finish the picture). Waiters on a surface (vaSyncSurface, pacing)
+   are counted under its lock; DestroySurfaces sets `dying`, broadcasts and
+   waits for them before destroying the surface's cond and lock, and gen bumps
+   broadcast. Both threads are stopped
    (`av1_submit_stop`, `out_thread_stop`) before `out_lock` is taken in
    DestroyContext and Terminate, and in Terminate before any surface is torn
    down. Nothing blocks inside MPP while holding `out_lock`. Packets carry
@@ -131,9 +137,11 @@ Client notes:
 - mpv with `--vo=null` never initializes VA-API; hwdec tests need a display session.
 - assign_mpp_frame `copied=`: 1 CPU memcpy · 2 RGA blit (8-bit) · 3 NV15→P010 CPU repack · 4 RGA NV15→P010 blit;
   `zero-copy fd=` = the frame is held, not copied; `zero-copy: ... read without an export` = the late copy.
-- Switches: `RKVA_ZERO_COPY=0` (always copy), `RKVA_SYNC_POLL=1` (no output thread: sync polls MPP every 1 ms),
+- Switches: `RKVA_ZERO_COPY=0` (always copy), `RKVA_SYNC_POLL=1` (no output thread: sync and AV1 pacing poll MPP every 1 ms),
   `RKVA_AV1_NO_DEFER=1` (re-decode early-synced AV1 pictures even with a capable MPP),
-  `RKVA_PACE=n` (AV1 pictures in flight for a client that never waits, default 2, 0 = no pacing).
+  `RKVA_PACE=n` (AV1 pictures in flight for a client that never waits, default 2, 0 = no pacing: Chromium
+  then shows old pictures or green again). `pace:` log lines: on/off per context, one summary per 600 paced
+  pictures, and any wait that hit the 100 ms cap ("not decoded after").
 
 ## Workflow
 - Development on feature branches; `main` is released truth.

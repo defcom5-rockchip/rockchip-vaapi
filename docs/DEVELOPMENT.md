@@ -350,14 +350,19 @@ What the VA parameters do not say, and how it is handled:
   never produces an output (the two decodes are not always identical and shared the surface).
   `RKVA_AV1_NO_DEFER=1` forces the re-decode. A shown KEY frame refreshes everything and is never held.
 - **Clients that never wait.** Packets reach MPP from the per-context submit thread, so EndPicture returns before the
-  picture is decoded; FFmpeg, mpv and Firefox wait on each picture (vaSyncSurface, or an export after decoding) and
-  never notice. Chromium syncs a surface only when it imports it (before its first decode) and then composites the
+  picture is decoded; mpv, Firefox and FFmpeg with a download wait on each picture (vaSyncSurface, or an export after
+  decoding) and never notice. FFmpeg with `-hwaccel_output_format vaapi` and no download never waits and is paced, at
+  no measured cost (about 77 fps at 4K either way). Chromium syncs a surface only when it imports it (before its first decode) and then composites the
   dma-buf whenever the picture is due, so when it decodes ahead (start, seek, loop) it showed the surface's previous
   picture, or green on a surface's first use (3.5.0~rc1, caught by eye in a blind A/B and by a frame checker that
   compares every presented frame with 3.0.0's). Until a context's client has waited on a picture it rendered, and
-  again after 32 pictures without such a wait, EndPicture waits (bounded, 250 ms) until the picture from `RKVA_PACE`
-  (default 2) pictures earlier is in its surface. AV1 only: the other codecs feed MPP from EndPicture, which blocks on
-  MPP's input queue as in 3.0.0, and H.264/HEVC output in display order, so waiting on a reordered picture would stall.
+  again after 32 pictures without such a wait, EndPicture waits until the picture from `RKVA_PACE` (default 2)
+  pictures earlier is in its surface. The wait holds no driver lock, uses a monotonic 100 ms cap (Chromium holds its
+  process-wide VA lock across vaEndPicture), ends early when the surface is re-targeted or destroyed or the decoder
+  destroyed, and in poll mode (`RKVA_SYNC_POLL=1`, or no output thread) drains MPP itself. AV1 only: the other codecs
+  still feed MPP from EndPicture, which blocks on MPP's input queue as in 3.0.0 (MPP runs with IMMEDIATE_OUT, so
+  H.264/HEVC come out in decode order). Not covered: the newest picture of such a client is still held until its
+  successor arrives (KI-15).
 - **Hidden frames** (`show_frame = 0`): clients never send `show_existing_frame` to a VA driver, but they do read the
   hidden picture's surface when the stream shows it later. The driver follows a hidden picture with a synthesised
   `show_existing_frame` of one slot it refreshed; a hidden **KEY** frame instead gets a second decode of the same
