@@ -257,7 +257,7 @@ buffers and 256 MB is not enough.
 
 **Symptom of CMA exhaustion (important — it does not look like a driver bug):**
 the 4K context acknowledges `info_change`, decodes 70–80 frames cleanly
-(`copied=1`, no `TIMEOUT`, no VA error), then Firefox reports
+(`copied=1` — or `zero-copy fd=` from 3.5.0 — no `TIMEOUT`, no VA error), then Firefox reports
 `NS_ERROR_DOM_MEDIA_FATAL_ERR` with **no driver-side error at all**. MPP cannot
 surface a failed contiguous allocation through the libva API, so from the
 driver's point of view every call succeeded. The standalone `va_barcode_test`
@@ -280,6 +280,19 @@ kept for the surface's lifetime (its `prime_fd` never changes). `assign_mpp_fram
 copies MPP's decoded pixels into it using MPP's *real* hor/ver strides
 (e.g. 3840×2176 for 4K — note the 2176 ver-stride padding) and then releases the
 MPP frame immediately. This avoids two earlier bugs:
+
+**Since 3.5.0 (8-bit zero-copy):** for a client that exports each surface again after
+decoding into it (Firefox, mpv `hwdec=vaapi`), an 8-bit NV12 frame whose MPP stride is
+64-aligned is *not* copied: the surface keeps the MppFrame (`zc_frame`) and
+ExportSurfaceHandle hands out MPP's buffer with MPP's strides. That is safe now
+because the driver holds a reference on the frame until the client renders into the
+surface again (BeginPicture) — MPP cannot reuse a buffer while it is referenced — which
+is exactly what the aliasing bug below lacked. Readers of `priv_buf` (Chromium imports
+each surface once; vaDeriveImage/vaGetImage; a sync without an export; a writable
+export) get the copy at the moment they read (`surface_zc_materialize`). 10-bit is
+always copied (NV15 is repacked to P010). `RKVA_ZERO_COPY=0` restores the copy
+everywhere. Measured on 4K60 AV1 in Firefox: the copy was 2.6 ms of every frame on the
+decode thread.
 
 - **Buffer aliasing ("saltando frames")**: MPP's internal display pool is only
   ~3 buffers for 4K; exporting MPP's fd directly meant MPP overwrote a buffer the
@@ -327,10 +340,15 @@ LGPL-2.0-or-later, with a GLib-free shim) and writes the OBUs; `do_av1_decode()`
 What the VA parameters do not say, and how it is handled:
 
 - **`refresh_frame_flags`** is absent. The successor picture's `ref_frame_map[]` shows which slots the previous picture
-  took, so each picture is held until the next one arrives. If the client syncs the held picture first (FFmpeg does,
-  every frame — design reasoning from FFmpeg's download path, not a measurement), it is decoded at once with mask 0 — correct picture, nothing refreshed — and re-submitted with the
-  real mask later **as a hidden frame**, so the second decode never produces an output (the two decodes are not
-  always identical and shared the surface). A shown KEY frame refreshes everything and is never held.
+  took, so each picture is held until the next one arrives. If the client syncs the held picture first (Firefox and
+  FFmpeg's download path do, every frame — measured: 1.47 av1d jobs per picture in Firefox at 4K60 with 3.0.0), it is
+  decoded at once with mask 0 — correct picture, nothing refreshed. **With an MPP that speaks protocol 2 of the
+  deferred refresh** (Plaid Pi's librockchip-mpp1 `+pd32` and later, RK3588 only; `mpp_av1d_rkva_enable()` on each
+  AV1 decoder) that early decode carries an `'H'` padding OBU and MPP keeps the picture with its slot state; when the
+  successor arrives a `'C'` padding OBU (mask + the hold's token) stores it into the slots — no second decode. With
+  any other MPP the picture is re-submitted with the real mask later **as a hidden frame**, so the second decode
+  never produces an output (the two decodes are not always identical and shared the surface).
+  `RKVA_AV1_NO_DEFER=1` forces the re-decode. A shown KEY frame refreshes everything and is never held.
 - **Hidden frames** (`show_frame = 0`): clients never send `show_existing_frame` to a VA driver, but they do read the
   hidden picture's surface when the stream shows it later. The driver follows a hidden picture with a synthesised
   `show_existing_frame` of one slot it refreshed; a hidden **KEY** frame instead gets a second decode of the same

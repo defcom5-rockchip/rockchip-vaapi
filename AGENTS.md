@@ -18,7 +18,10 @@ Releases are triggered by the human maintainer, never autonomously.
    no-op alias). Adding or removing a profile is the maintainer's call after
    hardware soak, never an agent's.
 2. Export stride is 64-aligned (`(width+63)&~63`). 16-align green-screens
-   non-16-aligned VP9 widths (2970×2160 reproducer in REPRO.md).
+   non-16-aligned VP9 widths (2970×2160 reproducer in REPRO.md). The 8-bit
+   zero-copy export (since 3.5.0) hands out MPP's own hor_stride, so it is used
+   only when that stride is 64-aligned (`fhs % 64 == 0`); MPP aligns AV1/H.264/
+   VP8 frames up to 1920 wide to 16 only (854 -> 864), and those are copied.
 3. 10-bit MPP output is packed NV15 with a BYTE hor_stride (3840w → 4864); the
    decode copy repacks it to true P010 (`nv15_row_to_p010`, NEON path plus
    scalar tail — `tests/nv15-unpack-test.c` proves them equivalent for every
@@ -30,8 +33,11 @@ Releases are triggered by the human maintainer, never autonomously.
    `max_num_reorder_frames` at its worst-case default, so the decoder holds
    pictures a stateless client is already blocking on. Both are fixed; keep
    them fixed.
-5. `vaDeriveImage` aliases the decoded MPP buffer and its VAImage buffer is
-   flagged `borrowed` — `vaDestroyBuffer` must not free it.
+5. `vaDeriveImage` aliases the surface's own buffer (`priv_buf`) and its VAImage
+   buffer is flagged `borrowed` — `vaDestroyBuffer` must not free it. With
+   zero-copy the picture may still sit in MPP's buffer: DeriveImage/GetImage/
+   a sync without an export first copy it into `priv_buf`
+   (`surface_zc_materialize`).
 6. **One VADisplay can carry several decoders on several threads** (Firefox's
    media process, ffmpeg 8). Each context's `out_lock` is created in
    `__vaDriverInit`, destroyed only in `rk_Terminate`, and never cleared: it
@@ -46,6 +52,17 @@ Releases are triggered by the human maintainer, never autonomously.
    `tests/multi-decode.sh` (several decoders on one display, hardware forced,
    every frame against software) and `tests/abandon-soak.sh`, with and without
    `RK_VAAPI_LOG`.
+   Since 3.5.0 each context runs an **output thread** (the only
+   `decode_get_frame` caller while it runs; routes frames under `out_lock`,
+   broadcasts the surface's cond) and, for AV1, a **submit thread** fed through
+   `sub_lock` (a leaf lock; at most 16 queued packets). Both are stopped
+   (`av1_submit_stop`, `out_thread_stop`) before `out_lock` is taken in
+   DestroyContext and Terminate, and in Terminate before any surface is torn
+   down. Nothing blocks inside MPP while holding `out_lock`. Packets carry
+   `(surface generation << 32) | surface` as PTS; an output for a re-targeted
+   surface is dropped. Zero-copy: a surface may hold MPP's frame (`zc_frame`)
+   until the client renders into it again; only for contexts seen re-exporting
+   (`zc_ok`), never for a writable export.
 
 - **Never write a DRM fourcc as a hex literal, and never blame the GPU stack without Mesa's own error text.** KI-3 lived for three releases because `DRM_FORMAT_GR1616` was typed as `0x36315247` ("GR16", not a format) and nobody ran the failing client with `EGL_LOG_LEVEL=debug`, which names the rejected check in one line. Fourccs go through `RK_FOURCC()`; a "blocked upstream" claim needs the exact refusing function quoted.
 - **A probe that passes is not a frame that displays.** The pre-decode placeholder exports as 8-bit, so mpv's VA-API format probe cannot exercise the 10-bit branch. Prove a path with real decoded frames (import-failure count = 0 in the same run that shows `hwdec-current`).
@@ -107,7 +124,10 @@ Client notes:
 - Never touch the system driver: `LIBVA_DRIVERS_PATH=<dir> LIBVA_DRIVER_NAME=rockchip`.
 - Logs are silent unless `RK_VAAPI_LOG=/path`. One-frame P010 dump: `RKVA_DUMP=/path`.
 - mpv with `--vo=null` never initializes VA-API; hwdec tests need a display session.
-- assign_mpp_frame `copied=`: 1 CPU memcpy · 2 RGA blit (8-bit) · 3 NV15→P010 CPU repack · 4 RGA NV15→P010 blit.
+- assign_mpp_frame `copied=`: 1 CPU memcpy · 2 RGA blit (8-bit) · 3 NV15→P010 CPU repack · 4 RGA NV15→P010 blit;
+  `zero-copy fd=` = the frame is held, not copied; `zero-copy: ... read without an export` = the late copy.
+- Switches: `RKVA_ZERO_COPY=0` (always copy), `RKVA_SYNC_POLL=1` (no output thread: sync polls MPP every 1 ms),
+  `RKVA_AV1_NO_DEFER=1` (re-decode early-synced AV1 pictures even with a capable MPP).
 
 ## Workflow
 - Development on feature branches; `main` is released truth.

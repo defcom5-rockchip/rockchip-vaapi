@@ -74,7 +74,9 @@ picture parameters plus the tile payloads, MPP wants a complete OBU stream. `src
 sequence header, frame header, tile-group framing — with a vendored copy of GStreamer's AV1 bit writer
 (`src/av1/`, five bugs fixed and segmentation implemented, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)). The one value VA-API never passes, `refresh_frame_flags`, is read
 from the next picture's reference map, so every picture is held until its successor arrives (or until the client
-syncs it, when it is decoded at once and its slot refresh follows as a hidden frame). Conformance measured through
+syncs it, when it is decoded at once; with Plaid Pi's patched MPP — librockchip-mpp1 `+pd32` and later, RK3588 —
+MPP keeps that decode and stores it into the right slots afterwards, otherwise the slot refresh follows as a second,
+hidden decode: one extra AV1-engine job per such picture, see KI-14). Conformance measured through
 `ffmpeg -hwaccel vaapi` (see `evidence/2026-10-11-av1-fluster/`); decode on the AV1 engine confirmed by interrupt
 counts in Chrome, Firefox and mpv, the picture checked by eye in Chrome and Firefox.
 Film grain is **not** applied (MPP does not synthesise it on RK3588): grainy streams decode to the clean picture.
@@ -243,6 +245,10 @@ verified bit-exact against the previous CPU repack on 4K HDR10 content.
 At 3840x2160 the blit takes about 3.8 ms on one RGA3 core and removes about
 5 s of CPU time per 20 s of 4K60 playback from the decoding process.
 `RKVA_RGA_P010=0` forces the CPU repack for 10-bit. The 8-bit NV12 copy stays on the CPU by default (as in 2.1.5); `RKVA_RGA_COPY=1` enables it, `RKVA_RGA_COPY=0` turns every RGA copy off for A/B tests.
+Since 3.5.0 a client that exports each surface after decoding (Firefox, mpv `hwdec=vaapi`) gets 8-bit frames without
+any copy: the driver exports MPP's own buffer when its stride is 64-aligned and keeps it until the surface is reused
+(`RKVA_ZERO_COPY=0` turns this off). Chromium, vaapi-copy and ffmpeg's download path keep the copy.
+`RKVA_SYNC_POLL=1` brings back the 1 ms polling vaSyncSurface of 3.0.0 instead of the per-decoder output thread.
 
 All of this needs the driver to be built against librga. The v2.2.0 release download was
 built without it (it does not link `librga.so.2`), so on that build 10-bit always used the

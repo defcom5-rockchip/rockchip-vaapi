@@ -336,6 +336,19 @@ against the raw decoder):
 libaom AV1-TEST-VECTORS 213/242, Chromium 10-bit 22/23, Chromium 8-bit 9/13 — files and the attribution table in
 `evidence/2026-10-11-av1-fluster/`, scripts in `tests/av1/`.
 
+## KI-14: AV1 decoded twice per early-synced picture without Plaid Pi's MPP (v3.5.0)
+
+**Status:** by design; fixed where MPP has the feature
+
+VA-API never tells the driver `refresh_frame_flags`; it is read from the next picture's reference map. A client that
+syncs each picture before submitting the next (Firefox, FFmpeg's download path) therefore forces an early decode
+with refresh 0. With librockchip-mpp1 `1.5.0+git20260805.a8b19653+ds-0ubuntu1~rk1+pd32` or later (Plaid Pi; patches
+in its source package) on RK3588, MPP keeps that decode and the driver commits its reference slots afterwards: one
+AV1-engine job per picture. With any other MPP (stock, distro, non-RK3588) the driver decodes such a picture a second
+time with the real mask: correct, but about 1.5 jobs per picture — at 10.5 ms per 4K job that is more than a 4K60
+frame budget, and Firefox drops most 4K60 AV1 frames, then switches to software. `RK_VAAPI_LOG` says which path is in
+use ("deferred refresh available"/"off (this MPP lacks it ...)"); `RKVA_AV1_NO_DEFER=1` forces the re-decode.
+
 ---
 
 ## Reporting
