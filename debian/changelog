@@ -1,3 +1,39 @@
+rockchip-vaapi (3.5.0~rc1-1) resolute; urgency=medium
+
+  * Release candidate 1 for 3.5.0: 4K60 AV1 in Firefox.
+  * AV1: a picture the client syncs before its successor arrives (Firefox,
+    FFmpeg's download path) is decoded once instead of twice when MPP has the
+    deferred reference refresh (protocol 2, librockchip-mpp1 +pd32 or later,
+    RK3588): MPP keeps the early decode and the driver commits its reference
+    slots later ('H'/'C' padding OBUs with a token, enabled per decoder).
+    Other MPP builds keep the re-decode (KI-14). RKVA_AV1_NO_DEFER=1 forces it.
+  * AV1: EndPicture never waits: packets go to MPP from a per-decoder submit
+    thread (at most 16 queued). Synthesised show_existing headers are closed
+    with a temporal delimiter, so MPP emits them at once with their own PTS
+    (fixes 3 s sync timeouts at temporal units with hidden pictures). The
+    show_existing of a re-shown KEY names a slot that really holds it (MPP's
+    reference slots are tracked).
+  * All codecs: a per-decoder output thread routes MPP's frames as they come
+    out and vaSyncSurface waits on the surface instead of polling every 1 ms
+    (RKVA_SYNC_POLL=1 restores polling). Packets carry the surface generation
+    in their PTS; an output for a surface the client already reused is
+    dropped. vaSyncSurface returns at once when its decoder is destroyed.
+  * 8-bit zero-copy: for clients that export each surface after decoding
+    (Firefox, mpv), frames are exported from MPP's own buffer (64-aligned
+    strides only) and held until the surface is rendered into again; clients
+    that read the surface's own buffer (Chromium, vaDeriveImage/vaGetImage,
+    writable exports) get the copy when they read. RKVA_ZERO_COPY=0 turns it
+    off.
+  * Teardown: Terminate stops every decoder's threads before freeing
+    surfaces; DestroySurfaces excludes frame routing while it frees.
+  * Log lines carry a monotonic timestamp and thread id, plus per-step times.
+  * Recommends librockchip-mpp1 (>= ...+pd32~) for the single-decode path.
+  * Measured on an Orange Pi 5B (Plaid Pi 5.0, RK3588S): Firefox 157 YouTube
+    BBB 4K60 AV1 drops 91-95 % with 3.0.0 + stock MPP, about 8-9 % with
+    this driver and MPP, 1.2-1.5 % with media.video-queue.hw-accel-size 10.
+
+ -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Thu, 15 Oct 2026 13:28:15 +0000
+
 rockchip-vaapi (3.0.0-1) resolute; urgency=medium
 
   * Release 3.0.0 "Plaid Number Nine": AV1 hardware decode (Main profile,

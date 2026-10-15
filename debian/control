@@ -18,14 +18,20 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
          libva2 (>= 2.20.0),
          librockchip-mpp1 (>= 1.5.0),
          librga2 (>= 2.2.0)
+Recommends: librockchip-mpp1 (>= 1.5.0+git20260805.a8b19653+ds-0ubuntu1~rk1+pd32~)
 Provides: rockchip-vaapi-driver (= ${binary:Version})
 Replaces: rockchip-vaapi-driver
 Conflicts: rockchip-vaapi-driver
 Description: VA-API video decode driver for Rockchip RK3588 (MPP)
  Hardware video decode on the RK3588/RK3588S video decoders through
  Rockchip MPP, offered to applications through VA-API (libva): H.264,
- HEVC, VP8 and VP9, 8- and 10-bit, with zero-copy DRM PRIME surface
- export (NV12 and P010). The 10-bit conversion runs on the RGA 2D engine.
+ HEVC, VP8, VP9 and AV1, 8- and 10-bit, with DRM PRIME surface export
+ (NV12 and P010). Clients that export each decoded surface (Firefox, mpv)
+ get 8-bit pictures straight from MPP's buffers without a copy. The 10-bit
+ conversion runs on the RGA 2D engine. AV1 pictures a client syncs early
+ are decoded once only with an MPP that has the deferred reference refresh
+ (librockchip-mpp1 +pd32 or later, RK3588); with other MPP builds they are
+ decoded twice.
  Needs a Rockchip BSP kernel that provides /dev/mpp_service.
  .
  Also installs panthor_drv_video.so and panfrost_drv_video.so links so
