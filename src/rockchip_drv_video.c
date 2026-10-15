@@ -223,6 +223,10 @@ typedef struct {
         Av1Tile     tiles[512];
         int         ntiles;
     } av1_pending;
+    /* Output thread (see out_thread_main): the only caller of decode_get_frame while it runs, blocking in MPP's
+       output queue, so vaSyncSurface waits on the surface's condition variable instead of polling MPP. */
+    pthread_t       out_thread;
+    bool            out_started, out_stop;
     /* AV1: which picture MPP holds in each of its 8 reference slots (surface + its gen), as the refresh masks we sent
        say.  The synthesised show_existing of a KEY must name a slot that really holds that KEY: the old guess (slot 0
        when the KEY's mask had been cleared) showed whatever MPP had there -- with the deferred refresh, a picture MPP had
@@ -377,6 +381,8 @@ static int profile_idc(VAProfile p) {
 /* ── VADriverVTable implementations ──────────────────────────── */
 
 static void av1_submit_stop(RKContext *c);   /* AV1 submit thread, see av1_put */
+static void out_thread_start(RKContext *c, RKDriver *d);   /* output thread, see out_thread_main */
+static void out_thread_stop(RKContext *c);
 
 /* Tear an MPP decoder down without stranding its buffers.
  *
@@ -397,6 +403,8 @@ static void av1_submit_stop(RKContext *c);   /* AV1 submit thread, see av1_put *
 static void rk_mpp_teardown_locked(RKContext *c) {
     if (!c->mpp) return;
     if (c->mpi) {
+        MppPollType nb = MPP_POLL_NON_BLOCK;      /* the output thread (stopped by now) used a blocking timeout */
+        c->mpi->control(c->mpp, MPP_SET_OUTPUT_TIMEOUT, (MppParam)&nb);
         c->mpi->reset(c->mpp);
         MppFrame f = NULL;
         while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
@@ -427,7 +435,7 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     for (int i = 0; i < MAX_CONTEXTS; i++) {
         RKContext *c = &d->contexts[i];
         pthread_mutex_lock(&c->av1_lock);
-        if (c->used) av1_submit_stop(c);
+        if (c->used) { av1_submit_stop(c); out_thread_stop(c); }
         pthread_mutex_lock(&c->out_lock);
         if (c->used) { free(c->av1_pending.tiles_buf); c->av1_pending.tiles_buf = NULL; rk_mpp_teardown_locked(c); }
         pthread_mutex_unlock(&c->out_lock); pthread_mutex_unlock(&c->av1_lock);
@@ -851,6 +859,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         c->sps_sent  = false;
         c->used      = true;
         pthread_mutex_unlock(&c->out_lock);
+        out_thread_start(c, d);
 
         *out_id = CONTEXT_ID_BASE + i;
         return VA_STATUS_SUCCESS;
@@ -871,7 +880,7 @@ static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
     /* av1_lock before out_lock, the order EndPicture and a forcing vaSyncSurface use (av1_submit takes out_lock
        repeatedly under av1_lock); the reverse order deadlocked a sync on a held AV1 picture against this teardown. */
     pthread_mutex_lock(&c->av1_lock);
-    if (c->used) av1_submit_stop(c);           /* before out_lock: the submit thread takes it */
+    if (c->used) { av1_submit_stop(c); out_thread_stop(c); }   /* before out_lock: both threads take it */
     pthread_mutex_lock(&c->out_lock);
     if (!c->used) {                            /* lost a race with another DestroyContext */
         pthread_mutex_unlock(&c->out_lock); pthread_mutex_unlock(&c->av1_lock);
@@ -1329,10 +1338,62 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
        Changing them would desynchronise the importer's view of the buffer.
        The copy above re-strides into this fixed layout. */
     s->decoded  = true;
-    pthread_cond_signal(&s->cond);
+    pthread_cond_broadcast(&s->cond);
     pthread_mutex_unlock(&s->lock);
     LOG("assign_mpp_frame: surface=0x%x prime_fd=%d MPP %dx%d stride=%dx%d fmt=0x%x copied=%d copy_us=%lld",
         (unsigned)sid, s->prime_fd, fwidth, fheight, fhs, fvs, (unsigned)ffmt, copied, t_copy1 - t_copy0);
+}
+
+/* Output thread.  It blocks in MPP's output queue (MPP_SET_OUTPUT_TIMEOUT) and routes every frame as soon as MPP
+ * emits it, under out_lock; vaSyncSurface then only waits on the surface's condition variable (event-driven, no 1 ms
+ * poll), and no thread ever blocks inside MPP while holding out_lock -- a blocking wait under out_lock starved the AV1
+ * submit thread and EndPicture of that lock (3 s sync timeout with ffmpeg's DRM-map path).  While it runs it is the
+ * only caller of decode_get_frame.  RKVA_SYNC_POLL=1 keeps the old way (callers drain, sync polls every 1 ms). */
+static int sync_poll_mode(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("RKVA_SYNC_POLL"); v = (e && e[0] == '1') ? 1 : 0; }
+    return v;
+}
+typedef struct { RKContext *c; RKDriver *d; } RkOutArg;
+static void *out_thread_main(void *arg) {
+    RKContext *c = ((RkOutArg *)arg)->c;
+    RKDriver  *d = ((RkOutArg *)arg)->d;
+    free(arg);
+    while (!__atomic_load_n(&c->out_stop, __ATOMIC_ACQUIRE)) {
+        MppFrame f = NULL;
+        MPP_RET r = c->mpi->decode_get_frame(c->mpp, &f);   /* blocks up to the output timeout */
+        if (r == MPP_OK && f) {
+            pthread_mutex_lock(&c->out_lock);
+            assign_mpp_frame(f, c, d);
+            pthread_mutex_unlock(&c->out_lock);
+        } else if (r != MPP_OK && r != MPP_ERR_TIMEOUT) {
+            usleep(1000);                                     /* unexpected error: do not spin */
+        }
+    }
+    return NULL;
+}
+static void out_thread_start(RKContext *c, RKDriver *d) {
+    if (sync_poll_mode() || c->out_started) return;
+    MppPollType to = 20;                                      /* ms; bounds how long a stop request waits */
+    if (c->mpi->control(c->mpp, MPP_SET_OUTPUT_TIMEOUT, (MppParam)&to) != MPP_OK) { LOG("output thread: MPP refused the output timeout, polling"); return; }
+    RkOutArg *a = malloc(sizeof *a);
+    if (!a) goto fail;
+    a->c = c; a->d = d;
+    c->out_stop = false;
+    if (pthread_create(&c->out_thread, NULL, out_thread_main, a) != 0) { free(a); goto fail; }
+    c->out_started = true;
+    return;
+fail:
+    to = MPP_POLL_NON_BLOCK;
+    c->mpi->control(c->mpp, MPP_SET_OUTPUT_TIMEOUT, (MppParam)&to);
+    LOG("output thread: not started, polling");
+}
+/* Caller must NOT hold out_lock (the thread takes it). */
+static void out_thread_stop(RKContext *c) {
+    if (!c->out_started) return;
+    __atomic_store_n(&c->out_stop, true, __ATOMIC_RELEASE);
+    pthread_join(c->out_thread, NULL);
+    c->out_started = false; c->out_stop = false;
 }
 
 /* Build Annex B bitstream from VA-API buffers and send to MPP */
@@ -1427,7 +1488,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
         if (tgt) {
             pthread_mutex_lock(&tgt->lock);
             tgt->decoded = true;
-            pthread_cond_signal(&tgt->cond);
+            pthread_cond_broadcast(&tgt->cond);
             pthread_mutex_unlock(&tgt->lock);
         }
         return VA_STATUS_SUCCESS;
@@ -1437,7 +1498,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     pthread_mutex_lock(&c->out_lock);
     {
         MppFrame f = NULL;
-        while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
+        while (!c->out_started && c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
             assign_mpp_frame(f, c, d);
             f = NULL;
         }
@@ -1473,7 +1534,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
             break;
         MppFrame df = NULL;
         pthread_mutex_lock(&c->out_lock);
-        while (c->mpi->decode_get_frame(c->mpp, &df) == MPP_OK && df) {
+        while (!c->out_started && c->mpi->decode_get_frame(c->mpp, &df) == MPP_OK && df) {
             assign_mpp_frame(df, c, d);
             df = NULL;
         }
@@ -1503,7 +1564,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
        with a 3s deadline.  Here, just collect whatever is already available. */
     MppFrame frame = NULL;
     pthread_mutex_lock(&c->out_lock);
-    while (c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame) {
+    while (!c->out_started && c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame) {
         assign_mpp_frame(frame, c, d);
         frame = NULL;
     }
@@ -1628,7 +1689,7 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
         if (tgt) {
             pthread_mutex_lock(&tgt->lock);
             tgt->decoded = true;
-            pthread_cond_signal(&tgt->cond);
+            pthread_cond_broadcast(&tgt->cond);
             pthread_mutex_unlock(&tgt->lock);
         }
         return VA_STATUS_SUCCESS;
@@ -1646,7 +1707,7 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     pthread_mutex_lock(&c->out_lock);
     {
         MppFrame f = NULL;
-        while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
+        while (!c->out_started && c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
             assign_mpp_frame(f, c, d);
             f = NULL;
         }
@@ -1685,7 +1746,7 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
             break;
         MppFrame df = NULL;
         pthread_mutex_lock(&c->out_lock);
-        while (c->mpi->decode_get_frame(c->mpp, &df) == MPP_OK && df) {
+        while (!c->out_started && c->mpi->decode_get_frame(c->mpp, &df) == MPP_OK && df) {
             assign_mpp_frame(df, c, d);
             df = NULL;
         }
@@ -1721,7 +1782,7 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
         if (tgt) {
             pthread_mutex_lock(&tgt->lock);
             tgt->decoded = true;
-            pthread_cond_signal(&tgt->cond);
+            pthread_cond_broadcast(&tgt->cond);
             pthread_mutex_unlock(&tgt->lock);
         }
         return VA_STATUS_SUCCESS;
@@ -1792,7 +1853,7 @@ static void av1_slots_store(RKContext *c, uint8_t mask, VASurfaceID sid, uint32_
 static void av1_mark_decoded(RKDriver *d, VASurfaceID sid) {
     RKSurface *t = surface_by_id(d, sid);
     if (!t) return;
-    pthread_mutex_lock(&t->lock); t->decoded = true; pthread_cond_signal(&t->cond); pthread_mutex_unlock(&t->lock);
+    pthread_mutex_lock(&t->lock); t->decoded = true; pthread_cond_broadcast(&t->cond); pthread_mutex_unlock(&t->lock);
 }
 
 /* Send one packet (pts = the surface its output belongs to); enqueue that surface in the FIFO when `enqueue`.
@@ -1837,7 +1898,7 @@ static void *av1_submit_thread(void *arg) {
             if (ret == MPP_OK || ret != MPP_ERR_BUFFER_FULL) break;
             MppFrame df = NULL;
             pthread_mutex_lock(&c->out_lock);
-            while (c->mpi->decode_get_frame(c->mpp, &df) == MPP_OK && df) { assign_mpp_frame(df, c, d); df = NULL; }
+            while (!c->out_started && c->mpi->decode_get_frame(c->mpp, &df) == MPP_OK && df) { assign_mpp_frame(df, c, d); df = NULL; }
             pthread_mutex_unlock(&c->out_lock);
             usleep(500);
         }
@@ -1879,7 +1940,7 @@ static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VA
         c->sub_started = true;
     }
     pthread_mutex_lock(&c->out_lock);
-    { MppFrame f = NULL; while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) { assign_mpp_frame(f, c, d); f = NULL; } }
+    { MppFrame f = NULL; while (!c->out_started && c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) { assign_mpp_frame(f, c, d); f = NULL; } }
     if (enqueue) { c->decode_queue[c->dq_tail] = sid; c->dq_tail = (c->dq_tail + 1) & 63; }
     pthread_mutex_unlock(&c->out_lock);
     pthread_mutex_lock(&c->sub_lock);
@@ -2173,12 +2234,30 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
     deadline.tv_sec += 3;
 
     LOG("SyncSurface: surface=0x%x draining MPP ctx=0x%x", id, cid);
-    long long t_sync0 = rk_now_us(); int n_frames = 0, n_sleeps = 0;
-    for (;;) {
+    long long t_sync0 = rk_now_us(); int n_frames = 0, n_sleeps = 0, n_waits = 0;
+    if (c->out_started) {
+        /* the output thread routes frames and signals s->cond: wait for it, in slices so a context destroyed
+           meanwhile is noticed */
+        pthread_mutex_lock(&s->lock);
+        while (!s->decoded) {
+            struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
+            if (now.tv_sec > deadline.tv_sec || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) break;
+            struct timespec slice = now;
+            slice.tv_nsec += 50 * 1000000L; if (slice.tv_nsec >= 1000000000L) { slice.tv_sec++; slice.tv_nsec -= 1000000000L; }
+            if (slice.tv_sec > deadline.tv_sec || (slice.tv_sec == deadline.tv_sec && slice.tv_nsec > deadline.tv_nsec)) slice = deadline;
+            pthread_cond_timedwait(&s->cond, &s->lock, &slice);
+            n_waits++;
+            if (!__atomic_load_n(&c->used, __ATOMIC_ACQUIRE)) break;
+        }
+        bool done = s->decoded;
+        pthread_mutex_unlock(&s->lock);
+        if (done) LOG("SyncSurface: surface=0x%x OK prime_fd=%d waited_us=%lld frames=%d sleeps=%d waits=%d", id, s->prime_fd, rk_now_us() - t_sync0, n_frames, n_sleeps, n_waits);
+        else LOG("SyncSurface: TIMEOUT surface=0x%x prime_fd=%d", id, s->prime_fd);
+    } else for (;;) {
         pthread_mutex_lock(&s->lock);
         bool done = s->decoded;
         pthread_mutex_unlock(&s->lock);
-        if (done) { LOG("SyncSurface: surface=0x%x OK prime_fd=%d waited_us=%lld frames=%d sleeps=%d", id, s->prime_fd, rk_now_us() - t_sync0, n_frames, n_sleeps); break; }
+        if (done) { LOG("SyncSurface: surface=0x%x OK prime_fd=%d waited_us=%lld frames=%d sleeps=%d waits=%d", id, s->prime_fd, rk_now_us() - t_sync0, n_frames, n_sleeps, n_waits); break; }
 
         struct timespec now;
         clock_gettime(CLOCK_REALTIME, &now);
