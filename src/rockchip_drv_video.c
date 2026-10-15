@@ -1576,6 +1576,14 @@ static void out_thread_stop(RKContext *c) {
     c->out_started = false; c->out_stop = false;
 }
 
+/* The PTS a packet carries: the target surface in the low word, its generation (bumped at every BeginPicture) in the
+   high word, so assign_mpp_frame can drop an output that arrives after the client re-targeted the surface. */
+static RK_S64 rk_surface_pts(RKDriver *d, VASurfaceID sid) {
+    RKSurface *t = surface_by_id(d, sid);
+    uint32_t gen = t ? __atomic_load_n(&t->gen, __ATOMIC_RELAXED) : 0;
+    return (RK_S64)(((uint64_t)gen << 32) | (uint64_t)sid);
+}
+
 /* Build Annex B bitstream from VA-API buffers and send to MPP */
 static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
 {
@@ -1702,7 +1710,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     MppPacket pkt = NULL;
     mpp_packet_init(&pkt, pkt_data, pkt_sz);
     mpp_packet_set_length(pkt, pkt_sz);
-    mpp_packet_set_pts(pkt, (RK_S64)c->render_target);
+    mpp_packet_set_pts(pkt, rk_surface_pts(d, c->render_target));
 
     /* MPP_ERR_BUFFER_FULL is backpressure, not a stream error: the decoder's
        input queue is full because output frames have not been drained yet.
@@ -1914,7 +1922,7 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     MppPacket pkt = NULL;
     mpp_packet_init(&pkt, pkt_data, pkt_sz);
     mpp_packet_set_length(pkt, pkt_sz);
-    mpp_packet_set_pts(pkt, (RK_S64)c->render_target);
+    mpp_packet_set_pts(pkt, rk_surface_pts(d, c->render_target));
 
     /* MPP_ERR_BUFFER_FULL is backpressure, not a stream error: the decoder's
        input queue is full because output frames have not been drained yet.
@@ -2084,7 +2092,15 @@ static void *av1_submit_thread(void *arg) {
         }
         mpp_packet_deinit(&pkt);
         LOG("av1_put: surface=0x%x %zu bytes put in %lld us (%d attempts)", (unsigned)k->sid, k->len, rk_now_us() - t_put0, attempts);
-        if (ret != MPP_OK) { LOG("av1_put: decode_put_packet failed: %d", ret); av1_mark_decoded(d, k->sid); }
+        if (ret != MPP_OK && !__atomic_load_n(&c->sub_stop, __ATOMIC_ACQUIRE)) {
+            /* nothing will come out for this packet: release a waiter, but only if the surface still holds the picture
+               the packet was for (not after the client re-targeted it), and under out_lock like every routing */
+            LOG("av1_put: decode_put_packet failed: %d", ret);
+            pthread_mutex_lock(&c->out_lock);
+            RKSurface *t = surface_by_id(d, k->sid);
+            if (t && t->gen == (uint32_t)((uint64_t)k->pts >> 32)) av1_mark_decoded(d, k->sid);
+            pthread_mutex_unlock(&c->out_lock);
+        }
         pthread_mutex_lock(&c->sub_lock);
         c->sub_head = k->next; if (!c->sub_head) c->sub_tail = NULL;
         c->sub_count--;
