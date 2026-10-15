@@ -101,6 +101,7 @@ static inline bool rga_legacy_init(void)
 #include <pthread.h>
 #include <sys/ioctl.h>
 #include <errno.h>
+#include <dlfcn.h>
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -205,6 +206,7 @@ typedef struct {
     struct {
         bool        valid;        /* a frame is held back until the next one reveals its refresh_frame_flags */
         bool        forced;       /* already decoded once with refresh_frame_flags = 0 (client synced it early) */
+        bool        held;         /* that early decode asked MPP to hold the picture: its slots are committed later, no re-decode */
         VASurfaceID surface;
         VASurfaceID ref_surface;  /* pp.current_frame: how later pictures refer to this one (== surface in every client seen) */
         VASurfaceID out_surface;  /* where the picture lands: pp.current_display_picture when the client gave a separate one (film grain), else surface */
@@ -1705,6 +1707,28 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
  * client's surface; the client never sends show_existing to a VA driver.
  * ============================================================================================================ */
 
+/* Deferred refresh (needs an MPP with mpp_av1d_rkva_deferred_refresh(), see av1d_parser.c there): the early decode of a
+   picture the client synced before its successor arrived carries an 'H' padding OBU, and MPP keeps the picture with the
+   slot state it would have saved; when the successor reveals refresh_frame_flags, a 'C' padding OBU stores it into
+   those slots.  Without it the picture is decoded a second time with the real mask (one extra av1d job per shown
+   reference frame, the 4K60 bottleneck in Firefox).  RKVA_AV1_NO_DEFER=1 forces the old re-decode. */
+static int av1_defer_state = -1;
+static pthread_once_t av1_defer_once = PTHREAD_ONCE_INIT;
+static void av1_defer_probe(void) {
+    int (*fn)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "mpp_av1d_rkva_deferred_refresh");
+    av1_defer_state = (fn && fn() >= 1 && !getenv("RKVA_AV1_NO_DEFER")) ? 1 : 0;
+    LOG("av1: deferred refresh %s (MPP %s it%s)", av1_defer_state ? "on" : "off", fn ? "supports" : "lacks",
+        getenv("RKVA_AV1_NO_DEFER") ? ", RKVA_AV1_NO_DEFER set" : "");
+}
+static bool av1_defer_ok(void) { pthread_once(&av1_defer_once, av1_defer_probe); return av1_defer_state == 1; }
+/* The private padding OBU MPP's patched av1d understands: payload "RKVA", command, argument. */
+static size_t av1_write_rkva(uint8_t *dst, char cmd, uint8_t arg) {
+    static const uint8_t magic[4] = { 'R', 'K', 'V', 'A' };
+    dst[0] = (uint8_t)((15 << 3) | 0x02); dst[1] = 6;   /* OBU_PADDING, has_size_field, 6 payload bytes */
+    memcpy(dst + 2, magic, 4); dst[6] = (uint8_t)cmd; dst[7] = arg;
+    return 8;
+}
+
 /* A synthesised show_existing_frame header, closed with a temporal delimiter.  MPP's av1d splitter (av1d_split_frame)
    ends a FRAME_HEADER OBU only when the next frame header or temporal delimiter arrives (tile groups may follow it), so a
    bare show_existing packet sat in its stream buffer until the client's NEXT picture was put, and then went out under
@@ -1799,11 +1823,15 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
        frames 302/366).  A hidden frame refreshes its slots and outputs nothing. */
     if (resub && fh.show_frame) { fh.show_frame = 0; fh.showable_frame = 1; hidden = true; }
     if (getenv("RKVA_AV1_NO_GRAIN")) fh.film_grain_params.apply_grain = 0;   /* experiment switch: send frames without film grain */
+    /* early decode of a shown, non-key picture: ask MPP to hold it, so the slot refresh can be committed without a
+       second decode (hidden pictures shown early and converted KEYs keep the re-decode: their headers differ) */
+    bool hold = force_show && !resub && mask == 0 && pp->pic_info_fields.bits.show_frame && fh.frame_type != GST_AV1_KEY_FRAME && av1_defer_ok();
+    if (hold) n += av1_write_rkva(buf + n, 'H', 0);
     size_t fn = av1_write_frame_obu(&fh, &c->av1_seq, p->tiles, p->ntiles, buf + n, cap - n);
     if (!fn) { LOG("av1: frame header write failed"); free(buf); return VA_STATUS_ERROR_DECODING_ERROR; }
     n += fn;
     bool will_output = !resub && (!hidden || mask != 0);   /* hidden + a slot = shown via show_existing below */
-    LOG("av1: submit surface=0x%x type=%u show=%u mask=0x%02x tiles=%d bytes=%zu%s%s", (unsigned)p->surface, fh.frame_type, fh.show_frame, mask, p->ntiles, n, p->forced ? " (re-submit)" : "", force_show ? " (forced early)" : "");
+    LOG("av1: submit surface=0x%x type=%u show=%u mask=0x%02x tiles=%d bytes=%zu%s%s%s", (unsigned)p->surface, fh.frame_type, fh.show_frame, mask, p->ntiles, n, p->forced ? " (re-submit)" : "", force_show ? " (forced early)" : "", hold ? " (held)" : "");
     const char *dump = getenv("RKVA_DUMP_AV1");
     if (dump) { FILE *df = fopen(dump, "ab"); if (df) { fwrite(buf, 1, n, df); fclose(df); } }
     VAStatus st = av1_put(c, d, buf, n, p->out_surface, !hidden);
@@ -1825,6 +1853,7 @@ static VAStatus av1_submit(RKContext *c, RKDriver *d, uint8_t mask, bool force_s
     }
     free(buf);
     if (st != VA_STATUS_SUCCESS) return st;
+    if (hold) p->held = true;
     if (!will_output && !resub) av1_mark_decoded(d, p->out_surface);     /* nothing will ever come out for it */
     if (p->out_surface != p->surface) av1_mark_decoded(d, p->surface);   /* film grain: the reconstruct surface is never read */
     RKSurface *me = surface_by_id(d, p->ref_surface);
@@ -1844,10 +1873,16 @@ static VAStatus av1_resolve_pending(RKContext *c, RKDriver *d, const VADecPictur
     if (!p->valid) return VA_STATUS_SUCCESS;
     uint8_t mask = next ? av1_mask_from_successor(next, p->ref_surface) : 0;
     VAStatus st = VA_STATUS_SUCCESS;
-    if (!p->forced || mask) st = av1_submit(c, d, mask, false);        /* forced + mask 0: the early decode was final */
+    if (p->forced && p->held) {                                        /* MPP holds the early decode: commit its slots */
+        uint8_t cb[8]; size_t cn = av1_write_rkva(cb, 'C', mask);
+        LOG("av1: commit surface=0x%x mask=0x%02x (held, no re-decode)", (unsigned)p->surface, mask);
+        st = av1_put(c, d, cb, cn, p->out_surface, false);
+        RKSurface *me = surface_by_id(d, p->ref_surface);
+        if (st == VA_STATUS_SUCCESS && me) me->av1_mask = mask;
+    } else if (!p->forced || mask) st = av1_submit(c, d, mask, false);  /* forced + mask 0: the early decode was final */
     if (st != VA_STATUS_SUCCESS) { av1_mark_decoded(d, p->surface); if (p->out_surface != p->surface) av1_mark_decoded(d, p->out_surface); }
     else { RKSurface *me = surface_by_id(d, p->ref_surface); if (me) me->av1_mask = 0; }
-    p->valid = false; p->forced = false;
+    p->valid = false; p->forced = false; p->held = false;
     return st;
 }
 
@@ -1896,7 +1931,7 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
     /* 2. collect this picture's tiles: slice parameter elements paired with the slice data buffer that follows them
           (FFmpeg/GStreamer: one pair per tile group; Chromium: one parameter buffer per tile, one data buffer) */
     typeof(c->av1_pending) *p = &c->av1_pending;
-    p->valid = false; p->forced = false; p->ntiles = 0; p->tiles_len = 0;
+    p->valid = false; p->forced = false; p->held = false; p->ntiles = 0; p->tiles_len = 0;
     int data_pos[64], n_data = 0;
     for (int i = 0; i < c->n_pending; i++) { RKBuffer *b = buffer_by_id(d, c->pending[i]); if (b && b->type == VASliceDataBufferType) data_pos[n_data++] = i; }
     size_t need = 0;
