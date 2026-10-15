@@ -7,13 +7,21 @@ rockchip-vaapi (3.5.0~rc2-1) resolute; urgency=medium
     could run up to 16 pictures ahead of the decoder and showed old pictures,
     or green on a surface's first use, at start, seek and loop. Until a
     decoder's client waits on a picture it rendered (vaSyncSurface, or an
-    export after decoding: FFmpeg, mpv, Firefox), and again after 32 pictures
-    without such a wait, vaEndPicture returns once the picture from two
-    pictures earlier is in its surface (bounded at 250 ms). RKVA_PACE=n sets
+    export after decoding: mpv, Firefox, FFmpeg with a download), and again
+    after 32 pictures without such a wait, vaEndPicture returns once the
+    picture from two pictures earlier is in its surface. RKVA_PACE=n sets
     the depth, 0 turns pacing off. AV1 only.
-  * Docs: why and when AV1 pacing applies, RKVA_PACE (97cf350).
+  * Pacing review follow-ups (c913790, d344183): pacing also works without
+    the output thread (RKVA_SYNC_POLL=1); the wait is capped at 100 ms on a
+    monotonic clock and logged as one summary line per 600 pictures; a
+    re-targeted surface ends a wait at once; DestroySurfaces waits for
+    vaSyncSurface/pacing waiters before destroying a surface's condition
+    variable.
+  * Docs: why and when AV1 pacing applies, RKVA_PACE (97cf350, 0606344);
+    KNOWN-ISSUES KI-15: the newest AV1 picture of a client that never waits
+    is still held until its successor (same as 3.0.0).
 
- -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Thu, 15 Oct 2026 15:06:48 +0000
+ -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Thu, 15 Oct 2026 15:29:33 +0000
 
 rockchip-vaapi (3.5.0~rc1-1) resolute; urgency=medium
 
