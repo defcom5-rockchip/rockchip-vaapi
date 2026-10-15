@@ -225,11 +225,12 @@ typedef struct {
     /* AV1 packets go to MPP from a per-context submit thread (see av1_put): the client's EndPicture never waits on
        MPP_ERR_BUFFER_FULL.  sub_lock/sub_cv live while sub_started. */
     struct RkPkt   *sub_head, *sub_tail;
+    int             sub_count;      /* packets queued and not yet accepted by MPP */
     bool            sub_started, sub_stop;
     void           *sub_drv;
     pthread_t       sub_thread;
     pthread_mutex_t sub_lock;
-    pthread_cond_t  sub_cv;
+    pthread_cond_t  sub_cv, sub_room;
     pthread_mutex_t out_lock;
     pthread_mutex_t av1_lock;   /* serialises the AV1 submit policy between EndPicture (decoder thread) and vaSyncSurface (any
                                    thread).  Driver lifetime like out_lock.  Lock order: av1_lock, then out_lock, then a surface. */
@@ -1791,6 +1792,10 @@ static void av1_mark_decoded(RKDriver *d, VASurfaceID sid) {
  * Firefox decode call on the YouTube BBB 4K60 stream, which Firefox counts as a late decode, and after 16 of those it
  * abandons hardware decoding.  MPP still sees its packets one at a time, in order, exactly as before. */
 typedef struct RkPkt { struct RkPkt *next; size_t len; VASurfaceID sid; RK_S64 pts; uint8_t data[]; } RkPkt;
+/* Bound on the queue: deep enough that a temporal unit of hidden pictures never waits, shallow enough that a client
+   which never syncs (ffmpeg -hwaccel_output_format vaapi -f null) is held to the hardware's pace instead of queueing
+   the whole stream in memory and having it dropped at DestroyContext. */
+#define RK_SUB_MAX 16
 
 static void *av1_submit_thread(void *arg) {
     RKContext *c = arg;
@@ -1802,7 +1807,8 @@ static void *av1_submit_thread(void *arg) {
         if (!k) { pthread_mutex_unlock(&c->sub_lock); break; }           /* stop requested and nothing left */
         if (c->sub_stop) {                                               /* teardown: drop what is left */
             while (k) { RkPkt *n = k->next; free(k); k = n; }
-            c->sub_head = c->sub_tail = NULL;
+            c->sub_head = c->sub_tail = NULL; c->sub_count = 0;
+            pthread_cond_broadcast(&c->sub_room);
             pthread_mutex_unlock(&c->sub_lock);
             break;
         }
@@ -1829,6 +1835,8 @@ static void *av1_submit_thread(void *arg) {
         if (ret != MPP_OK) { LOG("av1_put: decode_put_packet failed: %d", ret); av1_mark_decoded(d, k->sid); }
         pthread_mutex_lock(&c->sub_lock);
         c->sub_head = k->next; if (!c->sub_head) c->sub_tail = NULL;
+        c->sub_count--;
+        pthread_cond_signal(&c->sub_room);
         pthread_mutex_unlock(&c->sub_lock);
         free(k);
     }
@@ -1840,8 +1848,8 @@ static void av1_submit_stop(RKContext *c) {
     if (!c->sub_started) return;
     pthread_mutex_lock(&c->sub_lock); c->sub_stop = true; pthread_cond_signal(&c->sub_cv); pthread_mutex_unlock(&c->sub_lock);
     pthread_join(c->sub_thread, NULL);
-    pthread_cond_destroy(&c->sub_cv); pthread_mutex_destroy(&c->sub_lock);
-    c->sub_started = false; c->sub_stop = false; c->sub_head = c->sub_tail = NULL;
+    pthread_cond_destroy(&c->sub_room); pthread_cond_destroy(&c->sub_cv); pthread_mutex_destroy(&c->sub_lock);
+    c->sub_started = false; c->sub_stop = false; c->sub_head = c->sub_tail = NULL; c->sub_count = 0;
 }
 
 static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VASurfaceID sid, uint32_t gen, bool enqueue) {
@@ -1850,10 +1858,10 @@ static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VA
     k->next = NULL; k->len = len; k->sid = sid; k->pts = (RK_S64)(((uint64_t)gen << 32) | (uint64_t)sid); memcpy(k->data, data, len);
     if (!c->sub_started) {
         c->sub_drv = d;
-        pthread_mutex_init(&c->sub_lock, NULL); pthread_cond_init(&c->sub_cv, NULL);
-        c->sub_stop = false; c->sub_head = c->sub_tail = NULL;
+        pthread_mutex_init(&c->sub_lock, NULL); pthread_cond_init(&c->sub_cv, NULL); pthread_cond_init(&c->sub_room, NULL);
+        c->sub_stop = false; c->sub_head = c->sub_tail = NULL; c->sub_count = 0;
         if (pthread_create(&c->sub_thread, NULL, av1_submit_thread, c) != 0) {
-            pthread_cond_destroy(&c->sub_cv); pthread_mutex_destroy(&c->sub_lock); free(k);
+            pthread_cond_destroy(&c->sub_room); pthread_cond_destroy(&c->sub_cv); pthread_mutex_destroy(&c->sub_lock); free(k);
             LOG("av1_put: cannot start the submit thread");
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
@@ -1864,8 +1872,9 @@ static VAStatus av1_put(RKContext *c, RKDriver *d, uint8_t *data, size_t len, VA
     if (enqueue) { c->decode_queue[c->dq_tail] = sid; c->dq_tail = (c->dq_tail + 1) & 63; }
     pthread_mutex_unlock(&c->out_lock);
     pthread_mutex_lock(&c->sub_lock);
+    while (c->sub_count >= RK_SUB_MAX && !c->sub_stop) pthread_cond_wait(&c->sub_room, &c->sub_lock);
     if (c->sub_tail) c->sub_tail->next = k; else c->sub_head = k;
-    c->sub_tail = k;
+    c->sub_tail = k; c->sub_count++;
     pthread_cond_signal(&c->sub_cv);
     pthread_mutex_unlock(&c->sub_lock);
     return VA_STATUS_SUCCESS;
