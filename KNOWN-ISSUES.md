@@ -4,7 +4,7 @@ Hardware-verified on Orange Pi 5B (RK3588S) unless noted. Reports from other
 RK3588/RK3588S boards are welcome — decode silicon is identical across the two,
 so behaviour should match.
 
-Current as of **v3.5.0**.
+Current as of **v3.5.0~rc3**.
 
 ---
 
@@ -349,46 +349,41 @@ time with the real mask: correct, but about 1.5 jobs per picture — at 10.5 ms 
 frame budget, and Firefox drops most 4K60 AV1 frames, then switches to software. `RK_VAAPI_LOG` says which path is in
 use ("deferred refresh available"/"off (this MPP lacks it ...)"); `RKVA_AV1_NO_DEFER=1` forces the re-decode.
 
-## KI-15: AV1 — a client that never waits can show its newest picture before it is decoded (v3.5.0)
+## KI-15: AV1 — with a non-Plaid MPP, a client that never waits can show its newest picture before it is decoded (v3.5.0)
 
-**Status:** open · same as or better than 3.0.0
+**Status:** fixed with Plaid Pi's MPP · open with other MPP builds, same as 3.0.0
 
 The driver learns a picture's `refresh_frame_flags` from the next picture, so it holds the newest picture until its
 successor arrives, unless the client waits on it (vaSyncSurface, or an export after decoding), which forces an early
-decode. FFmpeg, mpv and Firefox wait on every picture. Chromium waits on a surface only when it imports it, so for
-Chromium the newest picture is decoded only when the next one is submitted. Pacing (`RKVA_PACE`, 3.5.0) bounds how far
-*older* pictures can lag; it cannot help the newest one. In practice:
+decode. FFmpeg, mpv and Firefox wait on every picture. Chromium waits on a surface only when it imports it.
 
-- **End of stream:** the last frame of a non-looping AV1 video in Chromium is not decoded unless something waits on
-  it, and by our reading of Chromium's code nothing does; it would then show that surface's old content (an earlier
-  picture, or green if the surface was never used). Found by code review; not yet confirmed on screen.
-- **Low-delay playback** (WebRTC calls, WebCodecs, a starved decoder): each newest picture may be composited before it
-  is decoded, which would show as occasional stale frames.
+With librockchip-mpp1 `+pd32` or later on RK3588 (the deferred refresh of KI-14), 3.5.0 decodes every shown picture of
+such a client at once (refresh 0, slots committed later: one MPP job per picture), so nothing is held and the last
+frame of a stream comes out right. With any other MPP, decoding every picture early would mean decoding it twice, so
+there the newest picture is still held: the last frame of a non-looping AV1 video in Chromium shows the surface's old
+content, and low-delay playback (WebRTC, WebCodecs) may show stale frames. 3.0.0 behaves the same way.
 
-3.0.0 behaves the same way (it also held the newest picture). A fix would decode the newest picture early when a
-client never waits (the deferred-refresh hold of KI-14 makes that cheap); not done yet. To check by eye: play a
-non-looping AV1 clip to its end in Chromium and look at the last frame.
+## KI-16: AV1 in Chrome/Chromium — a rare old frame mid-stream when the browser runs out of decoded pictures (v3.5.0)
 
-## KI-16: AV1 in Chrome/Chromium — green or old frames for a moment at playback start and after a quality switch (v3.5.0)
-
-**Status:** open · same as 3.0.0 · planned for the next version
+**Status:** open · same as 3.0.0 · start-up flicker fixed in 3.5.0
 
 Chrome and Chromium never wait for a picture they decoded: they sync each surface once, when they import it, and
-composite its dma-buf whenever the picture is due. A new decoder — playback start, and every YouTube quality step,
-which creates a new decoder — shows its first picture at once, while a new 4K decoder needs 44–133 ms for its first
-output and runs slower than real time for its first pictures. Pictures composited before MPP has written them show
-green (a new surface) or the surface's previous picture: a short flicker at the start and right after a switch, then
-clean playback. Steady playback is covered by AV1 pacing (3.5.0), which 3.0.0 did not have.
+composite its dma-buf whenever the picture is due; vaapi_wrapper.cc even notes that vaEndPicture "should not be
+blocking ... evidence points to it actually waiting". MPP has no dma-buf fence, so a picture composited before MPP has
+written it shows the surface's previous content (or green on a surface's first use).
 
-Measured on .214 (Orange Pi 5B) with a frame checker (MSE: BBB 1080p60 AV1 then 4K60 AV1 in one SourceBuffer, every
-presented frame from the first compared with Chromium's software decode): 3.0.0 and 3.5.0 alike show green frames 0–1
-at every start and 4–14 bad frames among the first 30 after each 1080p→4K switch; reported by eye in Chrome 155 and
-Chromium 154 on YouTube BBB 4K60 (Chrome: 221 of 5500 frames dropped, all at the start). Firefox, mpv and FFmpeg wait
-on their pictures and are not affected.
-
-A fix (the first 12 shown pictures of a new decoder decoded before vaEndPicture returns, for clients that import
-surfaces ahead; 0 bad frames in the same checker) is parked for the next version. Workaround: none in Chrome; Firefox
-does not show it.
+- **Playback start and quality switches — fixed in 3.5.0.** A new decoder (start, every YouTube quality step) decodes
+  its first 25 shown pictures before vaEndPicture returns (`RKVA_PACE_START`). 3.0.0 and 3.5.0~rc1/rc2 flickered
+  there. Measured on an Orange Pi 5B with Chromium 154: first plays of the BBB 4K60 AV1 film with a scanout checker
+  (every vblank of the composited screen): glitches in the first 6 s in 6 of 10 launches with rc2, 0 of 10 with rc3; an
+  MSE 1080p→4K start/switch frame checker: 0 bad frames in every start and switch window over 5 runs.
+- **Still open: a rare old frame mid-stream.** When Chromium's renderer runs dry — a heavy 4K KEY frame (100-155 ms in
+  the decoder), a hard stretch of the video — it shows each picture as soon as it has it, sometimes before the decode
+  has landed: one old frame for one or two screen refreshes, a few times a minute at most in 4K60 tests (rc2 and 3.5.0
+  alike; 3.0.0 showed more). Waiting for every picture (`RKVA_PACE_START=all`) closes it but drops 17-22 % of 4K60
+  frames. Next version: a dma-buf fence on each surface (Rockchip's Chromium patches report the Mali blob's implicit
+  sync as unreliable, so this needs testing), or choosing MPP's reference slots in the driver so no picture is ever
+  held. Firefox, mpv and FFmpeg wait on their pictures and are not affected.
 
 ---
 

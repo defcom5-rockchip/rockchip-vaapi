@@ -362,8 +362,31 @@ What the VA parameters do not say, and how it is handled:
   vaEndPicture; measured waits at 4K60: mean 12-14 ms, max 62 ms playing, 91 ms around seeks, first output up to
   133 ms after mpp_init). It ends early when the surface is re-targeted or destroyed or the decoder destroyed, and in poll mode (`RKVA_SYNC_POLL=1`, or no output thread) drains MPP itself. AV1 only: the other codecs
   still feed MPP from EndPicture, which blocks on MPP's input queue as in 3.0.0 (MPP runs with IMMEDIATE_OUT, so
-  H.264/HEVC come out in decode order). Not covered: the newest picture of such a client is still held until its
-  successor arrives (KI-15).
+  H.264/HEVC come out in decode order).
+  **Start window:** waiting for the picture two back leaves a new decoder's first pictures unguarded, and Chromium
+  shows its first picture at once and keeps playing through a YouTube rung switch (a new decoder) while a new 4K
+  decoder is slow for its first pictures (first output 44-133 ms after mpp_init, every surface and copy a first
+  touch, temporal units with four hidden pictures before the shown one). Green frames at every start and switch on
+  3.0.0 and 3.5.0~rc2 (G-Man, Chrome 155 and Chromium 154 on YouTube; the start/switch frame checker: MSE 1080p ->
+  4K, every presented frame from the first against a software-decode reference; and a root read-only scanout
+  checker that samples the composited framebuffer every vblank on first plays of the BBB film). So a paced context's
+  first `RKVA_PACE_START` (25) shown pictures are decoded at once (a held picture forced early: 'H' with a capable MPP,
+  a later re-decode otherwise) and EndPicture waits for each until it is decoded (3 s limit only: a 300 ms cap fired
+  on a new 4K decoder's first picture in 1 of 7 launches and showed green). 3 pictures guarded the start, the switch
+  needed 12, and on screen 12 still left a stale frame right after the film's fade-in (Chromium still catching up):
+  screen glitches per first play, 30 s, 3 launches each: 12 -> 3/0/1, 25 -> 0/0/0. `RKVA_PACE_START_MS` adds a time
+  floor (default 0; 12 + 2 s also gave 0/0/0). Cost: about 240 ms of EndPicture time per 1080p decoder start and
+  700-830 ms per 4K one (decoding that happens anyway, now in EndPicture); Chromium film drops after the start are
+  unchanged (0.22 % against rc2's 0.74 % in one 60 s run each). A client that waits ends the window at its first wait.
+  Hidden pictures are never forced: shown early their header differs, MPP cannot hold them and decodes them twice
+  (forcing them cost half of Chromium's frames at 4K); a temporal unit has exactly one shown frame, so the shown
+  picture after a hidden one resolves it in the same EndPicture, and a later show_existing_frame (no VA call in
+  Chromium or FFmpeg) finds it decoded. Waiting for every shown picture (`RKVA_PACE_START=all`) closes the remaining
+  mid-stream case (KI-16) but drops 17-22 % of 4K60 frames in Chromium (self-wait ~30 ms per picture). After the window, with a capable MPP, every shown picture of a paced context is still forced early (no
+  wait): one MPP job per picture as for Firefox, and the newest picture is never held (KI-15 fixed there). Both apply
+  only to an importer: a client that exported a surface before the context first decoded into it (Chromium's import
+  at pool creation, GStreamer). mpv waits on its pictures but only after running a dozen pictures ahead; without the
+  gate every mpv start waited in EndPicture for the window (53 -> 50 plays a minute in the fast-abandon test).
 - **Hidden frames** (`show_frame = 0`): clients never send `show_existing_frame` to a VA driver, but they do read the
   hidden picture's surface when the stream shows it later. The driver follows a hidden picture with a synthesised
   `show_existing_frame` of one slot it refreshed; a hidden **KEY** frame instead gets a second decode of the same

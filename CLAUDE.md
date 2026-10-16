@@ -58,9 +58,18 @@ Releases are triggered by the human maintainer, never autonomously.
    `sub_lock` (a leaf lock; at most 16 queued packets). An AV1 context whose
    client has not waited on a picture it rendered (vaSyncSurface, or an export
    after decoding) is paced: EndPicture returns only once the picture from
-   `RKVA_PACE` (2) pictures earlier is in its surface (capped at 150 ms, 300 ms
+   `RKVA_PACE` (2) pictures earlier is in its surface (capped at 150 ms, 1500 ms
    for a decoder's first pictures; in poll mode the waiter drains MPP itself).
-   Chromium syncs a surface only at
+   For an importer (`c->importer`: a surface was exported before the context
+   first decoded into it - Chromium, GStreamer; not mpv/FFmpeg), a paced
+   context's first `RKVA_PACE_START` (25) shown pictures (and at least
+   `RKVA_PACE_START_MS`, default 0) are decoded at once (held picture forced
+   early) and EndPicture waits for the picture itself until it is decoded (3 s
+   limit only; a capped wait would hand Chromium an undecoded picture) - the
+   start window: new decoder, YouTube rung switch. Hidden pictures are never
+   forced (MPP cannot hold them: a second decode); with a capable MPP
+   (`av1_defer`) every later shown picture is forced early too, without a wait,
+   so the newest picture is never held. Chromium syncs a surface only at
    import and then samples its dma-buf unsynchronised: without pacing it shows
    old pictures or green (rc1). **The pace wait holds no driver lock**: never
    move it under `av1_lock` or `out_lock` (the submit and output threads need
@@ -141,8 +150,12 @@ Client notes:
 - Switches: `RKVA_ZERO_COPY=0` (always copy), `RKVA_SYNC_POLL=1` (no output thread: sync and AV1 pacing poll MPP every 1 ms),
   `RKVA_AV1_NO_DEFER=1` (re-decode early-synced AV1 pictures even with a capable MPP),
   `RKVA_PACE=n` (AV1 pictures in flight for a client that never waits, default 2, 0 = no pacing: Chromium
-  then shows old pictures or green again). `pace:` log lines: on/off per context, one summary per 600 paced
-  pictures, and any wait that hit the cap ("not decoded after").
+  then shows old pictures or green again), `RKVA_PACE_START=n` (start window: shown pictures a new paced decoder
+  decodes before EndPicture returns, default 25, 0 = none: Chromium shows green at starts and rung switches; `all` =
+  every shown picture, a test switch that costs 4K60), `RKVA_PACE_START_MS=n` (the window also lasts at least n ms,
+  default 0). `pace:` log lines: on/off per context, one summary per 600 paced
+  pictures, any wait that hit the cap ("not decoded after"), each start-window picture and the window's total
+  EndPicture time ("start window done").
 
 ## Workflow
 - Development on feature branches; `main` is released truth.
