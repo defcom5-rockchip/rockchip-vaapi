@@ -1,3 +1,43 @@
+rockchip-vaapi (3.5.0-1) UNRELEASED; urgency=medium
+
+  * Release 3.5.0 (draft; 3.5.0~rc2-1 is the candidate): 4K60 AV1 in
+    Firefox.
+  * AV1: a picture the client syncs before its successor arrives (Firefox,
+    FFmpeg's download path) is decoded once instead of twice with
+    librockchip-mpp1 +pd32 or later on RK3588 (deferred reference refresh,
+    protocol 2: MPP keeps the early decode, the driver commits its reference
+    slots later; enabled per decoder). Other MPP builds keep the re-decode
+    (KI-14); RKVA_AV1_NO_DEFER=1 forces it.
+  * AV1: packets go to MPP from a per-decoder submit thread (at most 16
+    queued); synthesised show_existing headers end with a temporal
+    delimiter (no more 3 s sync timeouts at temporal units with hidden
+    pictures); the show_existing of a re-shown KEY names a slot that holds
+    it.
+  * AV1: clients that never wait on their pictures (Chromium) are paced:
+    vaEndPicture returns once the picture two back is in its surface
+    (RKVA_PACE, 150 ms cap, also in poll mode). Known limits: the newest
+    picture (KI-15) and a new decoder's first pictures (KI-16: a short
+    flicker at start and quality switches in Chrome/Chromium, as in 3.0.0).
+  * All codecs: a per-decoder output thread routes MPP's frames as they come
+    out; vaSyncSurface waits on the surface instead of polling every 1 ms
+    (RKVA_SYNC_POLL=1 restores polling). Packets carry the surface generation
+    in their PTS; outputs for a reused surface are dropped; vaSyncSurface
+    returns at once when its decoder or surface is destroyed.
+  * 8-bit zero-copy for clients that export each surface after decoding
+    (Firefox, mpv): MPP's buffer is exported (64-aligned strides only) and
+    held until the surface is rendered into again; Chromium, vaDeriveImage/
+    vaGetImage and writable exports get the copy. RKVA_ZERO_COPY=0 turns it
+    off.
+  * Teardown: Terminate stops every decoder's threads first; DestroySurfaces
+    waits for frame routing and for waiters on the surface.
+  * Recommends librockchip-mpp1 (>= 1.5.0+git20260805.a8b19653+ds-0ubuntu1~rk1+pd32~).
+  * Measured on an Orange Pi 5B (RK3588S), Firefox 157: YouTube BBB 4K60 AV1
+    drops 91-95 % with 3.0.0 + stock MPP, about 8-9 % with 3.5.0 + Plaid
+    Pi's MPP, 1.2-1.5 % with media.video-queue.hw-accel-size 10. Fluster:
+    same pass set as 3.0.0 (244/278).
+
+ -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Fri, 16 Oct 2026 01:53:29 +0000
+
 rockchip-vaapi (3.5.0~rc2-1) resolute; urgency=medium
 
   * Release candidate 2 for 3.5.0.
