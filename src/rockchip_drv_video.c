@@ -249,6 +249,8 @@ typedef struct {
     VASurfaceID     pace_sid[8];
     uint32_t        pace_gen[8];
     unsigned        pace_checked, pace_waited;   /* pictures paced / that had to wait, since the last summary line */
+    int             start_left;     /* AV1 start window: shown pictures still to be decoded before EndPicture returns */
+    long long       start_us;       /* time EndPicture spent on them so far */
     long long       pace_us, pace_max_us;
     /* AV1 packets go to MPP from a per-context submit thread (see av1_put): the client's EndPicture never waits on
        MPP_ERR_BUFFER_FULL.  sub_lock/sub_cv live while sub_started. */
@@ -266,11 +268,18 @@ typedef struct {
 
 static unsigned g_ctx_life;   /* source of RKContext.life */
 #define PACE_AFTER 32         /* pictures without a wait before AV1 pacing comes back on (see av1_pace) */
+#define PACE_START_DEFAULT 12 /* RKVA_PACE_START default: the smallest that left no undecoded frame at a 4K switch */
 #define PACE_CAP_MS 150       /* longest pacing wait: Chromium holds its process-wide VA lock across vaEndPicture.
                                  Measured at 4K60 in Chromium: mean 12-14 ms, max 62 ms playing, 91 ms around seeks */
 #define PACE_CAP_START_MS 300 /* for a decoder's first 4 pictures: MPP's info change and buffer allocation put the
                                  first output up to 133 ms after mpp_init at 4K (mpv, 53 starts) */
 #define PACE_SUMMARY 600      /* paced pictures per "pace:" summary line */
+/* AV1 start window (see av1_pace): shown pictures of a new decoder that EndPicture decodes and waits for itself */
+static int pace_start_n(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("RKVA_PACE_START"); int n = e ? atoi(e) : PACE_START_DEFAULT; v = n < 0 ? 0 : n > 32 ? 32 : n; }
+    return v;
+}
 
 /* Clear a context slot but keep its out_lock (the last member, see above). */
 #define CTX_CLEAR(c) memset((c), 0, offsetof(RKContext, out_lock))
@@ -965,6 +974,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         c->av1_defer = av1_defer;
         do c->life = __atomic_add_fetch(&g_ctx_life, 1, __ATOMIC_RELAXED); while (c->life == 0);
         c->pics_since_wait = PACE_AFTER;      /* paced until the client is seen to wait on a picture */
+        c->start_left = pace_start_n();       /* and its first pictures are decoded before EndPicture returns */
         c->used      = true;
         pthread_mutex_unlock(&c->out_lock);
         out_thread_start(c, d);
@@ -2471,6 +2481,7 @@ static int pace_depth(void) {
 static void pace_note_wait(RKDriver *d, VAContextID cid) {
     RKContext *c = context_by_id(d, cid);
     if (!c || c->coding != MPP_VIDEO_CodingAV1) return;
+    __atomic_store_n(&c->start_left, 0, __ATOMIC_RELAXED);   /* it waits on its own pictures: no start window either */
     if (__atomic_exchange_n(&c->pics_since_wait, 0, __ATOMIC_RELAXED) > PACE_AFTER && pace_depth())
         LOG("pace: context 0x%x: the client waits on its pictures: pacing off", cid);
 }
@@ -2478,35 +2489,23 @@ static bool mono_past(const struct timespec *dl) {
     struct timespec n; clock_gettime(CLOCK_MONOTONIC, &n);
     return n.tv_sec > dl->tv_sec || (n.tv_sec == dl->tv_sec && n.tv_nsec >= dl->tv_nsec);
 }
-static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid) {
-    int depth = pace_depth();
-    if (depth == 0) return;
-    RKSurface *s = surface_by_id(d, sid);
-    unsigned i = c->pace_n++ & 7;
-    c->pace_sid[i] = sid; c->pace_gen[i] = 0;
-    if (s) { pthread_mutex_lock(&s->lock); c->pace_gen[i] = s->gen; pthread_mutex_unlock(&s->lock); }
-    int since = __atomic_add_fetch(&c->pics_since_wait, 1, __ATOMIC_RELAXED);
-    if (since > (1 << 30)) __atomic_store_n(&c->pics_since_wait, PACE_AFTER + 1, __ATOMIC_RELAXED);
-    if (since == PACE_AFTER + 1 && c->pace_n > PACE_AFTER)
-        LOG("pace: context 0x%x: no wait on a picture for %d pictures: pacing on (%d in flight)", cid, PACE_AFTER, depth);
-    if (since <= PACE_AFTER || c->pace_n <= (unsigned)depth) return;
-    unsigned j = (c->pace_n - 1 - (unsigned)depth) & 7;
-    uint32_t gen = c->pace_gen[j];
-    if (gen == 0) return;                      /* the surface was gone when it was recorded: nothing to wait for */
-    RKSurface *w = surface_by_id(d, c->pace_sid[j]);
-    if (!w) return;
+/* Wait (holding no driver lock) until surface sid, as of generation gen, is decoded; at most cap_ms.  Returns the time
+   waited; *late = the cap was hit. */
+static long long pace_wait(RKContext *c, RKDriver *d, VASurfaceID sid, uint32_t gen, long cap_ms, bool *late) {
+    *late = false;
+    RKSurface *w = surface_by_id(d, sid);
+    if (!w || gen == 0) return 0;              /* gen 0: the surface was gone when it was recorded */
     unsigned life = __atomic_load_n(&c->life, __ATOMIC_ACQUIRE);
     bool poll = !c->out_started;               /* no output thread: nobody else drains MPP */
-    long cap_ms = (c->pace_n - 1 - (unsigned)depth) < 4 ? PACE_CAP_START_MS : PACE_CAP_MS;
     struct timespec dl; clock_gettime(CLOCK_MONOTONIC, &dl);
     dl.tv_nsec += cap_ms * 1000000L; while (dl.tv_nsec >= 1000000000L) { dl.tv_sec++; dl.tv_nsec -= 1000000000L; }
-    long long t0 = rk_now_us(); bool late = false;
+    long long t0 = rk_now_us();
     pthread_mutex_lock(&w->lock);
-    if (w->dying) { pthread_mutex_unlock(&w->lock); return; }
+    if (w->dying) { pthread_mutex_unlock(&w->lock); return 0; }
     w->waiters++;                              /* DestroySurfaces waits for us before it destroys w->cond */
     for (;;) {
         if (w->decoded || w->dying || w->gen != gen || __atomic_load_n(&c->life, __ATOMIC_ACQUIRE) != life) break;
-        if (mono_past(&dl)) { late = true; break; }
+        if (mono_past(&dl)) { *late = true; break; }
         if (!poll) { pthread_cond_clockwait(&w->cond, &w->lock, CLOCK_MONOTONIC, &dl); continue; }
         pthread_mutex_unlock(&w->lock);        /* out_lock before a surface lock, never the other way round */
         bool got = false;
@@ -2522,12 +2521,53 @@ static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid
     if (--w->waiters == 0 && w->dying) pthread_cond_broadcast(&w->cond);
     pthread_mutex_unlock(&w->lock);
     long long us = rk_now_us() - t0;
-    if (late) LOG("pace: surface=0x%x not decoded after %lld us: not waiting longer", (unsigned)c->pace_sid[j], us);
+    if (*late) LOG("pace: surface=0x%x not decoded after %lld us: not waiting longer", (unsigned)sid, us);
+    return us;
+}
+
+/* sid: the surface this picture lands on; shown: its show_frame */
+static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid, bool shown) {
+    int depth = pace_depth();
+    if (depth == 0) return;
+    RKSurface *s = surface_by_id(d, sid);
+    unsigned i = c->pace_n++ & 7;
+    c->pace_sid[i] = sid; c->pace_gen[i] = 0;
+    if (s) { pthread_mutex_lock(&s->lock); c->pace_gen[i] = s->gen; pthread_mutex_unlock(&s->lock); }
+    int since = __atomic_add_fetch(&c->pics_since_wait, 1, __ATOMIC_RELAXED);
+    if (since > (1 << 30)) __atomic_store_n(&c->pics_since_wait, PACE_AFTER + 1, __ATOMIC_RELAXED);
+    if (since == PACE_AFTER + 1 && c->pace_n > PACE_AFTER)
+        LOG("pace: context 0x%x: no wait on a picture for %d pictures: pacing on (%d in flight)", cid, PACE_AFTER, depth);
+    if (since <= PACE_AFTER) return;
+    bool late;
+    /* Start window.  Waiting for the picture two back leaves a new decoder's first pictures unguarded: Chromium
+       shows the first picture as soon as it has it, and after a YouTube rung switch (a new decoder) it keeps playing,
+       while a new 4K decoder is slow for its first pictures (first output 44-133 ms after mpp_init: info change and
+       buffer allocation; every surface is new, so every copy is a first touch; and a temporal unit can bring four
+       hidden pictures before its shown one).  Measured with a start/switch frame checker (MSE 1080p -> 4K): 3 shown
+       pictures guarded the start, the switch needed 12.  So the first RKVA_PACE_START (12) shown pictures are decoded
+       now -- a held picture is forced early, the 'H' path with a capable MPP, a re-decode later without -- and
+       EndPicture waits for the picture itself.  A client that waits on its pictures ends the window at once. */
+    int left = __atomic_load_n(&c->start_left, __ATOMIC_RELAXED);
+    if (left > 0 && c->pace_n > 64) { __atomic_store_n(&c->start_left, 0, __ATOMIC_RELAXED); left = 0; }
+    if (left > 0 && shown) {
+        __atomic_store_n(&c->start_left, left - 1, __ATOMIC_RELAXED);
+        av1_force_pending(c, d, c->render_target);   /* no-op for a shown KEY (already submitted) */
+        long long us = pace_wait(c, d, sid, c->pace_gen[i], PACE_CAP_START_MS, &late);
+        c->start_us += us;
+        LOG("pace: context 0x%x: start picture surface=0x%x decoded in %lld us%s (%d more)", cid, (unsigned)sid, us,
+            late ? " (cap)" : "", left - 1);
+        if (left == 1) LOG("pace: context 0x%x: start window done, %lld us in EndPicture", cid, c->start_us);
+        return;
+    }
+    if (c->pace_n <= (unsigned)depth) return;
+    unsigned j = (c->pace_n - 1 - (unsigned)depth) & 7;
+    long cap_ms = (c->pace_n - 1 - (unsigned)depth) < 4 ? PACE_CAP_START_MS : PACE_CAP_MS;
+    long long us = pace_wait(c, d, c->pace_sid[j], c->pace_gen[j], cap_ms, &late);
     c->pace_checked++;
     if (us >= 1000) { c->pace_waited++; c->pace_us += us; if (us > c->pace_max_us) c->pace_max_us = us; }
     if (c->pace_checked >= PACE_SUMMARY) {
         LOG("pace: context 0x%x: %u of the last %u pictures waited, mean %lld us, max %lld us%s", cid, c->pace_waited,
-            c->pace_checked, c->pace_waited ? c->pace_us / c->pace_waited : 0LL, c->pace_max_us, poll ? " (poll mode)" : "");
+            c->pace_checked, c->pace_waited ? c->pace_us / c->pace_waited : 0LL, c->pace_max_us, c->out_started ? "" : " (poll mode)");
         c->pace_checked = c->pace_waited = 0; c->pace_us = c->pace_max_us = 0;
     }
 }
@@ -2546,9 +2586,11 @@ static VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
         st = do_av1_decode(c, d);
         if (st == VA_STATUS_SUCCESS) {
             pthread_mutex_lock(&c->av1_lock);
-            VASurfaceID os = c->av1_pending.surface == c->render_target ? c->av1_pending.out_surface : c->render_target;
+            bool mine = c->av1_pending.surface == c->render_target;
+            VASurfaceID os = mine ? c->av1_pending.out_surface : c->render_target;
+            bool shown = mine && c->av1_pending.pp.pic_info_fields.bits.show_frame;
             pthread_mutex_unlock(&c->av1_lock);
-            av1_pace(c, d, ctx_id, os);
+            av1_pace(c, d, ctx_id, os, shown);
         }
     } else
         st = do_generic_decode(c, d);
