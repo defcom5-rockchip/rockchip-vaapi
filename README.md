@@ -23,6 +23,9 @@ Key features:
 - Zero-copy DRM PRIME 2 surface export (NV12 and P010, DMABUF)
 - Fixes for several decoders on one VA display, multi-threaded clients and players that
   abandon decoders early (Firefox's media process, ffmpeg 8, mpv) in v2.5.0 — see KI-12
+- 4K60 AV1 in Firefox (v3.5.0): one AV1-engine job per picture with Plaid Pi's MPP (KI-14), 8-bit zero-copy
+  export, a per-decoder output thread instead of a 1 ms polling sync; Chromium's AV1 path is paced (see below and
+  KI-15/KI-16)
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)
 - Implements the full VA-API 1.20 vtable (`__vaDriverInit_1_20`)
 
@@ -254,7 +257,9 @@ AV1 pictures go to MPP from a per-decoder thread, so vaEndPicture returns before
 never waits on its pictures (Chromium syncs each surface once, when it imports it) is paced instead: vaEndPicture returns
 once the picture from two pictures earlier is in its surface, about what 3.0.0 had (`RKVA_PACE=n` changes the depth,
 `0` turns pacing off and brings Chromium's old-picture and green flashes back). The newest picture of such a client is
-still shown before it is decoded (end of stream, low-delay use): see KNOWN-ISSUES KI-15.
+still shown before it is decoded (end of stream, low-delay use): see KNOWN-ISSUES KI-15. A new decoder's first
+pictures are not covered either: Chrome and Chromium flicker for a moment at playback start and after a YouTube
+quality switch, as with 3.0.0 (KI-16, planned for the next version).
 
 All of this needs the driver to be built against librga. The v2.2.0 release download was
 built without it (it does not link `librga.so.2`), so on that build 10-bit always used the

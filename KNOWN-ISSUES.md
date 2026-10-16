@@ -4,7 +4,7 @@ Hardware-verified on Orange Pi 5B (RK3588S) unless noted. Reports from other
 RK3588/RK3588S boards are welcome — decode silicon is identical across the two,
 so behaviour should match.
 
-Current as of **v3.5.0~rc2**.
+Current as of **v3.5.0**.
 
 ---
 
@@ -368,6 +368,27 @@ Chromium the newest picture is decoded only when the next one is submitted. Paci
 3.0.0 behaves the same way (it also held the newest picture). A fix would decode the newest picture early when a
 client never waits (the deferred-refresh hold of KI-14 makes that cheap); not done yet. To check by eye: play a
 non-looping AV1 clip to its end in Chromium and look at the last frame.
+
+## KI-16: AV1 in Chrome/Chromium — green or old frames for a moment at playback start and after a quality switch (v3.5.0)
+
+**Status:** open · same as 3.0.0 · planned for the next version
+
+Chrome and Chromium never wait for a picture they decoded: they sync each surface once, when they import it, and
+composite its dma-buf whenever the picture is due. A new decoder — playback start, and every YouTube quality step,
+which creates a new decoder — shows its first picture at once, while a new 4K decoder needs 44–133 ms for its first
+output and runs slower than real time for its first pictures. Pictures composited before MPP has written them show
+green (a new surface) or the surface's previous picture: a short flicker at the start and right after a switch, then
+clean playback. Steady playback is covered by AV1 pacing (3.5.0), which 3.0.0 did not have.
+
+Measured on .214 (Orange Pi 5B) with a frame checker (MSE: BBB 1080p60 AV1 then 4K60 AV1 in one SourceBuffer, every
+presented frame from the first compared with Chromium's software decode): 3.0.0 and 3.5.0 alike show green frames 0–1
+at every start and 4–14 bad frames among the first 30 after each 1080p→4K switch; reported by eye in Chrome 155 and
+Chromium 154 on YouTube BBB 4K60 (Chrome: 221 of 5500 frames dropped, all at the start). Firefox, mpv and FFmpeg wait
+on their pictures and are not affected.
+
+A fix (the first 12 shown pictures of a new decoder decoded before vaEndPicture returns, for clients that import
+surfaces ahead; 0 bad frames in the same checker) is parked for the next version. Workaround: none in Chrome; Firefox
+does not show it.
 
 ---
 
