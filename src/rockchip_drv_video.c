@@ -252,7 +252,8 @@ typedef struct {
     int             start_left;     /* AV1 start window: shown pictures still to be decoded before EndPicture returns */
     bool            importer;       /* the client exported a surface before this context first decoded into it:
                                        it imports surfaces once and samples them later (Chromium, GStreamer) */
-    long long       start_us;       /* time EndPicture spent on them so far */
+    long long       start_us;       /* time EndPicture spent on the first 12 of them */
+    unsigned        start_shown;    /* shown pictures waited for in the start window */
     long long       pace_us, pace_max_us;
     /* AV1 packets go to MPP from a per-context submit thread (see av1_put): the client's EndPicture never waits on
        MPP_ERR_BUFFER_FULL.  sub_lock/sub_cv live while sub_started. */
@@ -277,9 +278,14 @@ static unsigned g_ctx_life;   /* source of RKContext.life */
                                  first output up to 133 ms after mpp_init at 4K (mpv, 53 starts) */
 #define PACE_SUMMARY 600      /* paced pictures per "pace:" summary line */
 /* AV1 start window (see av1_pace): shown pictures of a new decoder that EndPicture decodes and waits for itself */
+#define PACE_START_ALL (1 << 29)   /* RKVA_PACE_START=all: every shown picture */
 static int pace_start_n(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("RKVA_PACE_START"); int n = e ? atoi(e) : PACE_START_DEFAULT; v = n < 0 ? 0 : n > 32 ? 32 : n; }
+    if (v < 0) {
+        const char *e = getenv("RKVA_PACE_START");
+        if (e && !strcmp(e, "all")) v = PACE_START_ALL;
+        else { int n = e ? atoi(e) : PACE_START_DEFAULT; v = n < 0 ? 0 : n > 64 ? 64 : n; }
+    }
     return v;
 }
 
@@ -2558,15 +2564,32 @@ static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid
        (c->importer: Chromium, GStreamer); mpv and FFmpeg export after decoding, and a client that waits on its
        pictures ends the window at its first wait. */
     int left = __atomic_load_n(&c->start_left, __ATOMIC_RELAXED);
-    if (left > 0 && c->pace_n > 64) { __atomic_store_n(&c->start_left, 0, __ATOMIC_RELAXED); left = 0; }
-    if (left > 0 && shown && c->importer) {
-        __atomic_store_n(&c->start_left, left - 1, __ATOMIC_RELAXED);
+    bool all = left >= PACE_START_ALL / 2;
+    if (left > 0 && !all && c->pace_n > 160) { __atomic_store_n(&c->start_left, 0, __ATOMIC_RELAXED); left = 0; }
+    if (left > 0 && c->importer) {
+        /* A hidden picture is not forced: shown early its header differs, so MPP cannot hold it and it would be
+           decoded twice (measured: 880 extra decodes a minute at 4K, Chromium dropping half its frames).  It needs no
+           forcing either: a temporal unit carries exactly one shown frame, so the shown picture that follows a hidden
+           one in its unit resolves it (submitted in that EndPicture, decoded before the shown one), and a later
+           show_existing_frame of it -- which Chromium displays with no VA call -- finds it decoded. */
+        if (!shown) return;
+        if (!all) __atomic_store_n(&c->start_left, left - 1, __ATOMIC_RELAXED);
         av1_force_pending(c, d, c->render_target);   /* no-op for a shown KEY (already submitted) */
-        long long us = pace_wait(c, d, sid, c->pace_gen[i], PACE_CAP_START_MS, &late);
-        c->start_us += us;
-        LOG("pace: context 0x%x: start picture surface=0x%x decoded in %lld us%s (%d more)", cid, (unsigned)sid, us,
-            late ? " (cap)" : "", left - 1);
-        if (left == 1) LOG("pace: context 0x%x: start window done, %lld us in EndPicture", cid, c->start_us);
+        bool first = c->start_shown++ < 12;
+        long long us = pace_wait(c, d, sid, c->pace_gen[i], first ? PACE_CAP_START_MS : PACE_CAP_MS, &late);
+        if (first) {
+            c->start_us += us;
+            LOG("pace: context 0x%x: start picture surface=0x%x decoded in %lld us%s", cid, (unsigned)sid, us, late ? " (cap)" : "");
+            if (c->start_shown == 12 || left == 1) LOG("pace: context 0x%x: first %u shown pictures took %lld us in EndPicture", cid, c->start_shown, c->start_us);
+        } else {
+            c->pace_checked++;
+            if (us >= 1000) { c->pace_waited++; c->pace_us += us; if (us > c->pace_max_us) c->pace_max_us = us; }
+            if (c->pace_checked >= PACE_SUMMARY) {
+                LOG("pace: context 0x%x: %u of the last %u shown pictures waited for themselves, mean %lld us, max %lld us", cid,
+                    c->pace_waited, c->pace_checked, c->pace_waited ? c->pace_us / c->pace_waited : 0LL, c->pace_max_us);
+                c->pace_checked = c->pace_waited = 0; c->pace_us = c->pace_max_us = 0;
+            }
+        }
         return;
     }
     /* Past the start window, with an MPP that holds early decodes (c->av1_defer), every shown picture is decoded now
