@@ -250,6 +250,8 @@ typedef struct {
     uint32_t        pace_gen[8];
     unsigned        pace_checked, pace_waited;   /* pictures paced / that had to wait, since the last summary line */
     int             start_left;     /* AV1 start window: shown pictures still to be decoded before EndPicture returns */
+    bool            importer;       /* the client exported a surface before this context first decoded into it:
+                                       it imports surfaces once and samples them later (Chromium, GStreamer) */
     long long       start_us;       /* time EndPicture spent on them so far */
     long long       pace_us, pace_max_us;
     /* AV1 packets go to MPP from a per-context submit thread (see av1_put): the client's EndPicture never waits on
@@ -340,6 +342,7 @@ typedef struct {
        as soon as it sees `dying`, and the last one out broadcasts. */
     int          waiters;
     bool         dying;
+    bool         pre_exported;   /* exported before anything was decoded into it (Chromium's import at creation) */
     pthread_mutex_t  lock;
     pthread_cond_t   cond;
 } RKSurface;
@@ -1127,10 +1130,15 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
         pthread_mutex_lock(&s->lock);
         VAContextID zc_ctx = s->ctx_id;
         bool zc_held = s->zc_frame != NULL, zc_unexported = zc_held && !s->zc_exported;
+        bool first = s->gen == 0, imported = s->pre_exported;
         s->decoded = false;
         s->ctx_id  = ctx_id;
         if (++s->gen == 0) s->gen = 1;
         pthread_cond_broadcast(&s->cond);        /* a pacing wait on the previous picture ends (gen changed) */
+        if (first && imported && !c->importer) {
+            c->importer = true;
+            LOG("pace: context 0x%x: the client imports surfaces before decoding into them", ctx_id);
+        }
         surface_zc_take_locked(s, &za, &zb);     /* the client renders into it again: done with the old picture */
         pthread_mutex_unlock(&s->lock);
         zc_drop2(za, zb);
@@ -2546,10 +2554,12 @@ static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid
        hidden pictures before its shown one).  Measured with a start/switch frame checker (MSE 1080p -> 4K): 3 shown
        pictures guarded the start, the switch needed 12.  So the first RKVA_PACE_START (12) shown pictures are decoded
        now -- a held picture is forced early, the 'H' path with a capable MPP, a re-decode later without -- and
-       EndPicture waits for the picture itself.  A client that waits on its pictures ends the window at once. */
+       EndPicture waits for the picture itself.  Only for a client that imports surfaces before decoding into them
+       (c->importer: Chromium, GStreamer); mpv and FFmpeg export after decoding, and a client that waits on its
+       pictures ends the window at its first wait. */
     int left = __atomic_load_n(&c->start_left, __ATOMIC_RELAXED);
     if (left > 0 && c->pace_n > 64) { __atomic_store_n(&c->start_left, 0, __ATOMIC_RELAXED); left = 0; }
-    if (left > 0 && shown) {
+    if (left > 0 && shown && c->importer) {
         __atomic_store_n(&c->start_left, left - 1, __ATOMIC_RELAXED);
         av1_force_pending(c, d, c->render_target);   /* no-op for a shown KEY (already submitted) */
         long long us = pace_wait(c, d, sid, c->pace_gen[i], PACE_CAP_START_MS, &late);
@@ -2564,7 +2574,7 @@ static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid
        newest picture is no longer held until its successor arrives -- the picture after a hidden one at a rung
        switch, or the last picture of a stream, which Chromium would otherwise show before it is decoded (KI-15).
        Without the hold it would mean a second decode of every picture, so other MPP builds keep the old way. */
-    if (shown && c->av1_defer) av1_force_pending(c, d, c->render_target);
+    if (shown && c->av1_defer && c->importer) av1_force_pending(c, d, c->render_target);
     if (c->pace_n <= (unsigned)depth) return;
     unsigned j = (c->pace_n - 1 - (unsigned)depth) & 7;
     long cap_ms = (c->pace_n - 1 - (unsigned)depth) < 4 ? PACE_CAP_START_MS : PACE_CAP_MS;
@@ -2771,6 +2781,9 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
     }
 
+    pthread_mutex_lock(&s->lock);
+    if (s->gen == 0) s->pre_exported = true;   /* nothing decoded into it yet: an import ahead of decoding */
+    pthread_mutex_unlock(&s->lock);
     /* Zero-copy eligibility (RKContext.zc_ok): this surface exported again after a new decode into it. */
     {
         VAContextID ecid = 0; bool reexport = false;
