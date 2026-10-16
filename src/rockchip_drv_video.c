@@ -2559,6 +2559,12 @@ static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid
         if (left == 1) LOG("pace: context 0x%x: start window done, %lld us in EndPicture", cid, c->start_us);
         return;
     }
+    /* Past the start window, with an MPP that holds early decodes (c->av1_defer), every shown picture is decoded now
+       too, without waiting for it: that costs MPP nothing extra (Firefox takes this path for every picture), and the
+       newest picture is no longer held until its successor arrives -- the picture after a hidden one at a rung
+       switch, or the last picture of a stream, which Chromium would otherwise show before it is decoded (KI-15).
+       Without the hold it would mean a second decode of every picture, so other MPP builds keep the old way. */
+    if (shown && c->av1_defer) av1_force_pending(c, d, c->render_target);
     if (c->pace_n <= (unsigned)depth) return;
     unsigned j = (c->pace_n - 1 - (unsigned)depth) & 7;
     long cap_ms = (c->pace_n - 1 - (unsigned)depth) < 4 ? PACE_CAP_START_MS : PACE_CAP_MS;
