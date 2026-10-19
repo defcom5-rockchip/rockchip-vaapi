@@ -252,7 +252,7 @@ typedef struct {
     int             start_left;     /* AV1 start window: shown pictures still to be decoded before EndPicture returns */
     bool            importer;       /* the client exported a surface before this context first decoded into it:
                                        it imports surfaces once and samples them later (Chromium, GStreamer) */
-    long long       start_us;       /* time EndPicture spent on the first 12 of them */
+    long long       start_us;       /* time EndPicture spent on the start-window pictures */
     unsigned        start_shown;    /* shown pictures waited for in the start window */
     long long       start_t0;       /* rk_now_us() at the context's first paced picture (0 = none yet) */
     bool            start_logged;   /* "start window done" logged */
@@ -1519,14 +1519,16 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         mpp_frame_deinit(&frame);
         return;
     }
-    {   /* AV1 packets carry the surface generation in the PTS high word (0 = untagged, other codecs) */
-        uint32_t pgen = (uint32_t)((uint64_t)raw_pts >> 32);
-        if (pgen && (VASurfaceID)raw_pts == sid && pgen != s->gen) {
-            LOG("assign_mpp_frame: surface=0x%x output for an earlier picture (gen %u, surface now %u) dropped",
-                (unsigned)sid, pgen, s->gen);
-            mpp_frame_deinit(&frame);
-            return;
-        }
+    /* AV1 packets carry the surface generation in the PTS high word (0 = untagged, other codecs).  Checked here
+       without the lock to drop early, and again under s->lock before the frame is installed: BeginPicture can
+       re-target the surface (gen++) during the copy below, and the old picture must not complete the new one. */
+    uint32_t pgen   = (uint32_t)((uint64_t)raw_pts >> 32);
+    bool     tagged = pgen && (VASurfaceID)raw_pts == sid;
+    if (tagged && pgen != __atomic_load_n(&s->gen, __ATOMIC_RELAXED)) {
+        LOG("assign_mpp_frame: surface=0x%x output for an earlier picture (gen %u, surface now %u) dropped",
+            (unsigned)sid, pgen, s->gen);
+        mpp_frame_deinit(&frame);
+        return;
     }
 
     MppBuffer      buf    = mpp_frame_get_buffer(frame);
@@ -1550,6 +1552,13 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         mpp_buffer_get_size(buf) >= (size_t)fhs * fvs * 3 / 2) {
         MppFrame drop = NULL;
         pthread_mutex_lock(&s->lock);
+        if (tagged && pgen != s->gen) {          /* re-targeted while the frame was in flight */
+            pthread_mutex_unlock(&s->lock);
+            LOG("assign_mpp_frame: surface=0x%x re-targeted meanwhile (gen %u, now %u): zero-copy frame dropped",
+                (unsigned)sid, pgen, s->gen);
+            mpp_frame_deinit(&frame);
+            return;
+        }
         if (s->zc_frame) {                       /* a second output for this picture (should not happen) */
             if (s->zc_exported) { drop = s->zc_prev; s->zc_prev = s->zc_frame; }   /* the client may be showing it */
             else drop = s->zc_frame;
@@ -1577,6 +1586,12 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     mpp_frame_deinit(&frame);
 
     pthread_mutex_lock(&s->lock);
+    if (tagged && pgen != s->gen) {              /* re-targeted during the copy: the new picture's output will follow */
+        pthread_mutex_unlock(&s->lock);
+        LOG("assign_mpp_frame: surface=0x%x re-targeted during the copy (gen %u, now %u): not marked decoded",
+            (unsigned)sid, pgen, s->gen);
+        return;
+    }
     s->frame  = NULL;
     s->fmt    = ffmt;
     if (MPP_FRAME_FMT_IS_YUV_10BIT(ffmt) != s->rt_10bit)
@@ -2128,6 +2143,15 @@ static void av1_mark_decoded(RKDriver *d, VASurfaceID sid) {
     pthread_mutex_lock(&t->lock); t->decoded = true; pthread_cond_broadcast(&t->cond); pthread_mutex_unlock(&t->lock);
 }
 
+/* Same, but only while the surface still holds the picture of generation `gen` (checked under its lock). */
+static void av1_mark_decoded_gen(RKDriver *d, VASurfaceID sid, uint32_t gen) {
+    RKSurface *t = surface_by_id(d, sid);
+    if (!t) return;
+    pthread_mutex_lock(&t->lock);
+    if (t->gen == gen) { t->decoded = true; pthread_cond_broadcast(&t->cond); }
+    pthread_mutex_unlock(&t->lock);
+}
+
 /* Send one packet (pts = the surface its output belongs to); enqueue that surface in the FIFO when `enqueue`.
  *
  * The packet is queued for the context's submit thread, which feeds MPP and absorbs MPP_ERR_BUFFER_FULL.  MPP's AV1
@@ -2183,8 +2207,7 @@ static void *av1_submit_thread(void *arg) {
                the packet was for (not after the client re-targeted it), and under out_lock like every routing */
             LOG("av1_put: decode_put_packet failed: %d", ret);
             pthread_mutex_lock(&c->out_lock);
-            RKSurface *t = surface_by_id(d, k->sid);
-            if (t && t->gen == (uint32_t)((uint64_t)k->pts >> 32)) av1_mark_decoded(d, k->sid);
+            av1_mark_decoded_gen(d, k->sid, (uint32_t)((uint64_t)k->pts >> 32));
             pthread_mutex_unlock(&c->out_lock);
         }
         pthread_mutex_lock(&c->sub_lock);
@@ -2362,6 +2385,10 @@ static void av1_force_pending(RKContext *c, RKDriver *d, VASurfaceID sid) {
         LOG("av1: early sync of surface 0x%x — decoding with refresh_frame_flags=0 first", (unsigned)sid);
         long long t_f0 = rk_now_us();
         if (av1_submit(c, d, 0, true) == VA_STATUS_SUCCESS) p->forced = true;
+        else {                                   /* nothing will come out: release whoever waits on these surfaces */
+            av1_mark_decoded(d, p->surface);
+            if (p->out_surface != p->surface) av1_mark_decoded(d, p->out_surface);
+        }
         LOG("av1: early submit took %lld us", rk_now_us() - t_f0);
     }
     pthread_mutex_unlock(&c->av1_lock);
@@ -2416,7 +2443,7 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
         const VASliceParameterBufferAV1 *sp = (const VASliceParameterBufferAV1 *)b->data;
         for (unsigned e = 0; e < b->num_elements; e++) need += sp[e].slice_data_size;
     }
-    if (need + 16 > p->tiles_cap) { uint8_t *nb = realloc(p->tiles_buf, need + 16); if (!nb) return VA_STATUS_ERROR_ALLOCATION_FAILED; p->tiles_buf = nb; p->tiles_cap = need + 16; }
+    if (need + 16 > p->tiles_cap) { uint8_t *nb = realloc(p->tiles_buf, need + 16); if (!nb) return av1_refuse(c, d, pp, VA_STATUS_ERROR_ALLOCATION_FAILED); p->tiles_buf = nb; p->tiles_cap = need + 16; }
     for (int i = 0; i < c->n_pending && p->ntiles < 512; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
         if (!b || b->type != VASliceParameterBufferType) continue;
@@ -2568,7 +2595,7 @@ static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid
        while a new 4K decoder is slow for its first pictures (first output 44-133 ms after mpp_init: info change and
        buffer allocation; every surface is new, so every copy is a first touch; and a temporal unit can bring four
        hidden pictures before its shown one).  Measured with a start/switch frame checker (MSE 1080p -> 4K): 3 shown
-       pictures guarded the start, the switch needed 12.  So the first RKVA_PACE_START (12) shown pictures are decoded
+       pictures guarded the start, the switch needed 12.  So the first RKVA_PACE_START (default 25) shown pictures are decoded
        now -- a held picture is forced early, the 'H' path with a capable MPP, a re-decode later without -- and
        EndPicture waits for the picture itself.  Only for a client that imports surfaces before decoding into them
        (c->importer: Chromium, GStreamer); mpv and FFmpeg export after decoding, and a client that waits on its
@@ -2592,6 +2619,10 @@ static void av1_pace(RKContext *c, RKDriver *d, VAContextID cid, VASurfaceID sid
         /* wait until the picture is decoded: a capped wait would hand the client an undecoded picture */
         long long us = pace_wait(c, d, sid, c->pace_gen[i], PACE_CAP_SELF_MS, &late);
         if (us > 300000) LOG("pace: context 0x%x: start picture surface=0x%x took %lld us", cid, (unsigned)sid, us);
+        if (late && left > 0) {                  /* MPP is not delivering: one capped wait, not up to 25 of them */
+            __atomic_store_n(&c->start_left, 0, __ATOMIC_RELAXED);
+            LOG("pace: context 0x%x: start window ended early, surface=0x%x hit the %d ms cap", cid, (unsigned)sid, PACE_CAP_SELF_MS);
+        }
         if (!all) {
             c->start_shown++; c->start_us += us;
             if (c->start_shown <= 3) LOG("pace: context 0x%x: start picture surface=0x%x decoded in %lld us%s", cid, (unsigned)sid, us, late ? " (cap)" : "");
@@ -2688,8 +2719,8 @@ static VAStatus rk_sync_wait(VADriverContextP ctx, VASurfaceID id) {
         LOG("SyncSurface: surface=0x%x context 0x%x no longer exists", id, cid);
         return ok ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_DECODING_ERROR;
     }
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
+    struct timespec deadline;                 /* monotonic: a wall-clock step must neither stretch nor cut the wait */
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
     deadline.tv_sec += 3;
 
     LOG("SyncSurface: surface=0x%x draining MPP ctx=0x%x", id, cid);
@@ -2705,12 +2736,12 @@ static VAStatus rk_sync_wait(VADriverContextP ctx, VASurfaceID id) {
         while (reg && !s->decoded) {
             if (s->dying) { dying = true; break; }
             if (life == 0 || __atomic_load_n(&c->life, __ATOMIC_ACQUIRE) != life) { gone = true; break; }
-            struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
+            struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
             if (now.tv_sec > deadline.tv_sec || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) break;
             struct timespec slice = now;
             slice.tv_nsec += 50 * 1000000L; if (slice.tv_nsec >= 1000000000L) { slice.tv_sec++; slice.tv_nsec -= 1000000000L; }
             if (slice.tv_sec > deadline.tv_sec || (slice.tv_sec == deadline.tv_sec && slice.tv_nsec > deadline.tv_nsec)) slice = deadline;
-            pthread_cond_timedwait(&s->cond, &s->lock, &slice);
+            pthread_cond_clockwait(&s->cond, &s->lock, CLOCK_MONOTONIC, &slice);
             n_waits++;
         }
         bool done = s->decoded;
