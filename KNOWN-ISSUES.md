@@ -4,7 +4,7 @@ Hardware-verified on Orange Pi 5B (RK3588S) unless noted. Reports from other
 RK3588/RK3588S boards are welcome — decode silicon is identical across the two,
 so behaviour should match.
 
-Current as of **v3.5.0~rc3**.
+Current as of **v3.5.0**.
 
 ---
 
@@ -219,47 +219,27 @@ to the driver, so auto-detection succeeds. The equivalent manual fix on any vers
 
 ---
 
-## KI-10: garbled 10-bit VP9 after ~18 minutes — update your MPP library
+## KI-10: VP9 reset storm after ~65,536 frames in one session — fixed in MPP (not in this driver)
 
-**Status:** external, root cause identified · **Severity:** playback corrupts until the player is restarted
+**Status:** external, root cause found and fixed in MPP · **Severity:** frames lost until the player is restarted
 
-Long 10-bit VP9 playback (VP9 **Profile 2**) breaks after roughly **65,536 decoded frames in one session** —
-about 18 minutes at 60 fps, 45 minutes at 24 fps. The picture corrupts and `dmesg` fills with
-`mpp_rkvdec2 ...rkvdec-core: resetting for err 0x23` at roughly 24 resets per second.
+Long VP9 playback (8- or 10-bit) broke after roughly **65,536 decoded frames in one session** — about 18 minutes at
+60 fps — with `dmesg` filling with `mpp_rkvdec2 ...rkvdec-core: resetting for err 0x23` / `0x107` and frames silently
+lost. **This driver is not involved**: it reproduces with Rockchip's own headless `mpi_dec_test`.
 
-**This driver is not involved.** It reproduces with Rockchip's own headless `mpi_dec_test` — no VA-API, no
-display, no dma-buf export.
+**Root cause (October 2026):** VP9 has no picture order count, so MPP's parser labels frames with a counter that never
+wraps, and the RK3588's two decoder cores compare those labels in 16 bits when one waits for a frame on the other. Once
+the counter passes 65,535 the wait breaks. Upstream MPP had hidden this by running VP9 on one core only
+(`support_fast_mode = 0` on RK3588); the Ubuntu-Rockchip PPAs and Jellyfin's bundled MPP re-enable both cores and so
+hit the fault. Keeping the counter within 16 bits removes it and keeps both cores: 77,400 decoder jobs with zero resets
+and about 27 % more VP9 throughput than the single-core guard (Orange Pi 5B, `mpi_dec_test`); Chromium, Firefox and mpv
+ran 4K60 VP9 past the old failure point with no resets, and the same change ran clean on an RK3588 (Orange Pi 5 Plus).
 
-The fault is in the `librockchip_mpp` your system is using. Several downstream builds carry a patch that
-reverts upstream's `fix[hal_vp9d]: not support fast mode for rk3588`, re-enabling two parallel VP9 HAL tasks
-on a SoC where upstream deliberately disables them. Upstream MPP is unaffected at every point tested,
-including the exact commit those builds branch from — reverting that one patch runs clean past 73,000 frames.
+**Fix:** librockchip-mpp1 `1.5.0+git20260805.a8b19653+ds-0ubuntu1~rk1+pd33` or later (Plaid Pi; patch 0008 in its
+source package), or the patch submitted upstream as rockchip-linux/mpp PR #976. Any MPP with upstream's single-core
+guard is also safe, at the lower throughput.
 
-**Fix:** use an MPP built from upstream — https://github.com/rockchip-linux/mpp — or apply this one-line
-change to whatever build you have. It is `mpp/hal/rkdec/vp9d/hal_vp9d_api.c`, in the branch that selects the
-`vdpu34x`/`vdpu38x` HAL, restoring what upstream does on this SoC:
-
-```diff
-     } else if (hw_id == HWID_VDPU34X || hw_id == HWID_VDPU38X) {
-         p->api = &hal_vp9d_vdpu34x;
-         cfg->support_fast_mode = 1;
-         if (mpp_get_soc_type() == ROCKCHIP_SOC_RK3588)
--            cfg->cfg->status.hal_task_count = 2;
-+            cfg->support_fast_mode = 0;
-     } else {
-```
-
-Measured on an Orange Pi 5B (RK3588S), both decoder cores verified evenly loaded via per-core
-`/proc/interrupts` deltas: the unpatched build storms at ~64,700 frames; with this change it ran 116,787
-frames with zero resets, and 72,057 through mpv and VA-API. Cost is about 13% decode throughput on 4K 10-bit
-VP9 (~187 → ~163 fps headless), which is headroom rather than smoothness — display-paced playback went
-130 → 129 fps.
-
-**Not affected:** 8-bit VP9 (Profile 0) at any length, and HEVC Main10 — both verified clean past 70,000
-frames on the same affected library. Anything that recreates the decoder resets the count, so short clips and
-browser streaming (which rebuilds the decoder on quality changes) rarely show it.
-
-**Workaround** if you cannot change the library — costs ~10-17% decode throughput, well clear of real-time:
+**Workaround** if you cannot change the library — costs ~17 % decode throughput, lost at reboot:
 
     echo 1 > /proc/mpp_service/rkvdec-core1/disable_work
 
@@ -345,11 +325,17 @@ syncs each picture before submitting the next (Firefox, FFmpeg's download path) 
 with refresh 0. With librockchip-mpp1 `1.5.0+git20260805.a8b19653+ds-0ubuntu1~rk1+pd32` or later (Plaid Pi; patches
 in its source package) on RK3588, MPP keeps that decode and the driver commits its reference slots afterwards: one
 AV1-engine job per picture. With any other MPP (stock, distro, non-RK3588) the driver decodes such a picture a second
-time with the real mask: correct, but about 1.5 jobs per picture — at 10.5 ms per 4K job that is more than a 4K60
-frame budget, and Firefox drops most 4K60 AV1 frames, then switches to software. `RK_VAAPI_LOG` says which path is in
-use ("deferred refresh available"/"off (this MPP lacks it ...)"); `RKVA_AV1_NO_DEFER=1` forces the re-decode.
+time with the real mask: correct, but about 1.5 jobs per picture — at 10.5 ms per 4K job that is nearly the whole
+16.7 ms 4K60 frame budget. With 3.0.0 Firefox dropped most 4K60 AV1 frames there and switched to software; 3.5.0 on
+such MPP builds has only been measured through ffmpeg (same speed as 3.0.0), not in Firefox. `RK_VAAPI_LOG` says which
+path is in use ("deferred refresh available" / "off (this MPP lacks it ...)" — the only proof that the patched MPP is
+active; a package version alone is not); `RKVA_AV1_NO_DEFER` (any value) forces the re-decode.
 
-## KI-15: AV1 — with a non-Plaid MPP, a client that never waits can show its newest picture before it is decoded (v3.5.0)
+**Workaround:** install Plaid Pi's MPP (`+pd32` or later) on RK3588. Firefox tip: `media.video-queue.hw-accel-size` = 10
+in about:config lets Firefox queue more decoded frames (YouTube 4K60 AV1 drops went from about 8 % to 1.2–1.5 % after
+start-up on an Orange Pi 5B).
+
+## KI-15: AV1 in Chrome/Chromium with other MPP builds — the newest picture waits for the next (last frame, WebRTC) (v3.5.0)
 
 **Status:** fixed with Plaid Pi's MPP · open with other MPP builds, same as 3.0.0
 
@@ -363,6 +349,8 @@ frame of a stream comes out right. With any other MPP, decoding every picture ea
 there the newest picture is still held: the last frame of a non-looping AV1 video in Chromium shows the surface's old
 content, and low-delay playback (WebRTC, WebCodecs) may show stale frames. 3.0.0 behaves the same way.
 
+**Workaround:** Plaid Pi's MPP (`+pd32` or later) on RK3588.
+
 ## KI-16: AV1 in Chrome/Chromium — a rare old frame mid-stream when the browser runs out of decoded pictures (v3.5.0)
 
 **Status:** open · same as 3.0.0 · start-up flicker fixed in 3.5.0
@@ -373,17 +361,51 @@ blocking ... evidence points to it actually waiting". MPP has no dma-buf fence, 
 written it shows the surface's previous content (or green on a surface's first use).
 
 - **Playback start and quality switches — fixed in 3.5.0.** A new decoder (start, every YouTube quality step) decodes
-  its first 25 shown pictures before vaEndPicture returns (`RKVA_PACE_START`). 3.0.0 and 3.5.0~rc1/rc2 flickered
-  there. Measured on an Orange Pi 5B with Chromium 154: first plays of the BBB 4K60 AV1 film with a scanout checker
-  (every vblank of the composited screen): glitches in the first 6 s in 6 of 10 launches with rc2, 0 of 10 with rc3; an
-  MSE 1080p→4K start/switch frame checker: 0 bad frames in every start and switch window over 5 runs.
+  its first 25 shown pictures before vaEndPicture returns (`RKVA_PACE_START`). 3.0.0 and the 3.5.0 release candidates
+  flickered there. Measured on an Orange Pi 5B with Chromium 154 and MPP `+pd32`: first plays of the Big Buck Bunny
+  4K60 AV1 film with a scanout checker (every vblank of the composited screen): glitches in the first 6 s in 6 of 10
+  launches with the earlier candidate, none seen in 10 with 3.5.0; a Media Source Extensions 1080p→4K start/switch
+  frame checker: 0 bad frames in every start and switch window. Not measured with other MPP builds (there the start
+  window re-decodes instead).
 - **Still open: a rare old frame mid-stream.** When Chromium's renderer runs dry — a heavy 4K KEY frame (100-155 ms in
   the decoder), a hard stretch of the video — it shows each picture as soon as it has it, sometimes before the decode
-  has landed: one old frame for one or two screen refreshes, a few times a minute at most in 4K60 tests (rc2 and 3.5.0
-  alike; 3.0.0 showed more). Waiting for every picture (`RKVA_PACE_START=all`) closes it but drops 17-22 % of 4K60
+  has landed: one old frame for one or two screen refreshes, occasionally in 4K60 tests (the 3.5.0 candidates alike;
+  3.0.0 showed more). 3.5.0 also closes one driver-side way for this to happen (a frame finishing after its surface was
+  re-targeted), so it may now be rarer. Waiting for every picture (`RKVA_PACE_START=all`) closes it but drops 17-22 % of 4K60
   frames. Next version: a dma-buf fence on each surface (Rockchip's Chromium patches report the Mali blob's implicit
   sync as unreliable, so this needs testing), or choosing MPP's reference slots in the driver so no picture is ever
   held. Firefox, mpv and FFmpeg wait on their pictures and are not affected.
+
+---
+
+## KI-17: H.264 High 10 (10-bit) in Firefox — software, and the output differs from a software decode (v3.5.0)
+
+**Status:** open · low impact (10-bit H.264 is rare outside anime rips)
+
+The driver advertises H.264 High 10, but Firefox decodes such streams in software, and the hardware output has been seen
+to differ from a software decode. Every other profile in the table is verified. Not investigated further yet.
+
+---
+
+## KI-18: GStreamer needs `GST_VA_ALL_DRIVERS=1` (v3.5.0)
+
+**Status:** external (GStreamer's VA plugin whitelists drivers) · untested as an importing client
+
+GStreamer's `va` plugin only registers decoders for drivers it knows; set `GST_VA_ALL_DRIVERS=1` in the environment to
+use this one. The import-ahead behaviour this driver paces for (KI-16) has only been tested with Chromium; GStreamer
+pipelines were tried at 1080p60 AV1 only.
+
+---
+
+## KI-19: 8-bit video in Firefox on Arm's proprietary Mali driver needs a helper or a Firefox patch (v3.5.0)
+
+**Status:** external (Mozilla Bug 2078820, patch v3 submitted) · Plaid Pi ships the helper
+
+With Arm's libmali (the usual GPU driver on vendor kernels), Firefox's import of the 8-bit chroma plane (GR88) fails with
+`EGL_BAD_MATCH` and Firefox falls back to software for every 8-bit video; 10-bit imports fine. This is Firefox + the GL
+driver, not this VA-API driver. Plaid Pi ships a small library on Firefox's library path that redoes that import as R16;
+a Firefox patch that does the same is under review (Bug 2078820). With Mesa (Panthor) the problem does not exist. The
+Firefox figures in this file were measured with that helper or patch in place.
 
 ---
 

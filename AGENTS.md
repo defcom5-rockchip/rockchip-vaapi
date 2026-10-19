@@ -12,10 +12,11 @@ Releases are triggered by the human maintainer, never autonomously.
 
 ## Invariants — do not "fix" these
 1. `rk_QueryConfigProfiles` lists ONLY verified codecs: H264 CB/Main/High and
-   High10, VP8, VP9 Profile 0 and Profile 2, HEVC Main and Main10. The three
-   10-bit profiles are advertised by default since v2.1.3; `RKVA_HIDE_10BIT=1`
-   hides them for a client that cannot present P010 (`RKVA_ADVERTISE_ALL` is a
-   no-op alias). Adding or removing a profile is the maintainer's call after
+   High10, VP8, VP9 Profile 0 and Profile 2, HEVC Main and Main10, and since
+   3.0.0 AV1 Main (8- and 10-bit, one profile). The three 10-bit profiles are
+   advertised by default since v2.1.3; `RKVA_HIDE_10BIT=1` hides them for a
+   client that cannot present P010 and `RKVA_HIDE_AV1=1` hides AV1 (the old
+   `RKVA_ADVERTISE_ALL` is gone). Adding or removing a profile is the maintainer's call after
    hardware soak, never an agent's.
 2. Export stride is 64-aligned (`(width+63)&~63`). 16-align green-screens
    non-16-aligned VP9 widths (2970×2160 reproducer in REPRO.md). The 8-bit
@@ -101,7 +102,7 @@ Releases are triggered by the human maintainer, never autonomously.
 - **libva names the driver after the render node's kernel driver.** On Panthor/Panfrost
   stacks that is not "rockchip"; the deb ships symlinks (KI-9). Keep them when repackaging.
 
-## Codec state (2026-09-06, all hardware-verified on RK3588S)
+## Codec state (2026-09-06, all hardware-verified on RK3588S; AV1 Main 8/10-bit added in 3.0.0 — see README)
 Works in hardware, pixel-identical to software decode:
 - H.264 8-bit, **including B-frame streams** (High profile, 720p60 broadcast-style)
 - HEVC Main 8-bit and **Main10 10-bit**, including B-frames — a full 12-minute

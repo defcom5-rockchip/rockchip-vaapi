@@ -23,7 +23,7 @@ Key features:
 - Zero-copy DRM PRIME 2 surface export (NV12 and P010, DMABUF)
 - Fixes for several decoders on one VA display, multi-threaded clients and players that
   abandon decoders early (Firefox's media process, ffmpeg 8, mpv) in v2.5.0 — see KI-12
-- 4K60 AV1 in Firefox (v3.5.0): one AV1-engine job per picture with Plaid Pi's MPP (KI-14), 8-bit zero-copy
+- 4K60 AV1 in Firefox (v3.5.0 "Pepper SGT"): one AV1-engine job per picture with Plaid Pi's MPP `+pd32` or later (other MPP builds re-decode, [known issue KI-14](KNOWN-ISSUES.md#ki-14-av1-decoded-twice-per-early-synced-picture-without-plaid-pis-mpp-v350)), 8-bit zero-copy
   export, a per-decoder output thread instead of a 1 ms polling sync; in Chrome/Chromium no more green or old frames
   at playback start and quality switches (see below, KI-15 and KI-16)
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)
@@ -85,8 +85,9 @@ counts in Chrome, Firefox and mpv, the picture checked by eye in Chrome and Fire
 Film grain is **not** applied (MPP does not synthesise it on RK3588): grainy streams decode to the clean picture.
 `RKVA_AV1_WRITER_DEBUG=1` prints the bit writer's warnings (`2` adds its debug trace), `RKVA_DUMP_AV1=file` saves the stream sent to MPP.
 AV1 needs MPP's `av1d` and the RK3588's AV1 decoder (RK356x has none); film grain depends on MPP (#974).
-The release is named after Number Nine's Pepper boards, the co-processor graphics cards of the late 1980s — this
-driver's whole job is handing video work to a co-processor.
+Releases are named after Number Nine's Pepper boards, co-processor graphics cards of the late 1980s — this driver's
+whole job is handing video work to a co-processor. 3.0.0 was "Plaid Number Nine"; 3.5.0 is "Pepper SGT", after the
+board of that name (announced May 1987: a TMS34010 beside an Intel 82786, 1–4 MB, ISA).
 
 ## Dependencies
 
@@ -199,7 +200,7 @@ This fork (`defcom5-rockchip/rockchip-vaapi`) builds on the base driver above, a
   attribution table are in `evidence/2026-10-11-av1-fluster/`.
 
 These fork additions were developed with the assistance of **Claude (Fable 5)** and were
-reviewed, tested, and validated on real hardware — **Orange Pi 5B (RK3588S)**, panfork
+reviewed, tested, and validated on real hardware — **Orange Pi 5B (RK3588S)**, Arm's Mali driver (libmali g24p0) and, earlier, panfork
 Mesa 23, Firefox 154 VA-API — by **defcom5-rockchip**. (The base-driver validation credit
 above belongs to Eduardo García-Mádico Portabella; it does not cover these fork additions.)
 
@@ -235,7 +236,7 @@ licenses and are not redistributed here.
 | **GStreamer project** (Intel / He Junyan, Georg Ottinger) | the AV1 bit writer and parser headers vendored in `src/av1/` |
 | **defcom5-rockchip** | fork maintainer: 10-bit zero-copy (GR1616 fix), Main10/High10/VP9 P2, Chrome created-depth export, Panthor/Panfrost libva names, the RGA3 NV15→P010 export lane, AV1 (v3.0.0), the KI test ladder, releases — and the RK3588 kernel-side fixes that surfaced along the way (Armbian `linux-rockchip` PR #548) |
 | **Claude** (Anthropic) — Opus 5.5, Fable 5.1, Fable 5, Opus 5, Sonnet 4.6 | co-engineer on the fork, credited per commit in the `Co-Authored-By` trailers: root-cause work, patches, test tooling and the documentation |
-| **JFL** (Armbian forum) | test partner on the Orange Pi 5 Plus / Armbian vendor kernel: confirmed Chrome 10-bit HEVC and VP9 Profile 2 hardware playback with 2.1.5, measured the 2.2.0-rc1 RGA lane (97 → 1 dropped frames at 4K60 HDR), and reported the Panthor libva naming that became the shipped symlinks |
+| An Armbian forum tester (RK3588 Orange Pi 5 Plus / Armbian vendor kernel) | confirmed Chrome 10-bit HEVC and VP9 Profile 2 hardware playback with 2.1.5, measured the 2.2.0-rc1 RGA lane (97 → 1 dropped frames at 4K60 HDR), and reported the Panthor libva naming that became the shipped symlinks |
 | **nyanmisaka** (`ffmpeg-rockchip`, `jellyfin-ffmpeg`) | the RGA3 P010 recipe (`RK_FORMAT_YCbCr_420_SP_10B` + the 10-bit flags) the export lane follows, and the Rockchip lanes in Jellyfin's FFmpeg |
 
 ## RGA export lane (10-bit)
@@ -259,9 +260,28 @@ once the picture from two pictures earlier is in its surface, about what 3.0.0 h
 `0` turns pacing off and brings Chromium's old-picture and green flashes back). For a client that imports its surfaces
 before decoding into them (Chromium, GStreamer) a new decoder — playback start, every YouTube quality step — decodes
 its first 25 shown pictures before vaEndPicture returns (`RKVA_PACE_START=n`, `RKVA_PACE_START_MS=n` adds a time floor),
-which removes the green/old-frame flicker 3.0.0 and the 3.5.0 release candidates 1-2 showed there; with Plaid Pi's MPP
+which removed the green/old-frame flicker 3.0.0 showed there (none seen in 10 measured first plays, with Plaid Pi's MPP); with Plaid Pi's MPP
 every later shown picture is decoded at once too, so the last frame of a stream is right (KI-15). A rare old frame can
 still show mid-stream when Chromium runs out of decoded pictures (KI-16, as in 3.0.0).
+
+### Environment switches
+
+All default to the tested behaviour; set one only to diagnose a problem. Any value counts as "set", including `0`,
+unless a value is listed.
+
+| Variable | Default | Effect | When to use |
+|---|---|---|---|
+| `RK_VAAPI_LOG=file` | off | per-call log with timings; "deferred refresh available" shows the patched MPP is in use | any report |
+| `RKVA_HIDE_10BIT` | off | hide the 10-bit profiles | a client that cannot present P010 |
+| `RKVA_HIDE_AV1` | off | hide AV1 | an AV1 problem you want to route around |
+| `RKVA_ZERO_COPY=0` | on | 8-bit frames are copied into the surface instead of exporting MPP's buffer | a client that shows a stale 8-bit picture |
+| `RKVA_SYNC_POLL=1` | off | the 1 ms polling vaSyncSurface of 3.0.0 instead of the output thread | to compare with 3.0.0 |
+| `RKVA_PACE=n` (0–7) | 2 | AV1 pacing depth for clients that never wait on a picture; `0` = off | Chromium old-picture/green flashes |
+| `RKVA_PACE_START=n` (0–64, or `all`) | 25 | shown pictures a new decoder decodes before vaEndPicture returns; `all` = every picture | start/switch flicker vs dropped frames |
+| `RKVA_PACE_START_MS=n` (≤ 10000) | 0 | the start window also lasts at least this long | slow starts |
+| `RKVA_AV1_NO_DEFER` | off | never use MPP's deferred refresh (always re-decode) | to compare with other MPP builds |
+| `RKVA_RGA_P010=0` / `RKVA_RGA_COPY=1` | RGA for 10-bit, CPU for 8-bit | choose the copy engine | RGA problems |
+| `RKVA_AV1_WRITER_DEBUG=1`/`2`, `RKVA_DUMP_AV1=file` | off | AV1 bit-writer warnings / dump the stream sent to MPP | AV1 stream problems |
 
 All of this needs the driver to be built against librga. The v2.2.0 release download was
 built without it (it does not link `librga.so.2`), so on that build 10-bit always used the

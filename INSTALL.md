@@ -35,8 +35,20 @@ grep CmaTotal /proc/meminfo                     # → CmaTotal: 524288 kB
 ## Option A: Install from Debian package (recommended)
 
 ```bash
-sudo apt install ./rockchip-vaapi_2.5.0-1_arm64.deb
+sudo apt install ./rockchip-vaapi_3.5.0-1_arm64.deb
 ```
+
+**Upgrading from 3.0.0:** the same command. If an image holds the package (`apt-mark showhold` lists it), add
+`--allow-change-held-packages`. Your environment answer (below) carries over; `sudo dpkg-reconfigure rockchip-vaapi`
+changes it.
+
+**Which MPP do I need?** Every codec decodes correctly with any `librockchip-mpp1` ≥ 1.5.0 (stock Ubuntu, the
+Ubuntu-Rockchip PPAs, Armbian). Two things need Plaid Pi's build of it, `1.5.0+git20260805.a8b19653+ds-0ubuntu1~rk1+pd32`
+or later (patches in its source package), on RK3588: 4K60 AV1 in Firefox (otherwise each early-synced AV1 picture is
+decoded twice and Firefox cannot keep up, KNOWN-ISSUES KI-14) and clean AV1 last frames in Chrome/Chromium (KI-15).
+`+pd33` also fixes the VP9 reset storm (KI-10). The package's `Recommends` only hints at this; the proof that the patched
+MPP is in use is the line "deferred refresh available" in an `RK_VAAPI_LOG` log. GStreamer additionally needs
+`GST_VA_ALL_DRIVERS=1` (KI-18).
 
 This installs `rockchip_drv_video.so` to `/usr/lib/aarch64-linux-gnu/dri/` with the
 `panthor`/`panfrost` name links (KI-9), and replaces the older `rockchip-vaapi-driver`
@@ -89,7 +101,7 @@ sudo install -m 755 rockchip_drv_video.so /your/path/rockchip_drv_video.so
 tar --exclude='rockchip-vaapi/debian' \
     --exclude='rockchip-vaapi/*.so' \
     --exclude='rockchip-vaapi/src/*.o' \
-    -czf rockchip-vaapi_2.5.0.orig.tar.gz rockchip-vaapi/
+    -czf rockchip-vaapi_3.5.0.orig.tar.gz rockchip-vaapi/
 
 # Build binary package
 cd rockchip-vaapi

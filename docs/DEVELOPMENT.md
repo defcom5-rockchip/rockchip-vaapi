@@ -357,7 +357,7 @@ What the VA parameters do not say, and how it is handled:
   picture, or green on a surface's first use (3.5.0~rc1, caught by eye in a blind A/B and by a frame checker that
   compares every presented frame with 3.0.0's). Until a context's client has waited on a picture it rendered, and
   again after 32 pictures without such a wait, EndPicture waits until the picture from `RKVA_PACE` (default 2)
-  pictures earlier is in its surface. The wait holds no driver lock and uses a monotonic cap of 150 ms (300 ms for a
+  pictures earlier is in its surface. The wait holds no driver lock and uses a monotonic cap of 150 ms (1500 ms for a
   decoder's first 4 pictures, which include MPP's info change; Chromium holds its process-wide VA lock across
   vaEndPicture; measured waits at 4K60: mean 12-14 ms, max 62 ms playing, 91 ms around seeks, first output up to
   133 ms after mpp_init). It ends early when the surface is re-targeted or destroyed or the decoder destroyed, and in poll mode (`RKVA_SYNC_POLL=1`, or no output thread) drains MPP itself. AV1 only: the other codecs
@@ -367,11 +367,11 @@ What the VA parameters do not say, and how it is handled:
   shows its first picture at once and keeps playing through a YouTube rung switch (a new decoder) while a new 4K
   decoder is slow for its first pictures (first output 44-133 ms after mpp_init, every surface and copy a first
   touch, temporal units with four hidden pictures before the shown one). Green frames at every start and switch on
-  3.0.0 and 3.5.0~rc2 (G-Man, Chrome 155 and Chromium 154 on YouTube; the start/switch frame checker: MSE 1080p ->
+  3.0.0 and 3.5.0~rc2 (seen by eye in Chrome 155 and Chromium 154 on YouTube; the start/switch frame checker: MSE 1080p ->
   4K, every presented frame from the first against a software-decode reference; and a root read-only scanout
   checker that samples the composited framebuffer every vblank on first plays of the BBB film). So a paced context's
   first `RKVA_PACE_START` (25) shown pictures are decoded at once (a held picture forced early: 'H' with a capable MPP,
-  a later re-decode otherwise) and EndPicture waits for each until it is decoded (3 s limit only: a 300 ms cap fired
+  a later re-decode otherwise) and EndPicture waits for each until it is decoded (3 s limit only: a 300 ms cap had fired
   on a new 4K decoder's first picture in 1 of 7 launches and showed green). 3 pictures guarded the start, the switch
   needed 12, and on screen 12 still left a stale frame right after the film's fade-in (Chromium still catching up):
   screen glitches per first play, 30 s, 3 launches each: 12 -> 3/0/1, 25 -> 0/0/0. `RKVA_PACE_START_MS` adds a time
