@@ -1,3 +1,16 @@
+rockchip-vaapi (3.5.0~rc4-1) resolute; urgency=medium
+
+  * Release candidate 4 for 3.5.0: the four-agent code review fixes (c5b4845).
+    assign_mpp_frame compares the picture generation again under the surface
+    lock before installing a frame (a surface re-targeted during the copy no
+    longer gets the old picture marked decoded -- a candidate cause of the
+    rare mid-stream stale frame in Chromium, KI-15/16); vaSyncSurface waits on
+    CLOCK_MONOTONIC; the AV1 start window ends at the first wait that hits its
+    3 s cap; a failed early submit or tile-buffer allocation releases the
+    surfaces' waiters.  No behaviour change on the tested paths.
+
+ -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Mon, 19 Oct 2026 03:31:53 -0700
+
 rockchip-vaapi (3.5.0~rc3-1) resolute; urgency=medium
 
   * Release candidate 3 for 3.5.0: no more green or old frames at playback
