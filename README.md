@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/branding/number-nine-lockup-dark.svg">
+    <img src="docs/branding/number-nine-lockup.svg" alt="Number Nine" width="560">
+  </picture>
+</p>
+
 # rockchip-vaapi
 
 VA-API driver for Rockchip RK3588 / RK3576 that bridges **libva** to
