@@ -14,6 +14,23 @@ Copyright: 2026 Eduardo García-Mádico Portabella <woodyst@gmail.com>
            2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
 License: LGPL-2.1+
 
+Files: docs/branding/*.svg docs/branding/*.png
+Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+License: all-rights-reserved
+ The Number Nine logo files in docs/branding/ (SVG and PNG) are © 2026 defcom5-rockchip, all rights reserved. They may
+ be used to refer to this project — for example in articles, reviews, package listings or link previews. Scaling,
+ converting between SVG and PNG and placing them on any background are fine; changes to the artwork, colours or
+ proportions are modifications. Copies of this repository (forks, mirrors, source archives, packages) may include these
+ files unchanged, but a fork published under another name must not use the logo as its own. Any other use, including
+ modified versions or use for another project, needs permission: ask in an issue at
+ https://github.com/defcom5-rockchip/rockchip-vaapi/issues. The logo is not covered by the LGPL-2.1-or-later licence,
+ which covers the rest of the repository.
+Comment:
+ Not installed by the binary package (debian/docs does not list
+ docs/branding/). The typefaces outlined in the artwork, Big Shoulders
+ Display and Instrument Sans, are under the SIL Open Font License 1.1;
+ no font files are included.
+
 Files: src/hevc.c src/hevc.h
 Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
 Comment:

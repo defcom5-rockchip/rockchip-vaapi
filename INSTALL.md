@@ -42,11 +42,14 @@ sudo apt install ./rockchip-vaapi_3.5.0-1_arm64.deb
 `--allow-change-held-packages`. Your environment answer (below) carries over; `sudo dpkg-reconfigure rockchip-vaapi`
 changes it.
 
-**Which MPP do I need?** Every codec decodes correctly with any `librockchip-mpp1` ≥ 1.5.0 (stock Ubuntu, the
-Ubuntu-Rockchip PPAs, Armbian). Two things need Plaid Pi's build of it, `1.5.0+git20260805.a8b19653+ds-0ubuntu1~rk1+pd32`
-or later (patches in its source package), on RK3588: 4K60 AV1 in Firefox (otherwise each early-synced AV1 picture is
-decoded twice and Firefox cannot keep up, KNOWN-ISSUES KI-14) and clean AV1 last frames in Chrome/Chromium (KI-15).
-`+pd33` also fixes the VP9 reset storm (KI-10). The package's `Recommends` only hints at this; the proof that the patched
+**Which MPP do I need?** Every codec decodes with any `librockchip-mpp1` ≥ 1.5.0 (stock Ubuntu, the Ubuntu-Rockchip
+PPAs, Armbian), but the PPA builds lose frames in VP9 sessions past ~65,536 frames (KI-10). Two more things need Plaid Pi's MPP build on RK3588: 4K60 AV1 in Firefox (otherwise each
+early-synced AV1 picture is decoded twice and Firefox cannot keep up, KNOWN-ISSUES KI-14) and clean AV1 last frames in
+Chrome/Chromium (KI-15). The minimum is `1.5.0+git20260805.a8b19653+ds-0ubuntu1~rk1+pd32` (patches in its source
+package); `+pd33` and later also fix the VP9 reset storm (KI-10). `+pd34` is published for Ubuntu 24.04 and 26.04 at
+https://github.com/defcom5-rockchip/mpp/releases/tag/pd34:
+`sudo apt install ./librockchip-mpp1_…_arm64.deb` (the release notes give the exact file name for each Ubuntu release
+and how to go back). The package's `Recommends` only hints at this; the proof that the patched
 MPP is in use is the line "deferred refresh available" in an `RK_VAAPI_LOG` log. GStreamer additionally needs
 `GST_VA_ALL_DRIVERS=1` (KI-18).
 

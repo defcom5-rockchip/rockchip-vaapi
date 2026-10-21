@@ -228,15 +228,23 @@ Long VP9 playback (8- or 10-bit) broke after roughly **65,536 decoded frames in 
 lost. **This driver is not involved**: it reproduces with Rockchip's own headless `mpi_dec_test`.
 
 **Root cause (October 2026):** VP9 has no picture order count, so MPP's parser labels frames with a counter that never
-wraps, and the RK3588's two decoder cores compare those labels in 16 bits when one waits for a frame on the other. Once
-the counter passes 65,535 the wait breaks. Upstream MPP had hidden this by running VP9 on one core only
-(`support_fast_mode = 0` on RK3588); the Ubuntu-Rockchip PPAs and Jellyfin's bundled MPP re-enable both cores and so
-hit the fault. Keeping the counter within 16 bits removes it and keeps both cores: 77,400 decoder jobs with zero resets
-and about 27 % more VP9 throughput than the single-core guard (Orange Pi 5B, `mpi_dec_test`); Chromium, Firefox and mpv
-ran 4K60 VP9 past the old failure point with no resets, and the same change ran clean on an RK3588 (Orange Pi 5 Plus).
+wraps, and the RK3588's two decoder cores behave as if they compare those labels in 16 bits when one waits for a frame
+on the other. Once the counter passes 65,535 the wait breaks. Upstream MPP had hidden this by keeping one VP9 frame in
+flight on RK3588 (`support_fast_mode = 0`; the cores still alternate); the Ubuntu-Rockchip PPAs and Jellyfin's bundled
+MPP revert that guard, run two frames at once and so hit the fault. Keeping the counter within 16 bits removes it with
+two frames in flight: in its first form (`+pd33`, two tasks) 77,400 decoder jobs with zero resets and about 27 % more
+10-bit throughput than the one-frame guard (Orange Pi 5B, `mpi_dec_test`); Chromium, Firefox and mpv ran 4K60 VP9 past
+the old failure point with no resets, and the same change ran clean on an RK3588 (Orange Pi 5 Plus).
 
 **Fix:** librockchip-mpp1 `1.5.0+git20260805.a8b19653+ds-0ubuntu1~rk1+pd33` or later (Plaid Pi; patch 0008 in its
-source package), or the patch submitted upstream as rockchip-linux/mpp PR #976. Any MPP with upstream's single-core
+source package). `+pd34` carries the form Rockchip's reviewer asked for in
+[rockchip-linux/mpp PR #976](https://github.com/rockchip-linux/mpp/pull/976): no RK3588 exception, MPP's default task
+count. On synthetic 4K60 clips it decodes at 214 / 233 fps (10-/8-bit) against 149 / 181 with the guard, and ran
+201,600 frames through three wraps at 214 / 231 fps with 0 resets (`mpi_dec_test`, Orange Pi 5B). Rockchip reproduced
+the fault and says the change will go through its internal Gerrit review when merged; the PR is still open. `+pd34` is
+published for Ubuntu 24.04 and 26.04 at
+https://github.com/defcom5-rockchip/mpp/releases/tag/pd34: `sudo apt install ./librockchip-mpp1_…_arm64.deb` (exact
+file names per Ubuntu release, and the Plaid Pi 5.0 case, in the release notes). Any MPP with upstream's one-frame
 guard is also safe, at the lower throughput.
 
 **Workaround** if you cannot change the library — costs ~17 % decode throughput, lost at reboot:
@@ -331,7 +339,8 @@ such MPP builds has only been measured through ffmpeg (same speed as 3.0.0), not
 path is in use ("deferred refresh available" / "off (this MPP lacks it ...)" — the only proof that the patched MPP is
 active; a package version alone is not); `RKVA_AV1_NO_DEFER` (any value) forces the re-decode.
 
-**Workaround:** install Plaid Pi's MPP (`+pd32` or later) on RK3588. Firefox tip: `media.video-queue.hw-accel-size` = 10
+**Workaround:** install Plaid Pi's MPP (`+pd32` or later) on RK3588 — published for Ubuntu 24.04 and 26.04 at
+https://github.com/defcom5-rockchip/mpp/releases/tag/pd34. Firefox tip: `media.video-queue.hw-accel-size` = 10
 in about:config lets Firefox queue more decoded frames (YouTube 4K60 AV1 drops went from about 8 % to 1.2–1.5 % after
 start-up on an Orange Pi 5B).
 
@@ -349,7 +358,8 @@ frame of a stream comes out right. With any other MPP, decoding every picture ea
 there the newest picture is still held: the last frame of a non-looping AV1 video in Chromium shows the surface's old
 content, and low-delay playback (WebRTC, WebCodecs) may show stale frames. 3.0.0 behaves the same way.
 
-**Workaround:** Plaid Pi's MPP (`+pd32` or later) on RK3588.
+**Workaround:** Plaid Pi's MPP (`+pd32` or later) on RK3588 — published for Ubuntu 24.04 and 26.04 at
+https://github.com/defcom5-rockchip/mpp/releases/tag/pd34.
 
 ## KI-16: AV1 in Chrome/Chromium — a rare old frame mid-stream when the browser runs out of decoded pictures (v3.5.0)
 

@@ -7,13 +7,16 @@
 
 # rockchip-vaapi
 
+*Number Nine* is this project's name, a tribute to the 1980s graphics-card maker; not affiliated with or endorsed by
+Number Nine, the successors to its assets, or Rockchip.
+
 VA-API driver for Rockchip RK3588 / RK3576 that bridges **libva** to
 **librockchip-mpp** (MPP), enabling hardware-accelerated video decode in
 applications such as Firefox.
 
 **Author:** Eduardo García-Mádico Portabella — EGP Sistemas
 **Contact:** woodyst@gmail.com
-**License:** LGPL-2.1-or-later
+**License:** LGPL-2.1-or-later (the logo in docs/branding/ excepted)
 
 ---
 
@@ -86,7 +89,7 @@ sequence header, frame header, tile-group framing — with a vendored copy of GS
 from the next picture's reference map, so every picture is held until its successor arrives (or until the client
 syncs it, when it is decoded at once; with Plaid Pi's patched MPP — librockchip-mpp1 `+pd32` and later, RK3588 —
 MPP keeps that decode and stores it into the right slots afterwards, otherwise the slot refresh follows as a second,
-hidden decode: one extra AV1-engine job per such picture, see KI-14). Conformance measured through
+hidden decode: one extra AV1-engine job per such picture, see [KI-14](KNOWN-ISSUES.md#ki-14-av1-decoded-twice-per-early-synced-picture-without-plaid-pis-mpp-v350)). Conformance measured through
 `ffmpeg -hwaccel vaapi` (see `evidence/2026-10-11-av1-fluster/`); decode on the AV1 engine confirmed by interrupt
 counts in Chrome, Firefox and mpv, the picture checked by eye in Chrome and Firefox.
 Film grain is **not** applied (MPP does not synthesise it on RK3588): grainy streams decode to the clean picture.
@@ -94,13 +97,16 @@ Film grain is **not** applied (MPP does not synthesise it on RK3588): grainy str
 AV1 needs MPP's `av1d` and the RK3588's AV1 decoder (RK356x has none); film grain depends on MPP (#974).
 Releases are named after Number Nine's Pepper boards, co-processor graphics cards of the late 1980s — this driver's
 whole job is handing video work to a co-processor. 3.0.0 was "Plaid Number Nine"; 3.5.0 is "Pepper SGT", after the
-board of that name (announced May 1987: a TMS34010 beside an Intel 82786, 1–4 MB, ISA).
+board of that name (announced May 1987: a TMS34010 beside an Intel 82786, 1–4 MB, ISA). The name is a tribute; this
+project is not affiliated with or endorsed by Number Nine or the successors to its assets.
 
 ## Dependencies
 
 Runtime:
 - `libva2` (>= 2.20; the driver exports only the 1.20 init entry point)
-- `librockchip-mpp1`
+- `librockchip-mpp1` (any ≥ 1.5.0 decodes every codec, but the Ubuntu-Rockchip PPA builds lose frames in VP9 sessions
+  past ~65,536 frames, KI-10; for that, and for 4K60 AV1 in Firefox and clean AV1 last frames in Chrome, KI-14/15, use
+  Plaid Pi's MPP build, published for Ubuntu 24.04 and 26.04 at https://github.com/defcom5-rockchip/mpp/releases/tag/pd34)
 - `librga2` (the RK3588 2D engine, used for the 10-bit conversion)
 
 Build:
@@ -215,6 +221,8 @@ above belongs to Eduardo García-Mádico Portabella; it does not cover these for
 
 **LGPL-2.1-or-later** — see [LICENSE](LICENSE). Per-file copyright is recorded in
 [debian/copyright](debian/copyright); the driver sources carry SPDX identifiers.
+The Number Nine logo in [docs/branding/](docs/branding/) is not under the LGPL. It is © 2026 defcom5-rockchip, all
+rights reserved; it may be used unmodified to refer to this project (details in its README).
 
 This is a fork, and the lineage matters:
 
