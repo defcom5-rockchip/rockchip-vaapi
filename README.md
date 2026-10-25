@@ -60,8 +60,8 @@ server-side transcode) instead of rendering a broken picture.
 | VP8   | Version 0–3 | ✅ advertised |
 | VP9   | Profile 0 (8-bit) | ✅ hardware decode, including non-16-aligned widths |
 | H.264 | High10 | ✅ advertised since v2.1.3, decodes on the hardware with its scaling matrices since v4.0.0 (KI-17); the two FREH10 vectors still differ (initial QP, KI-17); Firefox decodes High 10 in software by its own choice |
-| HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+), bit-exact vs software on streams with inline reference sets. ⚠ Slices that reference SPS-level reference-picture sets decode with wrong references and can stall the decoder (KI-5): most JCT-VC conformance vectors, 2026-10-23 |
-| HEVC  | Main10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 (mpv and Firefox verified; see KI-3 for the history); the KI-5 caveat applies |
+| HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+). v4.0.0 (in development): slices that use SPS-level reference-picture sets are rewritten with inline sets (KI-5) — JCT-VC-HEVC_V1 128/147 bit-exact on 2026-10-25 (17 in 3.5.0); the remaining 19 are listed in KI-5 |
+| HEVC  | Main10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 (mpv and Firefox verified; see KI-3 for the history); the KI-5 fix applies |
 | VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
 | AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; matches the Fluster reference checksums on 213/242 libaom and 31/36 Chromium conformance vectors, the rest explained in KI-13 (film grain is applied with the fixed MPP, see KI-13) |
 

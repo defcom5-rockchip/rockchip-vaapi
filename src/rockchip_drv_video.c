@@ -191,8 +191,8 @@ typedef struct {
 
     /* HEVC state for VPS/SPS/PPS reconstruction (Deep Ink phase 1.5) */
     VAPictureParameterBufferHEVC last_pp_hevc;
-    int  hevc_sets_plus1;        /* 0 = unknown, 1 = original SPS had 0 RPS sets, 2 = had >=1 */
-    int  hevc_sent_plus1;        /* what the last emitted SPS declared (same encoding) */
+    bool hevc_rewrite_rps;       /* the stream's SPS had RPS sets / long-term entries: slice headers are rewritten */
+    bool hevc_rewrite_warned;
     int  h264_l0_minus1, h264_l1_minus1;   /* learned PPS num_ref_idx_lX_default_active_minus1 (0 until a slice teaches us) */
     VAIQMatrixBufferH264 last_iq;          /* the client's scaling lists for the picture (ffmpeg sends them every picture) */
     bool         have_iq;
@@ -2001,58 +2001,58 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     if (hevc && n_slices) {
         const VAPictureParameterBufferHEVC *hp = &c->last_pp_hevc;
         bool irap = hp->slice_parsing_fields.bits.RapPicFlag;
-        /* How many short-term RPS sets did the encoder's SPS declare?  Only the
-           count CLASS matters to us (0 vs >=1): a slice-inline RPS parses as
-           st_ref_pic_set(num_sets), and that carries an
-           inter_ref_pic_set_prediction_flag iff the index is non-zero -- get the
-           class wrong and every slice header shifts by one bit.
-           VA-API hands us the real number in pp->num_short_term_ref_pic_sets, so
-           it is known at the very first picture.  Phase 1.5 guessed and then
-           corrected itself by re-emitting a DIFFERENT SPS mid-stream; re-activating
-           an SPS flushes the DPB, which destroys the earlier references a B-frame
-           needs ("Could not find ref with POC 0") and dropped every reordered
-           stream to software.  Decide once, here, and never change it. */
-        int want_plus1 = (hp->num_short_term_ref_pic_sets > 0) ? 2 : 1;
-        if (c->hevc_sets_plus1 == 0) {
-            c->hevc_sets_plus1 = want_plus1;
-            /* Cross-check against the slice-header probe on the first picture that
-               actually carries an inline RPS; disagreement is worth knowing about. */
-            if (hp->st_rps_bits > 0) {
-                for (int i = 0; i < c->n_pending; i++) {
-                    RKBuffer *b = buffer_by_id(d, c->pending[i]);
-                    if (!b || b->type != VASliceDataBufferType) continue;
-                    int det = hevc_detect_num_st_rps(b->data, (size_t)b->size * b->num_elements, hp);
-                    if (det >= 0 && (det + 1) != want_plus1)
-                        LOG("do_hevc: NOTE pp->num_short_term_ref_pic_sets=%u implies %d sets, "
-                            "slice probe says %d (trusting pp)",
-                            (unsigned)hp->num_short_term_ref_pic_sets, want_plus1 - 1, det);
-                    else if (det == -2)
-                        LOG("do_hevc: WARNING slice uses SPS-level RPS sets or inter-RPS "
-                            "prediction -> not reconstructible from VA-API");
-                    break;
-                }
-            }
-        }
+        /* Streams whose SPS carried short-term sets or long-term entries: the slices refer to them by index, and
+           VA-API does not carry the tables, so every independent slice header is rewritten below with the set
+           built from pp->ReferenceFrames, and the SPS we send declares none (3.5.0 sent a dummy set and left the
+           slices alone: a slice that picked an SPS set was then misparsed and the decoder stalled, KI-5). */
+        bool rewrite_rps = hp->num_short_term_ref_pic_sets > 0 || hp->num_long_term_ref_pic_sps > 0;
         if (irap || !c->sps_sent) {
             int main10 = hp->bit_depth_luma_minus8 > 0;
             uint8_t hdr[1024];
             int n;
             n = hevc_write_vps(hdr, sizeof(hdr), hp, main10);                 if (n > 0) PKT_APPEND(hdr, (size_t)n);
-            n = hevc_write_sps(hdr, sizeof(hdr), hp, main10, want_plus1 - 1); if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            n = hevc_write_sps(hdr, sizeof(hdr), hp, main10);                 if (n > 0) PKT_APPEND(hdr, (size_t)n);
             n = hevc_write_pps(hdr, sizeof(hdr), hp);                         if (n > 0) PKT_APPEND(hdr, (size_t)n);
-            c->sps_sent = true; c->hevc_sent_plus1 = want_plus1;
-            LOG("do_hevc: VPS/SPS/PPS synthesised (%zu bytes) %dx%d main10=%d irap=%d st_rps=%d st_rps_bits=%u",
+            c->sps_sent = true;
+            LOG("do_hevc: VPS/SPS/PPS synthesised (%zu bytes) %dx%d main10=%d irap=%d sps_sets=%u lt_sps=%u (rewrite=%d) st_rps_bits=%u",
                 pkt_sz, hp->pic_width_in_luma_samples, hp->pic_height_in_luma_samples,
-                main10, (int)irap, want_plus1 - 1, (unsigned)hp->st_rps_bits);
+                main10, (int)irap, (unsigned)hp->num_short_term_ref_pic_sets, (unsigned)hp->num_long_term_ref_pic_sps,
+                (int)rewrite_rps, (unsigned)hp->st_rps_bits);
         }
+        c->hevc_rewrite_rps = rewrite_rps;
     }
     static const uint8_t hevc_sc[4] = {0x00, 0x00, 0x00, 0x01};
+    const VASliceParameterBufferHEVC *hsp = NULL;
+    uint8_t *rew = NULL; size_t rew_cap = 0;
     for (int i = 0; i < c->n_pending; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
-        if (!b || b->type != VASliceDataBufferType) continue;
+        if (!b) continue;
+        if (hevc && b->type == VASliceParameterBufferType) { hsp = (const VASliceParameterBufferHEVC *)b->data; continue; }
+        if (b->type != VASliceDataBufferType) continue;
+        size_t blen = (size_t)b->size * b->num_elements;
         if (hevc) PKT_APPEND(hevc_sc, 4);
-        PKT_APPEND(b->data, (size_t)b->size * b->num_elements);
+        if (hevc && c->hevc_rewrite_rps && hsp) {
+            size_t need = (size_t)hsp->slice_data_byte_offset * 2 + 1024;      /* the escaped header, generously */
+            if (need > rew_cap) { free(rew); rew = malloc(need); rew_cap = rew ? need : 0; }
+            size_t data_start = 0;
+            int n = rew ? hevc_rewrite_slice_rps((const uint8_t *)b->data, blen, &c->last_pp_hevc, hsp->RefPicList,
+                                                 hsp->slice_data_byte_offset, rew, rew_cap, &data_start) : -1;
+            if (n > 0) { PKT_APPEND(rew, (size_t)n); PKT_APPEND((const uint8_t *)b->data + data_start, blen - data_start); continue; }
+            if (n < 0) {
+                /* The original slice against the SPS we send (no sets) would decode with wrong references or stall
+                   the decoder: refuse the picture instead; the client drops it or falls back to software. */
+                if (!c->hevc_rewrite_warned) {
+                    LOG("do_hevc: slice RPS rewrite failed (nal type %d, data offset %u): picture refused",
+                        (b->data ? ((const uint8_t *)b->data)[0] >> 1 & 0x3F : -1), (unsigned)hsp->slice_data_byte_offset);
+                    c->hevc_rewrite_warned = true;
+                }
+                free(rew); free(pkt_data);
+                return VA_STATUS_ERROR_DECODING_ERROR;
+            }
+        }
+        PKT_APPEND(b->data, blen);
     }
+    free(rew);
 #undef PKT_APPEND
 
     if (!pkt_sz) {

@@ -9,7 +9,8 @@ lists, field pictures, CAVLC multi-slice". Baseline: the same suites with driver
 | JVT-AVC_V1 | 74/135 | 111/135 | 0 |
 | JVT-FR-EXT | 27/69 | 67/69 | 0 |
 
-Files: `fluster-JVT-AVC_V1.csv`, `fluster-JVT-FR-EXT.csv` (Fluster's `-f csv -so` output: vector, result, time).
+Files: `fluster-JVT-AVC_V1.csv`, `fluster-JVT-FR-EXT.csv` (Fluster's `-f csv -so` output: vector, result, time). The vendor
+string in the CSVs still says 3.5.0; the binary is the development tree.
 The remaining failures are listed in KNOWN-ISSUES KI-17, KI-20 and KI-21.
 
 Method notes, for whoever repeats this: a hardware pass is one whose per-frame MD5 equals the libdav1d/ffmpeg software

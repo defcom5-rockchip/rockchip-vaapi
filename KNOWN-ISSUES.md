@@ -108,19 +108,45 @@ report it.
 
 ---
 
-## KI-5: HEVC slices that reference SPS-level reference-picture sets decode with wrong references (can stall the decoder)
+## KI-5: HEVC slices that reference SPS-level reference-picture sets decoded with wrong references — FIXED in v4.0.0
 
-**Status:** open (next release) · **Severity:** wrong picture or a decoder stall · measured 2026-10-23
+**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was a wrong picture or a decoder stall · measured 2026-10-23, re-measured 2026-10-25
 
-Slices that reference SPS-level RPS entries by index (`short_term_ref_pic_set_sps_flag=1`) or use inter-RPS prediction
-cannot be rebuilt from what VA-API provides — the set tables are not in the parameter struct. The driver detects this,
-logs a WARNING, and continues with the slice header as written: the hardware then uses the wrong references. There is
-**no software fallback** (an earlier version of this entry said there was). Measured with the JCT-VC-HEVC_V1 suite through
-`ffmpeg -hwaccel vaapi`: most Main vectors fail this way; `AMP_A_Samsung_7` decodes one frame and then stalls the decoder
-(`SyncSurface: TIMEOUT`, 178 rkvdec resets during the HEVC suite). Streams that write their reference sets inline in the
-slice header (what the x265-encoded test files used here do) are unaffected. The planned fix rebuilds the picture's RPS
-from `ReferenceFrames` and rewrites the slice header with an explicit inline set; long-term SPS reference sets and custom
-scaling lists (5 of the 147 conformance vectors) need the same treatment.
+VA-API hands a decoder the parsed SPS fields but not its reference-picture-set tables. Slices that pick one of those
+sets by index (`short_term_ref_pic_set_sps_flag = 1`), predict their inline set from one (`inter_ref_pic_set_prediction`),
+or name long-term pictures through the SPS list (`lt_idx_sps`) could therefore not be reproduced: 3.5.0 sent an SPS with a
+dummy set and the slice headers as they were, the hardware used the wrong references, and some streams stalled the
+decoder (`AMP_A_Samsung_7`: one frame, then `SyncSurface: TIMEOUT`, 178 decoder resets over the suite). There is no
+software fallback on that path.
+
+Fix: the SPS the driver sends declares no sets and no long-term entries, and every independent slice segment header of a
+non-IDR picture is rewritten with an explicit set built from `ReferenceFrames`: the short-term entries in the order the
+standard defines, the long-term ones in the order the client's reference lists name them (the lists are built from that
+order), with `delta_poc_msb_present_flag` only where two reference pictures share POC LSBs. The header is parsed up to the
+reference-set part (the client's `st_rps_bits` gives the length of an inline set, so the SPS tables are not needed), the
+rest of the header is copied bit for bit up to its alignment, and the slice data is appended untouched (entry points are
+relative to it). Pictures and streams without SPS sets are sent as before.
+
+Measured (Fluster, 2026-10-25, `evidence/2026-10-25-hevc-fluster/`): JCT-VC-HEVC_V1 17/147 → 128/147, no vector regressing.
+The kernel logged 26 decoder resets during the run (3.5.0: 178), all from the six vectors that still stall (below). The RExt
+suite (4:2:2, 4:4:4, 12/16-bit, high throughput) stays at 2/49: those profiles are not advertised, ffmpeg falls back to
+software, and Fluster records that fallback as an error (ffmpeg's own decoder passes 31 of them).
+The remaining 19 failures:
+- The PPS and scaling-list class, 14 vectors: SLIST_A/B/C/D, DBLK_B, DELTAQP_A/B, INITQP_A/B, PPS_A, TILES_A/B, TSKIP_A. Their PPS
+  changes between pictures, uses several ids, or carries scaling lists; six of them (INITQP_A/B, PPS_A, SLIST_B/D and
+  VPSSPSPPS_A below) stall the decoder because the slices are parsed against a PPS they do not match. The next change rebuilds
+  the PPS per picture with the client's lists, as done for H.264.
+- Hardware or profile limits: PICSIZE_A/B (picture sizes the hardware refuses), TSUNEQBD_A (unequal luma and chroma bit depth).
+- NUT_A, RPS_D and VPSSPSPPS_A fail in ffmpeg's software decode as well (its output does not match the reference), so they say
+  little about the driver.
+
+The long-term entries keep the original header's order (an explicit entry is matched to the client's pictures by its POC
+LSBs) and carry their MSB cycle whenever it can be coded, so the decoder matches them by full POC. When a header cannot be
+rewritten (none in the conformance suites), the picture is refused with a decoding error rather than sent with the wrong
+references: the player drops the frame or falls back to software. One case VA-API cannot settle: entries the original coded through the SPS list
+(`lt_idx_sps`) carry no LSBs, so those slots are filled with the remaining long-term pictures in the order of the client's
+reference lists; with several such entries and `ref_pic_lists_modification` in the same slice the order can be wrong (the
+client's lists are the modified ones). Such streams are rare (none in the conformance suite).
 
 ## KI-7: surface pool exhaustion on 4K in Chrome — FIXED in v2.1.4
 
@@ -402,7 +428,7 @@ written it shows the surface's previous content (or green on a surface's first u
 
 ## KI-17: H.264 streams with custom scaling matrices decode wrong (all High-profile depths) — FIXED in v4.0.0
 
-**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was: wrong picture · measured 2026-10-23, re-measured 2026-10-25
+**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was a wrong picture · measured 2026-10-23, re-measured 2026-10-25
 
 `h264.c` rebuilt the SPS/PPS it sends to MPP with `pic_scaling_matrix_present_flag = 0` and never read
 `VAIQMatrixBufferH264`, so the hardware dequantised every High-profile stream with flat matrices: streams that carry custom
@@ -430,7 +456,7 @@ software; the second part was this bug. Firefox's software decode of High 10 is 
 
 ## KI-20: interlaced H.264 (field pictures, PAFF, MBAFF) was mostly refused — FIXED in v4.0.0, output is weaved
 
-**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was: no hardware decode for interlaced streams · re-measured 2026-10-25
+**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was no hardware decode for interlaced streams · re-measured 2026-10-25
 
 Three things were wrong, none of them in the hardware:
 

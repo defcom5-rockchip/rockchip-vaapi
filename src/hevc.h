@@ -15,22 +15,20 @@
  * (emulation-prevented).  Returns byte length, or -1 on overflow. */
 int hevc_write_vps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferHEVC *pp, int is_main10);
-/* num_st_rps: 0 or 1.  Encoders whose ORIGINAL SPS carried >=1 short-term RPS
- * sets write every slice-inline RPS as st_ref_pic_set(idx!=0), which carries an
- * inter_ref_pic_set_prediction_flag bit; an SPS with 0 sets makes the decoder
- * skip that bit and misparse the rest of the slice header.  We therefore emit
- * either 0 sets or 1 dummy set to reproduce the original's bit layout. */
 int hevc_write_sps(uint8_t *buf, size_t buf_size,
-                   const VAPictureParameterBufferHEVC *pp, int is_main10,
-                   int num_st_rps);
-
-/* Parse the first slice segment header of a non-IDR picture and decide, by
- * matching the RPS bit length against pp->st_rps_bits, whether the original
- * SPS had 0 short-term RPS sets (returns 0) or >=1 (returns 1).
- * Returns -1 if undecidable (dependent/non-first segment, IDR, no match) and
- * -2 if the slice references SPS-level sets or uses inter-RPS prediction
- * (cannot be reconstructed from VA-API). */
-int hevc_detect_num_st_rps(const uint8_t *nal, size_t len,
-                           const VAPictureParameterBufferHEVC *pp);
+                   const VAPictureParameterBufferHEVC *pp, int is_main10);
 int hevc_write_pps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferHEVC *pp);
+
+/* Rewrite one slice segment NAL (escaped, no start code) so that its reference picture set is carried inline, built
+   from pp->ReferenceFrames, instead of referring to the SPS-level short-term sets and long-term entries that VA-API
+   does not carry; the SPS we send declares none (hevc_write_sps with num_st_rps = 0).  data_byte_offset is the
+   client's slice_data_byte_offset (bytes into the unescaped NAL, as ffmpeg, Chromium and GStreamer all count it).
+   Returns the length of the rewritten header written to out (escaped, no start code) and in *data_start the offset
+   in nal of the slice data that follows it unchanged; 0 when the NAL needs no change (IDR, dependent segment); -1
+   when it cannot be rewritten (the caller refuses the picture: the original slice against the sent SPS would decode
+   with wrong references or stall). */
+int hevc_rewrite_slice_rps(const uint8_t *nal, size_t len, const VAPictureParameterBufferHEVC *pp,
+                           const uint8_t ref_list[2][15],
+                           uint32_t data_byte_offset, uint8_t *out, size_t out_cap, size_t *data_start);
+

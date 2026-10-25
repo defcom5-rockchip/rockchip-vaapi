@@ -39,6 +39,7 @@
 #include "h264.h"   /* emulation_prevent() */
 #include "bs.h"
 #include <string.h>
+#include <stdlib.h>
 
 #define NAL_VPS 32
 #define NAL_SPS 33
@@ -111,8 +112,7 @@ int hevc_write_vps(uint8_t *buf, size_t buf_size,
 }
 
 int hevc_write_sps(uint8_t *buf, size_t buf_size,
-                   const VAPictureParameterBufferHEVC *pp, int is_main10,
-                   int num_st_rps)
+                   const VAPictureParameterBufferHEVC *pp, int is_main10)
 {
     uint8_t raw[512];
     BSWriter bs;
@@ -167,20 +167,12 @@ int hevc_write_sps(uint8_t *buf, size_t buf_size,
         bs_write(&bs, pp->pic_fields.bits.pcm_loop_filter_disabled_flag, 1);
     }
 
-    /* num_short_term_ref_pic_sets: 0, or 1 dummy set (see hevc.h).  The dummy
-       set is never referenced by a slice; it only exists so that slice-inline
-       RPS parse as st_ref_pic_set(1) and read their inter_ref_pic_set_prediction
-       bit, exactly as they did against the encoder's original SPS. */
-    bs_write_ue(&bs, (uint32_t)(num_st_rps ? 1 : 0));
-    if (num_st_rps) {           /* st_ref_pic_set(0): one used negative pic, delta -1 */
-        bs_write_ue(&bs, 1);    /* num_negative_pics */
-        bs_write_ue(&bs, 0);    /* num_positive_pics */
-        bs_write_ue(&bs, 0);    /* delta_poc_s0_minus1[0] */
-        bs_write(&bs, 1, 1);    /* used_by_curr_pic_s0_flag[0] */
-    }
+    /* No SPS-level sets and no long-term entries: slice headers that referred to them are rewritten with inline
+       sets (hevc_rewrite_slice_rps). */
+    bs_write_ue(&bs, 0);        /* num_short_term_ref_pic_sets */
     bs_write(&bs, pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag, 1);
     if (pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag)
-        bs_write_ue(&bs, 0);    /* num_long_term_ref_pics_sps = 0 */
+        bs_write_ue(&bs, 0);    /* num_long_term_ref_pics_sps */
     bs_write(&bs, pp->slice_parsing_fields.bits.sps_temporal_mvp_enabled_flag, 1);
     bs_write(&bs, pp->pic_fields.bits.strong_intra_smoothing_enabled_flag, 1);
     bs_write(&bs, 0, 1);        /* vui_parameters_present_flag */
@@ -246,7 +238,7 @@ int hevc_write_pps(uint8_t *buf, size_t buf_size,
 
 
 /* ------------------------------------------------------------------------ */
-/* Slice-header probe: which RPS layout did the encoder's SPS imply?         */
+/* Small RBSP bit reader for the slice-header rewrite                          */
 
 typedef struct { const uint8_t *p; size_t n; size_t pos; } BR;   /* pos in bits */
 static uint32_t br_u(BR *b, int k) {
@@ -274,42 +266,231 @@ static size_t rbsp_unescape(const uint8_t *in, size_t n, uint8_t *out, size_t ca
     }
     return o;
 }
-/* Explicit st_ref_pic_set body (no inter prediction). Returns 0 on nonsense. */
-static int parse_explicit_rps(BR *b) {
-    uint32_t nneg = br_ue(b), npos = br_ue(b);
-    if (nneg > 16 || npos > 16) return 0;
-    for (uint32_t i = 0; i < nneg; i++) { br_ue(b); br_u(b, 1); }
-    for (uint32_t i = 0; i < npos; i++) { br_ue(b); br_u(b, 1); }
-    return 1;
+
+/* ------------------------------------------------------------------------ */
+/* Slice-header rewrite: inline reference picture set (7.3.6.1, 7.3.7)        */
+
+static int ceil_log2(uint32_t v) { int n = 0; while ((1u << n) < v) n++; return n; }
+
+/* copy bits [from, to) of the reader's buffer into the writer */
+static void copy_bits(BSWriter *w, const uint8_t *src, size_t from, size_t to)
+{
+    for (size_t pos = from; pos < to; pos++)
+        bs_write1(w, (src[pos >> 3] >> (7 - (pos & 7))) & 1);
 }
 
-int hevc_detect_num_st_rps(const uint8_t *nal, size_t len,
-                           const VAPictureParameterBufferHEVC *pp)
+typedef struct { int poc; int used; } RpsPic;
+static int cmp_desc(const void *a, const void *b) { return ((const RpsPic *)b)->poc - ((const RpsPic *)a)->poc; }
+static int cmp_asc(const void *a, const void *b)  { return ((const RpsPic *)a)->poc - ((const RpsPic *)b)->poc; }
+
+int hevc_rewrite_slice_rps(const uint8_t *nal, size_t len, const VAPictureParameterBufferHEVC *pp,
+                           const uint8_t ref_list[2][15],
+                           uint32_t data_byte_offset, uint8_t *out, size_t out_cap, size_t *data_start)
 {
-    uint8_t buf[256];
-    size_t n = rbsp_unescape(nal, len < 512 ? len : 512, buf, sizeof(buf));
-    if (n < 4) return -1;
-    int nal_type = (buf[0] >> 1) & 0x3F;
-    if (nal_type == 19 || nal_type == 20) return -1;        /* IDR: no RPS in header */
-    if (nal_type > 23) return -1;                           /* not a VCL slice */
-    BR b = { buf, n, 16 };                                  /* skip 2-byte NAL header */
-    if (!br_u(&b, 1)) return -1;                            /* first_slice_segment_in_pic_flag */
-    if (nal_type >= 16) br_u(&b, 1);                        /* no_output_of_prior_pics_flag */
-    br_ue(&b);                                              /* slice_pic_parameter_set_id */
-    for (int i = 0; i < pp->num_extra_slice_header_bits; i++) br_u(&b, 1);
-    br_ue(&b);                                              /* slice_type */
+    if (!nal || len < 3 || !pp || !out || !data_start) return -1;
+    int nal_type = (nal[0] >> 1) & 0x3F;
+    if (nal_type > 21) return 0;                               /* not a slice */
+    if (nal_type == 19 || nal_type == 20) return 0;            /* IDR: no RPS in the header */
+    if (data_byte_offset < 3 || data_byte_offset > len) return -1;
+
+    /* Unescape the header: data_byte_offset unescaped bytes (the client counts them that way), which also gives the
+       escaped index of the first data byte.  The data itself is copied as the client gave it. */
+    size_t hcap = (size_t)data_byte_offset + 8;
+    uint8_t *hdr = malloc(hcap); size_t *esc_pos = malloc(hcap * sizeof *esc_pos);
+    uint8_t *raw = NULL; int ret = -1;
+    if (!hdr || !esc_pos) goto out;
+    size_t n = 0, i = 0; int zeros = 0;
+    for (; i < len && n < (size_t)data_byte_offset; i++) {
+        if (zeros >= 2 && nal[i] == 0x03) { zeros = 0; continue; }
+        esc_pos[n] = i; hdr[n++] = nal[i];
+        zeros = (nal[i] == 0) ? zeros + 1 : 0;
+    }
+    if (n < (size_t)data_byte_offset) goto out;
+    size_t data_esc = esc_pos[data_byte_offset - 1] + 1;       /* the header's last (alignment) byte is never zero
+                                                                  (7.3.2.11), so no escape byte can follow it */
+    BR b = { hdr, n, 16 };
+    int first = (int)br_u(&b, 1);
+    if (nal_type >= 16) br_u(&b, 1);                           /* no_output_of_prior_pics_flag */
+    br_ue(&b);                                                 /* slice_pic_parameter_set_id */
+    int dependent = 0;
+    if (!first) {
+        if (pp->slice_parsing_fields.bits.dependent_slice_segments_enabled_flag) dependent = (int)br_u(&b, 1);
+        int ctb_log2 = pp->log2_min_luma_coding_block_size_minus3 + 3 + pp->log2_diff_max_min_luma_coding_block_size;
+        uint32_t ctb = 1u << ctb_log2;
+        uint32_t wc = (pp->pic_width_in_luma_samples + ctb - 1) / ctb, hc = (pp->pic_height_in_luma_samples + ctb - 1) / ctb;
+        br_u(&b, ceil_log2(wc * hc));                          /* slice_segment_address */
+    }
+    if (dependent) { ret = 0; goto out; }                      /* no RPS in a dependent segment */
+    for (int k = 0; k < pp->num_extra_slice_header_bits; k++) br_u(&b, 1);
+    br_ue(&b);                                                 /* slice_type */
     if (pp->slice_parsing_fields.bits.output_flag_present_flag) br_u(&b, 1);
     if (pp->pic_fields.bits.separate_colour_plane_flag) br_u(&b, 2);
-    br_u(&b, pp->log2_max_pic_order_cnt_lsb_minus4 + 4);   /* slice_pic_order_cnt_lsb */
-    if (br_u(&b, 1)) return -2;                             /* short_term_ref_pic_set_sps_flag=1 */
-    size_t start = b.pos;
-    /* Hypothesis A: original SPS had 0 sets -> st_ref_pic_set(0), explicit, no pred bit */
-    BR a = b; int okA = parse_explicit_rps(&a); size_t bitsA = a.pos - start;
-    /* Hypothesis B: original SPS had >=1 sets -> st_ref_pic_set(idx!=0): pred bit first */
-    BR c = b; int pred = (int)br_u(&c, 1); int okB = 0; size_t bitsB = 0;
-    if (!pred) { okB = parse_explicit_rps(&c); bitsB = c.pos - start; }
-    if (okA && bitsA == pp->st_rps_bits) return 0;
-    if (okB && bitsB == pp->st_rps_bits) return 1;
-    if (pred) return -2;                                    /* inter-RPS prediction: needs the real sets */
-    return -1;
+    int poc_bits = pp->log2_max_pic_order_cnt_lsb_minus4 + 4;
+    uint32_t max_lsb = 1u << poc_bits;
+    br_u(&b, poc_bits);                                        /* slice_pic_order_cnt_lsb */
+    size_t prefix_end = b.pos;                                 /* everything up to here is copied verbatim */
+
+    /* skip the original short-term part */
+    int sps_flag = (int)br_u(&b, 1);
+    if (sps_flag) {
+        if (pp->num_short_term_ref_pic_sets > 1) br_u(&b, ceil_log2(pp->num_short_term_ref_pic_sets));
+    } else {
+        if (pp->st_rps_bits == 0) goto out;                    /* inline set of unknown length */
+        b.pos += pp->st_rps_bits;
+    }
+    /* read the original long-term part: its entry order is the order of RefPicSetLtCurr, which the reference lists
+       are built from, so it is kept; entries coded through the SPS list (lt_idx_sps) have no LSBs we can see */
+    typedef struct { int sps; int lsb; int used; int msb; } LtOrig;
+    LtOrig orig[32]; int n_orig = 0;
+    if (pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag) {
+        uint32_t n_lt_sps = 0;
+        if (pp->num_long_term_ref_pic_sps > 0) n_lt_sps = br_ue(&b);
+        uint32_t n_lt_pics = br_ue(&b);
+        if (n_lt_sps > 16 || n_lt_pics > 16) goto out;
+        for (uint32_t k = 0; k < n_lt_sps + n_lt_pics; k++) {
+            LtOrig *e = &orig[n_orig++];
+            e->sps = k < n_lt_sps; e->lsb = -1; e->used = -1;
+            if (e->sps) {
+                if (pp->num_long_term_ref_pic_sps > 1) br_u(&b, ceil_log2(pp->num_long_term_ref_pic_sps));
+            } else {
+                e->lsb = (int)br_u(&b, poc_bits); e->used = (int)br_u(&b, 1);
+            }
+            e->msb = (int)br_u(&b, 1);
+            if (e->msb) br_ue(&b);                             /* delta_poc_msb_cycle_lt */
+        }
+    }
+    size_t rest_start = b.pos;
+    if (rest_start > (size_t)data_byte_offset * 8) goto out;
+    /* the header ends with byte_alignment(): a one bit, then up to seven zeros to the byte boundary */
+    size_t end_bits = (size_t)data_byte_offset * 8, q = end_bits;
+    while (q > rest_start && !((hdr[(q - 1) >> 3] >> (7 - ((q - 1) & 7))) & 1)) q--;
+    if (q == rest_start || end_bits - q > 7) goto out;
+    q--;                                                       /* position of the alignment one bit */
+
+    /* The set from the client's reference list.  Short-term entries are ordered by the standard (closest first). */
+    RpsPic neg[16], pos_[16]; int nn = 0, np = 0;
+    int cur = pp->CurrPic.pic_order_cnt;
+    int lt_cand[16], n_cand = 0;                               /* ReferenceFrames indices of the long-term pictures */
+    for (int k = 0; k < 15; k++) {
+        const VAPictureHEVC *r = &pp->ReferenceFrames[k];
+        if (r->picture_id == VA_INVALID_ID || (r->flags & VA_PICTURE_HEVC_INVALID)) continue;
+        int used_st = !!(r->flags & (VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE | VA_PICTURE_HEVC_RPS_ST_CURR_AFTER));
+        if (r->flags & (VA_PICTURE_HEVC_LONG_TERM_REFERENCE | VA_PICTURE_HEVC_RPS_LT_CURR)) {
+            if (n_cand < 16) lt_cand[n_cand++] = k;
+        } else if (r->pic_order_cnt < cur) {
+            if (nn < 16) neg[nn++] = (RpsPic){ r->pic_order_cnt, used_st };
+        } else if (r->pic_order_cnt > cur) {
+            if (np < 16) pos_[np++] = (RpsPic){ r->pic_order_cnt, used_st };
+        } else goto out;                                       /* a short-term reference with the current POC */
+    }
+    qsort(neg, (size_t)nn, sizeof neg[0], cmp_desc);
+    qsort(pos_, (size_t)np, sizeof pos_[0], cmp_asc);
+    if (n_cand > 0 && !pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag) goto out;
+
+    /* Long-term entries, in the original header's order.  An explicit entry is matched to a candidate by its POC LSBs
+       (and its MSB cycle when the header gave one); the SPS-coded entries, which come first, are filled with the
+       remaining candidates: the used ones in the order the client's RefPicList names them, then the unused ones.
+       Pictures the client lists but the header did not name are appended (as far as this driver can tell, that does
+       not happen: ReferenceFrames is the picture's set). */
+    RpsPic lt[16]; int cyc[16], need_msb[16], nl = 0; int taken[16] = {0};
+    int lsb_mask = (int)(max_lsb - 1), cur_lsb = cur & lsb_mask;
+    int cycle_of[16];
+    for (int c2 = 0; c2 < n_cand; c2++) {
+        int poc = pp->ReferenceFrames[lt_cand[c2]].pic_order_cnt;
+        int d = cur - poc - (cur_lsb - (poc & lsb_mask));
+        cycle_of[c2] = (d % (int)max_lsb) ? -1000000 : d / (int)max_lsb;   /* a non-multiple cannot be coded */
+    }
+    int unknown_slots = 0;
+    for (int e = 0; e < n_orig; e++) {
+        if (orig[e].sps) { unknown_slots++; continue; }
+        int found = -1;
+        for (int c2 = 0; c2 < n_cand && found < 0; c2++) {
+            if (taken[c2]) continue;
+            if ((pp->ReferenceFrames[lt_cand[c2]].pic_order_cnt & lsb_mask) == orig[e].lsb) found = c2;
+        }
+        if (found < 0) goto out;                               /* the header names a picture the client did not give */
+        taken[found] = 1; orig[e].used = orig[e].used;         /* keep the header's used flag */
+    }
+    /* assign candidates to slots: first the SPS-coded slots (unknown pictures), then the matched explicit ones */
+    int fill_order[16], nf = 0; int placed[16] = {0};
+    for (int l = 0; l < 2; l++)                                /* used candidates in RefPicList order */
+        for (int k = 0; k < 15; k++) {
+            int idx = ref_list ? ref_list[l][k] : 0xff;
+            if (idx >= 15) continue;
+            for (int c2 = 0; c2 < n_cand; c2++)
+                if (lt_cand[c2] == idx && !taken[c2] && !placed[c2]) { fill_order[nf++] = c2; placed[c2] = 1; }
+        }
+    for (int c2 = 0; c2 < n_cand; c2++) if (!taken[c2] && !placed[c2]) { fill_order[nf++] = c2; placed[c2] = 1; }
+    int fi = 0, cum = 0;
+    for (int e = 0; e < n_orig; e++) {
+        int c2;
+        if (orig[e].sps) {
+            if (fi >= nf) continue;                            /* fewer candidates than slots: the slot is dropped */
+            c2 = fill_order[fi++];
+        } else {
+            c2 = -1;
+            for (int t = 0; t < n_cand; t++)
+                if (taken[t] && (pp->ReferenceFrames[lt_cand[t]].pic_order_cnt & lsb_mask) == orig[e].lsb && taken[t] != 2) { c2 = t; break; }
+            if (c2 < 0) goto out;
+            taken[c2] = 2;
+        }
+        const VAPictureHEVC *r = &pp->ReferenceFrames[lt_cand[c2]];
+        lt[nl] = (RpsPic){ r->pic_order_cnt, !!(r->flags & VA_PICTURE_HEVC_RPS_LT_CURR) };
+        cyc[nl] = cycle_of[c2];
+        /* The MSB cycle whenever it can be coded (cycles must not decrease along the entries that carry one): the
+           decoder then matches the picture by its full POC, which no picture still waiting in its DPB can be
+           confused with (MPP matches LSB-only entries against every slot).  Without it, the LSBs must at least be
+           unique among the listed references. */
+        int collide = 0;
+        for (int t = 0; t < 15 && !collide; t++) {
+            const VAPictureHEVC *o = &pp->ReferenceFrames[t];
+            if (t == lt_cand[c2] || o->picture_id == VA_INVALID_ID || (o->flags & VA_PICTURE_HEVC_INVALID)) continue;
+            if ((o->pic_order_cnt & lsb_mask) == (r->pic_order_cnt & lsb_mask)) collide = 1;
+        }
+        need_msb[nl] = cyc[nl] >= cum && cyc[nl] > -1000000;
+        if (collide && !need_msb[nl]) goto out;                /* ambiguous and not codable */
+        if (need_msb[nl]) cum = cyc[nl];
+        nl++;
+    }
+    for (; fi < nf; fi++) {                                    /* listed but never named: append */
+        int c2 = fill_order[fi]; const VAPictureHEVC *r = &pp->ReferenceFrames[lt_cand[c2]];
+        lt[nl] = (RpsPic){ r->pic_order_cnt, !!(r->flags & VA_PICTURE_HEVC_RPS_LT_CURR) };
+        cyc[nl] = cycle_of[c2]; need_msb[nl] = cyc[nl] >= cum && cyc[nl] > -1000000; if (need_msb[nl]) cum = cyc[nl]; nl++;
+    }
+
+    size_t rcap = (size_t)data_byte_offset + 256 + 16 * 12;   /* header + the new set, generously */
+    raw = malloc(rcap); if (!raw) goto out;
+    BSWriter w; bs_init(&w, raw, rcap);
+    copy_bits(&w, hdr, 0, prefix_end);
+    bs_write1(&w, 0);                                          /* short_term_ref_pic_set_sps_flag */
+    bs_write_ue(&w, (uint32_t)nn);                             /* st_ref_pic_set(0): no prediction flag with idx 0 */
+    bs_write_ue(&w, (uint32_t)np);
+    int prev = cur;
+    for (int k = 0; k < nn; k++) { bs_write_ue(&w, (uint32_t)(prev - neg[k].poc - 1)); bs_write1(&w, neg[k].used); prev = neg[k].poc; }
+    prev = cur;
+    for (int k = 0; k < np; k++) { bs_write_ue(&w, (uint32_t)(pos_[k].poc - prev - 1)); bs_write1(&w, pos_[k].used); prev = pos_[k].poc; }
+    if (pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag) {
+        bs_write_ue(&w, (uint32_t)nl);                         /* num_long_term_pics (num_long_term_sps absent: 0 in our SPS) */
+        int c = 0;
+        for (int k = 0; k < nl; k++) {
+            bs_write(&w, (uint32_t)(lt[k].poc & lsb_mask), poc_bits);         /* poc_lsb_lt */
+            bs_write1(&w, lt[k].used);                                        /* used_by_curr_pic_lt_flag */
+            bs_write1(&w, need_msb[k]);                                       /* delta_poc_msb_present_flag */
+            if (need_msb[k]) { bs_write_ue(&w, (uint32_t)(cyc[k] - c)); c = cyc[k]; }
+        }
+    }
+    copy_bits(&w, hdr, rest_start, q);                         /* the rest of the header, up to the alignment bit */
+    bs_write1(&w, 1);                                          /* byte_alignment() */
+    while (w.bit_pos != 0) bs_write1(&w, 0);
+    if (w.byte_pos >= w.capacity) goto out;                    /* bs_write1 drops bits silently past the end */
+    size_t hdr_sz = bs_bytes(&w);
+    if (hdr_sz * 2 > out_cap) goto out;
+    size_t ep = emulation_prevent(raw, hdr_sz, out, out_cap);
+    if (!ep) goto out;
+    *data_start = data_esc;                                    /* the caller appends nal + data_esc .. len as it is */
+    ret = (int)ep;
+out:
+    free(hdr); free(esc_pos); free(raw);
+    return ret;
 }
+

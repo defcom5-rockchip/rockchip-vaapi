@@ -119,8 +119,10 @@ Not available, and why:
   non-existent fourcc ("GR16") and Mesa refused it; KI-3 has the forensics. On Arm's
   proprietary Mali GL driver, per-plane importers draw it near-black (KI-11, a GL
   driver bug); copy-back (`vaapi-copy`) is correct everywhere.
-- **Some HEVC streams** index SPS-level RPS sets or use inter-RPS prediction;
-  those tables are not in the VA-API struct. Detected and logged, not guessed.
+- **HEVC streams with SPS-level reference sets** (indexed, inter-RPS-predicted,
+  or `lt_idx_sps`): since v4.0.0 every independent slice header is rewritten
+  with an inline set built from `ReferenceFrames` (KI-5); 3.5.0 sent a dummy
+  set and misdecoded them.
 
 Client notes:
 - **Firefox** hardware-decodes H.264, VP9 **and HEVC** — HEVC needs the

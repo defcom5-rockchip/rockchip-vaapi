@@ -1,0 +1,440 @@
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x123
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+mpp_rkvdec2 fdc48100.rkvdec-core: resetting for err 0x107
+mpp_rkvdec2 fdc48100.rkvdec-core: reset done
+mpp_rkvdec2 fdc38100.rkvdec-core: resetting for err 0x23
+mpp_rkvdec2 fdc38100.rkvdec-core: reset done
+rga: 255700 255707: ID[18596]: no core match
+rga: 255700 255707: ID[18596]: failed to assign task 0
+rga: 255700 255707: ID[18596]: job assign failed
+rga: 255700 255707: ID[18596]: task[0] job_commit failed.
+rga: 255700 255707: ID[18596]: request commit failed!
+rga: 255700 255707: request[18596] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18596]: submit failed!
+rga: 255700 255707: ID[18597]: no core match
+rga: 255700 255707: ID[18597]: failed to assign task 0
+rga: 255700 255707: ID[18597]: job assign failed
+rga: 255700 255707: ID[18597]: task[0] job_commit failed.
+rga: 255700 255707: ID[18597]: request commit failed!
+rga: 255700 255707: request[18597] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18597]: submit failed!
+rga: 255700 255707: ID[18598]: no core match
+rga: 255700 255707: ID[18598]: failed to assign task 0
+rga: 255700 255707: ID[18598]: job assign failed
+rga: 255700 255707: ID[18598]: task[0] job_commit failed.
+rga: 255700 255707: ID[18598]: request commit failed!
+rga: 255700 255707: request[18598] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18598]: submit failed!
+rga: 255700 255707: ID[18599]: no core match
+rga: 255700 255707: ID[18599]: failed to assign task 0
+rga: 255700 255707: ID[18599]: job assign failed
+rga: 255700 255707: ID[18599]: task[0] job_commit failed.
+rga: 255700 255707: ID[18599]: request commit failed!
+rga: 255700 255707: request[18599] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18599]: submit failed!
+rga: 255700 255707: ID[18600]: no core match
+rga: 255700 255707: ID[18600]: failed to assign task 0
+rga: 255700 255707: ID[18600]: job assign failed
+rga: 255700 255707: ID[18600]: task[0] job_commit failed.
+rga: 255700 255707: ID[18600]: request commit failed!
+rga: 255700 255707: request[18600] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18600]: submit failed!
+rga: 255700 255707: ID[18601]: no core match
+rga: 255700 255707: ID[18601]: failed to assign task 0
+rga: 255700 255707: ID[18601]: job assign failed
+rga: 255700 255707: ID[18601]: task[0] job_commit failed.
+rga: 255700 255707: ID[18601]: request commit failed!
+rga: 255700 255707: request[18601] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18601]: submit failed!
+rga: 255700 255707: ID[18602]: no core match
+rga: 255700 255707: ID[18602]: failed to assign task 0
+rga: 255700 255707: ID[18602]: job assign failed
+rga: 255700 255707: ID[18602]: task[0] job_commit failed.
+rga: 255700 255707: ID[18602]: request commit failed!
+rga: 255700 255707: request[18602] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18602]: submit failed!
+rga: 255700 255707: ID[18603]: no core match
+rga: 255700 255707: ID[18603]: failed to assign task 0
+rga: 255700 255707: ID[18603]: job assign failed
+rga: 255700 255707: ID[18603]: task[0] job_commit failed.
+rga: 255700 255707: ID[18603]: request commit failed!
+rga: 255700 255707: request[18603] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18603]: submit failed!
+rga: 255700 255707: ID[18604]: no core match
+rga: 255700 255707: ID[18604]: failed to assign task 0
+rga: 255700 255707: ID[18604]: job assign failed
+rga: 255700 255707: ID[18604]: task[0] job_commit failed.
+rga: 255700 255707: ID[18604]: request commit failed!
+rga: 255700 255707: request[18604] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18604]: submit failed!
+rga: 255700 255707: ID[18605]: no core match
+rga: 255700 255707: ID[18605]: failed to assign task 0
+rga: 255700 255707: ID[18605]: job assign failed
+rga: 255700 255707: ID[18605]: task[0] job_commit failed.
+rga: 255700 255707: ID[18605]: request commit failed!
+rga: 255700 255707: request[18605] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18605]: submit failed!
+rga: 255700 255707: ID[18606]: no core match
+rga: 255700 255707: ID[18606]: failed to assign task 0
+rga: 255700 255707: ID[18606]: job assign failed
+rga: 255700 255707: ID[18606]: task[0] job_commit failed.
+rga: 255700 255707: ID[18606]: request commit failed!
+rga: 255700 255707: request[18606] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18606]: submit failed!
+rga: 255700 255707: ID[18607]: no core match
+rga: 255700 255707: ID[18607]: failed to assign task 0
+rga: 255700 255707: ID[18607]: job assign failed
+rga: 255700 255707: ID[18607]: task[0] job_commit failed.
+rga: 255700 255707: ID[18607]: request commit failed!
+rga: 255700 255707: request[18607] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18607]: submit failed!
+rga: 255700 255707: ID[18608]: no core match
+rga: 255700 255707: ID[18608]: failed to assign task 0
+rga: 255700 255707: ID[18608]: job assign failed
+rga: 255700 255707: ID[18608]: task[0] job_commit failed.
+rga: 255700 255707: ID[18608]: request commit failed!
+rga: 255700 255707: request[18608] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18608]: submit failed!
+rga: 255700 255707: ID[18609]: no core match
+rga: 255700 255707: ID[18609]: failed to assign task 0
+rga: 255700 255707: ID[18609]: job assign failed
+rga: 255700 255707: ID[18609]: task[0] job_commit failed.
+rga: 255700 255707: ID[18609]: request commit failed!
+rga: 255700 255707: request[18609] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18609]: submit failed!
+rga: 255700 255707: ID[18610]: no core match
+rga: 255700 255707: ID[18610]: failed to assign task 0
+rga: 255700 255707: ID[18610]: job assign failed
+rga: 255700 255707: ID[18610]: task[0] job_commit failed.
+rga: 255700 255707: ID[18610]: request commit failed!
+rga: 255700 255707: request[18610] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18610]: submit failed!
+rga: 255700 255707: ID[18611]: no core match
+rga: 255700 255707: ID[18611]: failed to assign task 0
+rga: 255700 255707: ID[18611]: job assign failed
+rga: 255700 255707: ID[18611]: task[0] job_commit failed.
+rga: 255700 255707: ID[18611]: request commit failed!
+rga: 255700 255707: request[18611] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18611]: submit failed!
+rga: 255700 255707: ID[18612]: no core match
+rga: 255700 255707: ID[18612]: failed to assign task 0
+rga: 255700 255707: ID[18612]: job assign failed
+rga: 255700 255707: ID[18612]: task[0] job_commit failed.
+rga: 255700 255707: ID[18612]: request commit failed!
+rga: 255700 255707: request[18612] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18612]: submit failed!
+rga: 255700 255707: ID[18613]: no core match
+rga: 255700 255707: ID[18613]: failed to assign task 0
+rga: 255700 255707: ID[18613]: job assign failed
+rga: 255700 255707: ID[18613]: task[0] job_commit failed.
+rga: 255700 255707: ID[18613]: request commit failed!
+rga: 255700 255707: request[18613] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18613]: submit failed!
+rga: 255700 255707: ID[18614]: no core match
+rga: 255700 255707: ID[18614]: failed to assign task 0
+rga: 255700 255707: ID[18614]: job assign failed
+rga: 255700 255707: ID[18614]: task[0] job_commit failed.
+rga: 255700 255707: ID[18614]: request commit failed!
+rga: 255700 255707: request[18614] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18614]: submit failed!
+rga: 255700 255707: ID[18615]: no core match
+rga: 255700 255707: ID[18615]: failed to assign task 0
+rga: 255700 255707: ID[18615]: job assign failed
+rga: 255700 255707: ID[18615]: task[0] job_commit failed.
+rga: 255700 255707: ID[18615]: request commit failed!
+rga: 255700 255707: request[18615] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18615]: submit failed!
+rga: 255700 255707: ID[18616]: no core match
+rga: 255700 255707: ID[18616]: failed to assign task 0
+rga: 255700 255707: ID[18616]: job assign failed
+rga: 255700 255707: ID[18616]: task[0] job_commit failed.
+rga: 255700 255707: ID[18616]: request commit failed!
+rga: 255700 255707: request[18616] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18616]: submit failed!
+rga: 255700 255707: ID[18617]: no core match
+rga: 255700 255707: ID[18617]: failed to assign task 0
+rga: 255700 255707: ID[18617]: job assign failed
+rga: 255700 255707: ID[18617]: task[0] job_commit failed.
+rga: 255700 255707: ID[18617]: request commit failed!
+rga: 255700 255707: request[18617] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18617]: submit failed!
+rga: 255700 255707: ID[18618]: no core match
+rga: 255700 255707: ID[18618]: failed to assign task 0
+rga: 255700 255707: ID[18618]: job assign failed
+rga: 255700 255707: ID[18618]: task[0] job_commit failed.
+rga: 255700 255707: ID[18618]: request commit failed!
+rga: 255700 255707: request[18618] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18618]: submit failed!
+rga: 255700 255707: ID[18619]: no core match
+rga: 255700 255707: ID[18619]: failed to assign task 0
+rga: 255700 255707: ID[18619]: job assign failed
+rga: 255700 255707: ID[18619]: task[0] job_commit failed.
+rga: 255700 255707: ID[18619]: request commit failed!
+rga: 255700 255707: request[18619] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18619]: submit failed!
+rga: 255700 255707: ID[18620]: no core match
+rga: 255700 255707: ID[18620]: failed to assign task 0
+rga: 255700 255707: ID[18620]: job assign failed
+rga: 255700 255707: ID[18620]: task[0] job_commit failed.
+rga: 255700 255707: ID[18620]: request commit failed!
+rga: 255700 255707: request[18620] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18620]: submit failed!
+rga: 255700 255707: ID[18621]: no core match
+rga: 255700 255707: ID[18621]: failed to assign task 0
+rga: 255700 255707: ID[18621]: job assign failed
+rga: 255700 255707: ID[18621]: task[0] job_commit failed.
+rga: 255700 255707: ID[18621]: request commit failed!
+rga: 255700 255707: request[18621] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18621]: submit failed!
+rga: 255700 255707: ID[18622]: no core match
+rga: 255700 255707: ID[18622]: failed to assign task 0
+rga: 255700 255707: ID[18622]: job assign failed
+rga: 255700 255707: ID[18622]: task[0] job_commit failed.
+rga: 255700 255707: ID[18622]: request commit failed!
+rga: 255700 255707: request[18622] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18622]: submit failed!
+rga: 255700 255707: ID[18623]: no core match
+rga: 255700 255707: ID[18623]: failed to assign task 0
+rga: 255700 255707: ID[18623]: job assign failed
+rga: 255700 255707: ID[18623]: task[0] job_commit failed.
+rga: 255700 255707: ID[18623]: request commit failed!
+rga: 255700 255707: request[18623] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18623]: submit failed!
+rga: 255700 255707: ID[18624]: no core match
+rga: 255700 255707: ID[18624]: failed to assign task 0
+rga: 255700 255707: ID[18624]: job assign failed
+rga: 255700 255707: ID[18624]: task[0] job_commit failed.
+rga: 255700 255707: ID[18624]: request commit failed!
+rga: 255700 255707: request[18624] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18624]: submit failed!
+rga: 255700 255707: ID[18625]: no core match
+rga: 255700 255707: ID[18625]: failed to assign task 0
+rga: 255700 255707: ID[18625]: job assign failed
+rga: 255700 255707: ID[18625]: task[0] job_commit failed.
+rga: 255700 255707: ID[18625]: request commit failed!
+rga: 255700 255707: request[18625] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18625]: submit failed!
+rga: 255700 255707: ID[18626]: no core match
+rga: 255700 255707: ID[18626]: failed to assign task 0
+rga: 255700 255707: ID[18626]: job assign failed
+rga: 255700 255707: ID[18626]: task[0] job_commit failed.
+rga: 255700 255707: ID[18626]: request commit failed!
+rga: 255700 255707: request[18626] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18626]: submit failed!
+rga: 255700 255707: ID[18627]: no core match
+rga: 255700 255707: ID[18627]: failed to assign task 0
+rga: 255700 255707: ID[18627]: job assign failed
+rga: 255700 255707: ID[18627]: task[0] job_commit failed.
+rga: 255700 255707: ID[18627]: request commit failed!
+rga: 255700 255707: request[18627] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18627]: submit failed!
+rga: 255700 255707: ID[18628]: no core match
+rga: 255700 255707: ID[18628]: failed to assign task 0
+rga: 255700 255707: ID[18628]: job assign failed
+rga: 255700 255707: ID[18628]: task[0] job_commit failed.
+rga: 255700 255707: ID[18628]: request commit failed!
+rga: 255700 255707: request[18628] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18628]: submit failed!
+rga: 255700 255707: ID[18629]: no core match
+rga: 255700 255707: ID[18629]: failed to assign task 0
+rga: 255700 255707: ID[18629]: job assign failed
+rga: 255700 255707: ID[18629]: task[0] job_commit failed.
+rga: 255700 255707: ID[18629]: request commit failed!
+rga: 255700 255707: request[18629] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18629]: submit failed!
+rga: 255700 255707: ID[18630]: no core match
+rga: 255700 255707: ID[18630]: failed to assign task 0
+rga: 255700 255707: ID[18630]: job assign failed
+rga: 255700 255707: ID[18630]: task[0] job_commit failed.
+rga: 255700 255707: ID[18630]: request commit failed!
+rga: 255700 255707: request[18630] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18630]: submit failed!
+rga: 255700 255707: ID[18631]: no core match
+rga: 255700 255707: ID[18631]: failed to assign task 0
+rga: 255700 255707: ID[18631]: job assign failed
+rga: 255700 255707: ID[18631]: task[0] job_commit failed.
+rga: 255700 255707: ID[18631]: request commit failed!
+rga: 255700 255707: request[18631] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18631]: submit failed!
+rga: 255700 255707: ID[18632]: no core match
+rga: 255700 255707: ID[18632]: failed to assign task 0
+rga: 255700 255707: ID[18632]: job assign failed
+rga: 255700 255707: ID[18632]: task[0] job_commit failed.
+rga: 255700 255707: ID[18632]: request commit failed!
+rga: 255700 255707: request[18632] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18632]: submit failed!
+rga: 255700 255707: ID[18633]: no core match
+rga: 255700 255707: ID[18633]: failed to assign task 0
+rga: 255700 255707: ID[18633]: job assign failed
+rga: 255700 255707: ID[18633]: task[0] job_commit failed.
+rga: 255700 255707: ID[18633]: request commit failed!
+rga: 255700 255707: request[18633] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18633]: submit failed!
+rga: 255700 255707: ID[18634]: no core match
+rga: 255700 255707: ID[18634]: failed to assign task 0
+rga: 255700 255707: ID[18634]: job assign failed
+rga: 255700 255707: ID[18634]: task[0] job_commit failed.
+rga: 255700 255707: ID[18634]: request commit failed!
+rga: 255700 255707: request[18634] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18634]: submit failed!
+rga: 255700 255707: ID[18635]: no core match
+rga: 255700 255707: ID[18635]: failed to assign task 0
+rga: 255700 255707: ID[18635]: job assign failed
+rga: 255700 255707: ID[18635]: task[0] job_commit failed.
+rga: 255700 255707: ID[18635]: request commit failed!
+rga: 255700 255707: request[18635] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18635]: submit failed!
+rga: 255700 255707: ID[18636]: no core match
+rga: 255700 255707: ID[18636]: failed to assign task 0
+rga: 255700 255707: ID[18636]: job assign failed
+rga: 255700 255707: ID[18636]: task[0] job_commit failed.
+rga: 255700 255707: ID[18636]: request commit failed!
+rga: 255700 255707: request[18636] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18636]: submit failed!
+rga: 255700 255707: ID[18637]: no core match
+rga: 255700 255707: ID[18637]: failed to assign task 0
+rga: 255700 255707: ID[18637]: job assign failed
+rga: 255700 255707: ID[18637]: task[0] job_commit failed.
+rga: 255700 255707: ID[18637]: request commit failed!
+rga: 255700 255707: request[18637] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18637]: submit failed!
+rga: 255700 255707: ID[18638]: no core match
+rga: 255700 255707: ID[18638]: failed to assign task 0
+rga: 255700 255707: ID[18638]: job assign failed
+rga: 255700 255707: ID[18638]: task[0] job_commit failed.
+rga: 255700 255707: ID[18638]: request commit failed!
+rga: 255700 255707: request[18638] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18638]: submit failed!
+rga: 255700 255707: ID[18639]: no core match
+rga: 255700 255707: ID[18639]: failed to assign task 0
+rga: 255700 255707: ID[18639]: job assign failed
+rga: 255700 255707: ID[18639]: task[0] job_commit failed.
+rga: 255700 255707: ID[18639]: request commit failed!
+rga: 255700 255707: request[18639] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18639]: submit failed!
+rga: 255700 255707: ID[18640]: no core match
+rga: 255700 255707: ID[18640]: failed to assign task 0
+rga: 255700 255707: ID[18640]: job assign failed
+rga: 255700 255707: ID[18640]: task[0] job_commit failed.
+rga: 255700 255707: ID[18640]: request commit failed!
+rga: 255700 255707: request[18640] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18640]: submit failed!
+rga: 255700 255707: ID[18641]: no core match
+rga: 255700 255707: ID[18641]: failed to assign task 0
+rga: 255700 255707: ID[18641]: job assign failed
+rga: 255700 255707: ID[18641]: task[0] job_commit failed.
+rga: 255700 255707: ID[18641]: request commit failed!
+rga: 255700 255707: request[18641] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18641]: submit failed!
+rga: 255700 255707: ID[18642]: no core match
+rga: 255700 255707: ID[18642]: failed to assign task 0
+rga: 255700 255707: ID[18642]: job assign failed
+rga: 255700 255707: ID[18642]: task[0] job_commit failed.
+rga: 255700 255707: ID[18642]: request commit failed!
+rga: 255700 255707: request[18642] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18642]: submit failed!
+rga: 255700 255707: ID[18643]: no core match
+rga: 255700 255707: ID[18643]: failed to assign task 0
+rga: 255700 255707: ID[18643]: job assign failed
+rga: 255700 255707: ID[18643]: task[0] job_commit failed.
+rga: 255700 255707: ID[18643]: request commit failed!
+rga: 255700 255707: request[18643] abort! finished 0 failed 0 running_abort 0 todo_abort 0
+rga: 255700 255707: ID[18643]: submit failed!
