@@ -1,0 +1,12 @@
+driver 77807efc (md5 of the board build) start 2026-10-25T16:44:31-07:00 resets-before 746
+=== run AV1-TEST-VECTORS 2026-10-25T16:44:31-07:00
+Ran 215/242 tests successfully, in 34.795 secs
+=== run CHROMIUM-8bit-AV1-TEST-VECTORS 2026-10-25T16:45:07-07:00
+Ran 11/13 tests successfully, in 3.387 secs
+=== run CHROMIUM-10bit-AV1-TEST-VECTORS 2026-10-25T16:45:11-07:00
+Ran 23/23 tests successfully, in 2.660 secs
+=== run VP9-TEST-VECTORS 2026-10-25T16:45:14-07:00
+Ran 189/305 tests successfully, in 150.383 secs
+=== run VP9-TEST-VECTORS-HIGH 2026-10-25T16:47:46-07:00
+Ran 3/6 tests successfully, in 0.701 secs
+=== done 2026-10-25T16:47:47-07:00 resets-after 758 timeouts 46

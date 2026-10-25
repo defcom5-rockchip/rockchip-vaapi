@@ -1,0 +1,29 @@
+SYSTEM INFORMATION,,,
+OS,Linux 6.1.189-vendor-rk35xx,,
+CPU,"ARM Cortex-A55 x4, ARM Cortex-A76 x4",,
+GPU,Unknown GPU,,
+RAM,15.6 GB,,
+Backend-VA-API,"Rockchip MPP VA-API Driver 3.5.0 Number Nine ""Pepper SGT"" (defcom5) (runtime 1.23)",,
+Backend-Vulkan,Mali-G610,,
+,,,
+TEST RESULTS,,,
+,,,
+Test Suite: VP9-TEST-VECTORS-HIGH,,,
+,,,
+Decoder: FFmpeg-VP9-VAAPI,,,
+Total Tests,6,,
+Passed,3,,
+Failed\Error,3,,
+Total Time (s),0.701,,
+,,,
+Profile,Passed,Total,
+VP9_PROFILE_2,1,2,
+VP9_PROFILE_3,2,4,
+,,,
+Vector Name,Result,Time (s),Profile
+vp92-2-20-10bit-yuv420.webm,Success,0.112,VP9_PROFILE_2
+vp92-2-20-12bit-yuv420.webm,Fail,0.114,VP9_PROFILE_2
+vp93-2-20-10bit-yuv422.webm,Success,0.091,VP9_PROFILE_3
+vp93-2-20-10bit-yuv444.webm,Error,0.176,VP9_PROFILE_3
+vp93-2-20-12bit-yuv422.webm,Success,0.087,VP9_PROFILE_3
+vp93-2-20-12bit-yuv444.webm,Error,0.087,VP9_PROFILE_3

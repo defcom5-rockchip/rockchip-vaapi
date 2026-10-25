@@ -372,7 +372,9 @@ Conformance runs (Fluster, `ffmpeg -hwaccel vaapi`; every failure except monochr
 attributed against the raw decoder — `sizeup` was once attributed to it, retracted above; Fluster's command rescales
 after a size change, so both still count as failures there although the driver decodes `sizedown` bit-exact):
 libaom AV1-TEST-VECTORS 213/242, Chromium 10-bit 22/23, Chromium 8-bit 9/13 — files and the attribution table in
-`evidence/2026-10-11-av1-fluster/`, scripts in `tests/av1/`.
+`evidence/2026-10-11-av1-fluster/`, scripts in `tests/av1/`. Re-run 2026-10-25 with the v4.0.0 tree and MPP `+pd35`
+(`evidence/2026-10-25-full-regression/`): 215/242, 23/23, 11/13 — the three film-grain vectors now pass, nothing else
+moved; the decoder resets during that run all come from the tiny-frame vectors above.
 
 ## KI-14: AV1 decoded twice per early-synced picture without Plaid Pi's MPP (v3.5.0)
 

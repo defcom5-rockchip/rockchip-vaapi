@@ -1,0 +1,45 @@
+SYSTEM INFORMATION,,,
+OS,Linux 6.1.189-vendor-rk35xx,,
+CPU,"ARM Cortex-A55 x4, ARM Cortex-A76 x4",,
+GPU,Unknown GPU,,
+RAM,15.6 GB,,
+Backend-VA-API,"Rockchip MPP VA-API Driver 3.5.0 Number Nine ""Pepper SGT"" (defcom5) (runtime 1.23)",,
+Backend-Vulkan,Mali-G610,,
+,,,
+TEST RESULTS,,,
+,,,
+Test Suite: CHROMIUM-10bit-AV1-TEST-VECTORS,,,
+,,,
+Decoder: FFmpeg-AV1-VAAPI,,,
+Total Tests,23,,
+Passed,23,,
+Failed\Error,0,,
+Total Time (s),2.660,,
+,,,
+Profile,Passed,Total,
+MAIN,23,23,
+,,,
+Vector Name,Result,Time (s),Profile
+00000671.ivf,Success,0.112,MAIN
+00000672.ivf,Success,0.108,MAIN
+00000673.ivf,Success,0.094,MAIN
+00000674.ivf,Success,0.121,MAIN
+00000675.ivf,Success,0.099,MAIN
+00000716.ivf,Success,0.139,MAIN
+00000717.ivf,Success,0.111,MAIN
+00000718.ivf,Success,0.105,MAIN
+00000719.ivf,Success,0.108,MAIN
+00000720.ivf,Success,0.114,MAIN
+00000761.ivf,Success,0.097,MAIN
+00000762.ivf,Success,0.094,MAIN
+00000763.ivf,Success,0.094,MAIN
+00000764.ivf,Success,0.097,MAIN
+00000765.ivf,Success,0.109,MAIN
+av1-1-b10-00-quantizer-00.ivf,Success,0.139,MAIN
+av1-1-b10-00-quantizer-10.ivf,Success,0.101,MAIN
+av1-1-b10-00-quantizer-20.ivf,Success,0.100,MAIN
+av1-1-b10-00-quantizer-30.ivf,Success,0.114,MAIN
+av1-1-b10-00-quantizer-40.ivf,Success,0.215,MAIN
+av1-1-b10-00-quantizer-50.ivf,Success,0.096,MAIN
+av1-1-b10-00-quantizer-60.ivf,Success,0.111,MAIN
+av1-1-b10-23-filmgrain-50.ivf,Success,0.140,MAIN
