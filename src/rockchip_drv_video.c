@@ -194,6 +194,18 @@ typedef struct {
     int  hevc_sets_plus1;        /* 0 = unknown, 1 = original SPS had 0 RPS sets, 2 = had >=1 */
     int  hevc_sent_plus1;        /* what the last emitted SPS declared (same encoding) */
     int  h264_l0_minus1, h264_l1_minus1;   /* learned PPS num_ref_idx_lX_default_active_minus1 (0 until a slice teaches us) */
+    VAIQMatrixBufferH264 last_iq;          /* the client's scaling lists for the picture (ffmpeg sends them every picture) */
+    bool         have_iq;
+    uint8_t      h264_pps_last[2048];      /* the PPS last sent to MPP: the next picture's PPS is sent only when it differs */
+    int          h264_pps_last_len;
+    /* Field pictures: MPP decodes a complementary field pair into one frame and outputs it once, with the PTS of
+       the first field.  The client decodes both fields into one surface with two Begin/EndPicture rounds, so the
+       second field must keep the surface's generation and must not add a second decode_queue entry. */
+    bool         h264_expect_second_field; /* the last picture was a first field; the next picture on the same surface is its pair */
+    VASurfaceID  h264_field_sid;
+    bool         h264_second_field;        /* this picture was taken as a second field in BeginPicture */
+    uint32_t     h264_field_parity;        /* VA_PICTURE_H264_TOP/BOTTOM_FIELD of the last picture */
+    uint16_t     h264_field_frame_num;     /* its frame_num: the pair shares it */
     /* Serialises MPP output handling for this context: decode_get_frame, assign_mpp_frame and the
        decode_queue head/tail. Taken by the decoding thread (EndPicture) and by any thread in
        vaSyncSurface; also guards the slot's lifetime (claim in CreateContext, teardown and clear in
@@ -946,7 +958,16 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
      * access units; OUTPUT_BLOCK=0 makes decode_get_frame non-blocking. */
     MppDecCfg dec_cfg = NULL;
     mpp_dec_cfg_init(&dec_cfg);
+    /* Start from the decoder's live configuration: MPP applies a SET_CFG field only when its value changed from
+       what the config object holds, so turning a default-on option off needs the current values in the object. */
+    mpi->control(mpp, MPP_DEC_GET_CFG, dec_cfg);
     mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0);
+    /* MPP's default post-processing runs its IEP deinterlacer on field-coded H.264 (base:enable_vproc =
+       MPP_VPROC_MODE_DEINTELACE, mpp.c): a field pair then comes out deinterlaced and sometimes as two frames
+       (MPP_FRAME_FLAG_IEP_DEI_I4O2), which a VA-API client cannot map to its pictures.  Off: the decoded frame is
+       the weaved pair, one output per picture pair, as the conformance references expect; deinterlacing is the
+       player's job (ffmpeg/mpv filters). */
+    mpp_dec_cfg_set_u32(dec_cfg, "base:enable_vproc", 0);
     mpi->control(mpp, MPP_DEC_SET_CFG, dec_cfg);
     mpp_dec_cfg_deinit(dec_cfg);
 
@@ -1135,6 +1156,17 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
 
     c->render_target = render_target;
     c->n_pending     = 0;
+    c->have_iq       = false;                /* the scaling lists are per picture: a client sends them with each one */
+
+    /* H.264 second field of a pair: the same surface, straight after a first field (the two fields of a pair are
+       consecutive in decoding order).  The surface keeps its generation and its "decoding" state: MPP outputs the
+       pair as one frame, tagged with the first field's PTS. */
+    c->h264_second_field = c->coding == MPP_VIDEO_CodingAVC && c->h264_expect_second_field &&
+                           render_target == c->h264_field_sid;
+    if (c->h264_second_field) {
+        LOG("BeginPicture: surface=0x%x second field of the pair (generation kept)", render_target);
+        return VA_STATUS_SUCCESS;
+    }
 
     /* Reset surface state for this decode cycle.  priv_buf/prime_fd are kept
      * intact so ExportSurfaceHandle always returns a valid fd (the previous
@@ -1180,6 +1212,11 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
             c->coding == MPP_VIDEO_CodingAVC) {
             memcpy(&c->last_pp, b->data,
                    sizeof(VAPictureParameterBufferH264));
+        } else if (b && b->type == VAIQMatrixBufferType &&
+                   c->coding == MPP_VIDEO_CodingAVC &&
+                   b->size >= sizeof(VAIQMatrixBufferH264)) {
+            memcpy(&c->last_iq, b->data, sizeof(VAIQMatrixBufferH264));
+            c->have_iq = true;
         } else if (b && b->type == VAPictureParameterBufferType &&
                    c->coding == MPP_VIDEO_CodingHEVC) {
             memcpy(&c->last_pp_hevc, b->data,
@@ -1268,6 +1305,10 @@ static int rk_copy_into_surface(MppFrame frame, RKSurface *s, VASurfaceID sid, i
     int  src_vs = fvs > 0 ? fvs : copy_h;
     bool i10    = MPP_FRAME_FMT_IS_YUV_10BIT(ffmt);
     int  bpp    = i10 ? 2 : 1;
+    /* Monochrome H.264 (4:0:0): MPP returns a luma-only frame (MPP_FMT_YUV400), the surface is NV12: copy the
+       luma and fill the chroma plane with grey.  Reading a chroma plane the frame does not have ran past the
+       buffer (ffmpeg crashed on the JVT HPCAMOLQ/HPCVMOLQ vectors). */
+    bool mono   = (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV400;
     int  copied = 0;
     void *src = buf ? mpp_buffer_get_ptr(buf) : NULL;
     void *dst = s->priv_buf ? mpp_buffer_get_ptr(s->priv_buf) : NULL;
@@ -1309,7 +1350,7 @@ static int rk_copy_into_surface(MppFrame frame, RKSurface *s, VASurfaceID sid, i
     const char *rga_sw = getenv("RKVA_RGA_COPY");
     bool rga_off    = (rga_sw && rga_sw[0] == '0');
     bool rga_8bit   = (rga_sw && rga_sw[0] == '1');
-    if (rga_8bit && !rga_off && !i10 && buf && s->priv_buf && rga_legacy_init()) {
+    if (rga_8bit && !rga_off && !i10 && !mono && buf && s->priv_buf && rga_legacy_init()) {
         int sfd = mpp_buffer_get_fd(buf);
         int dfd = mpp_buffer_get_fd(s->priv_buf);
         size_t need_src = (size_t)src_hs * src_vs * 3 / 2;
@@ -1440,10 +1481,14 @@ static int rk_copy_into_surface(MppFrame frame, RKSurface *s, VASurfaceID sid, i
                    (size_t)row_bytes);
         const uint8_t *su = sy + (size_t)src_hs * src_vs * bpp;
         uint8_t       *du = dy + (size_t)dst_hs * dst_vs * bpp;
-        for (int r = 0; r < copy_h / 2; r++)
-            memcpy(du + (size_t)r * dst_hs * bpp,
-                   su + (size_t)r * src_hs * bpp,
-                   (size_t)row_bytes);
+        for (int r = 0; r < copy_h / 2; r++) {
+            if (mono)
+                memset(du + (size_t)r * dst_hs * bpp, 0x80, (size_t)row_bytes);
+            else
+                memcpy(du + (size_t)r * dst_hs * bpp,
+                       su + (size_t)r * src_hs * bpp,
+                       (size_t)row_bytes);
+        }
         copied = 1;
     }
     *out_w = copy_w; *out_h = copy_h;
@@ -1537,6 +1582,7 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     int            fhs    = (int)mpp_frame_get_hor_stride(frame);
     int            fvs    = (int)mpp_frame_get_ver_stride(frame);
     MppFrameFormat ffmt   = mpp_frame_get_fmt(frame);
+    unsigned       fmode  = mpp_frame_get_mode(frame);   /* field flags for the log; the frame may be released before it */
 
     /* 8-bit zero-copy: keep MPP's frame (see RKSurface.zc_frame) */
     int zfd = buf ? mpp_buffer_get_fd(buf) : -1;
@@ -1607,8 +1653,8 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     s->decoded  = true;
     pthread_cond_broadcast(&s->cond);
     pthread_mutex_unlock(&s->lock);
-    LOG("assign_mpp_frame: surface=0x%x prime_fd=%d MPP %dx%d stride=%dx%d fmt=0x%x copied=%d copy_us=%lld",
-        (unsigned)sid, s->prime_fd, fwidth, fheight, fhs, fvs, (unsigned)ffmt, copied, t_copy1 - t_copy0);
+    LOG("assign_mpp_frame: surface=0x%x prime_fd=%d MPP %dx%d stride=%dx%d fmt=0x%x mode=0x%x copied=%d copy_us=%lld",
+        (unsigned)sid, s->prime_fd, fwidth, fheight, fhs, fvs, (unsigned)ffmt, fmode, copied, t_copy1 - t_copy0);
 }
 
 /* Output thread.  It blocks in MPP's output queue (MPP_SET_OUTPUT_TIMEOUT) and routes every frame as soon as MPP
@@ -1699,6 +1745,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
        slice inherits the PPS defaults, and ffmpeg's per-slice active counts are
        then exactly those defaults -- the only place VA-API lets us see them. */
     bool is_idr = false, seen_first = false;
+    int pps_id = 0;
     const VAPictureParameterBufferH264 *hpp = &c->last_pp;
     const VASliceParameterBufferH264 *last_sp = NULL;
     int learned_l0 = c->h264_l0_minus1, learned_l1 = c->h264_l1_minus1;
@@ -1709,20 +1756,48 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
         if (b->type != VASliceDataBufferType) continue;
         const uint8_t *nal = (const uint8_t *)b->data;
         size_t len = (size_t)b->size * b->num_elements;
-        if (!seen_first) { is_idr = ((nal[0] & 0x1F) == 5); seen_first = true; }
+        if (!seen_first) {
+            is_idr = ((nal[0] & 0x1F) == 5); seen_first = true;
+            int id = h264_peek_pps_id(nal, len);
+            if (id >= 0) pps_id = id;
+        }
         int st5 = -1;
         if (h264_peek_ref_override(nal, len, hpp, &st5) == 0 && last_sp) {
             learned_l0 = last_sp->num_ref_idx_l0_active_minus1;
             if (st5 == 1) learned_l1 = last_sp->num_ref_idx_l1_active_minus1;
         }
     }
-    bool pps_dirty = false;
     if (learned_l0 != c->h264_l0_minus1 || learned_l1 != c->h264_l1_minus1) {
         LOG("do_h264_decode: PPS num_ref_idx defaults learned from an override-free slice: "
             "L0 %d -> %d, L1 %d -> %d (re-emitting PPS)",
             c->h264_l0_minus1 + 1, learned_l0 + 1, c->h264_l1_minus1 + 1, learned_l1 + 1);
-        c->h264_l0_minus1 = learned_l0; c->h264_l1_minus1 = learned_l1; pps_dirty = true;
+        c->h264_l0_minus1 = learned_l0; c->h264_l1_minus1 = learned_l1;
     }
+
+    /* Field pictures (see the context fields): a second field keeps the surface state BeginPicture would have reset,
+       and does not join the decode queue.  If the picture BeginPicture took for a second field is not one (not a
+       field, or the same parity as the first), it is a new picture: reset the surface now. */
+    const bool is_field = hpp->pic_fields.bits.field_pic_flag;
+    const uint32_t parity = hpp->CurrPic.flags & (VA_PICTURE_H264_TOP_FIELD | VA_PICTURE_H264_BOTTOM_FIELD);
+    bool second_field = c->h264_second_field;
+    if (second_field && (!is_field || parity == c->h264_field_parity || hpp->frame_num != c->h264_field_frame_num)) {
+        LOG("do_h264_decode: surface=0x%x expected a second field but got %s: treating it as a new picture",
+            (unsigned)c->render_target, !is_field ? "a frame" : parity == c->h264_field_parity ? "the same parity" : "another frame_num");
+        second_field = false;
+        RKSurface *s = surface_by_id(d, c->render_target);
+        if (s) {
+            pthread_mutex_lock(&s->lock);
+            s->decoded = false;                    /* ctx_id already names this context (the first field set it) */
+            if (++s->gen == 0) s->gen = 1;
+            pthread_cond_broadcast(&s->cond);
+            pthread_mutex_unlock(&s->lock);
+        }
+    }
+    c->h264_second_field = false;
+    c->h264_expect_second_field = is_field && !second_field;
+    c->h264_field_sid = c->render_target;
+    c->h264_field_parity = parity;
+    c->h264_field_frame_num = hpp->frame_num;
     if (getenv("RKVA_TRACE_H264") && (is_idr || !c->sps_sent))
         LOG("h264 sps/pps: poc_type=%u log2_poc_lsb=%u frame_mbs_only=%u direct8x8=%u gaps_allowed=%u log2_mfn=%u "
             "num_ref_frames=%u | entropy=%u weighted_pred=%u bipred_idc=%u t8x8=%u deblock_ctrl=%u pps_l0=%d pps_l1=%d",
@@ -1734,28 +1809,46 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
             hpp->pic_fields.bits.transform_8x8_mode_flag, hpp->pic_fields.bits.deblocking_filter_control_present_flag,
             c->h264_l0_minus1 + 1, c->h264_l1_minus1 + 1);
 
-    /* SPS + PPS before every IDR (or first frame); PPS alone whenever the learned
-       reference-count defaults change -- a PPS update between pictures does not
-       disturb the DPB (unlike an SPS re-activation, which flushes it). */
-    if (is_idr || !c->sps_sent || pps_dirty) {
-        uint8_t hdr[512];
+    /* SPS before every IDR (or first frame).  The PPS is built for every picture -- its id, the flags VA-API
+       carries per picture (entropy mode, weighted prediction, QP offsets, transform_8x8), the scaling lists and
+       the learned reference-count defaults -- and sent whenever it differs from the one MPP has: a stream may use
+       several PPS ids, or change a PPS between pictures, and a PPS update does not disturb the DPB (unlike an SPS
+       re-activation, which flushes it). */
+    {
+        uint8_t hdr[2048];                 /* a PPS with eight explicit scaling lists is ~440 B, and the writer reserves 2x for escaping */
         if (is_idr || !c->sps_sent) {
             int n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
                                    profile_idc(c->profile));
             if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
         }
-        int n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp, c->h264_l0_minus1, c->h264_l1_minus1);
-        if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
+        int n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp, pps_id, c->have_iq ? &c->last_iq : NULL,
+                               c->h264_l0_minus1, c->h264_l1_minus1);
+        if (n <= 0) LOG("do_h264_decode: PPS could not be written (%d): the picture goes out with the previous one", n);
+        bool differs = n > 0 && (n != c->h264_pps_last_len || memcmp(hdr, c->h264_pps_last, (size_t)n) != 0);
+        if (n > 0 && (is_idr || !c->sps_sent || differs)) {
+            PKT_APPEND(hdr, (size_t)n);
+            if (differs && c->sps_sent && !is_idr)
+                LOG("do_h264_decode: PPS changed (id %d%s): re-sent", pps_id,
+                    c->have_iq && !h264_iq_is_flat(&c->last_iq) ? ", scaling lists" : "");
+            memcpy(c->h264_pps_last, hdr, (size_t)n); c->h264_pps_last_len = n;
+        }
         c->sps_sent = true;
     }
 
-    /* append each slice with Annex B start code */
+    /* append each slice with Annex B start code.  The client's slice buffer can end with trailing_zero_8bits
+       (ffmpeg hands over the NAL up to the next start code, and a 4-byte start code leaves its first zero on the
+       previous NAL).  Those zeros are not part of the NAL: a software decoder ignores them, but the hardware parses a
+       CAVLC slice wrongly with them (every CAVLC multi-slice vector: BA1_FT_C, BASQP1, the CVFI/CVNLFI Sony fields).
+       The RBSP ends with a stop bit, so the last real byte is never zero. */
     static const uint8_t sc[4] = {0x00, 0x00, 0x00, 0x01};
     for (int i = 0; i < c->n_pending; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
         if (!b || b->type != VASliceDataBufferType) continue;
+        size_t len = (size_t)b->size * b->num_elements;
+        const uint8_t *p = (const uint8_t *)b->data;
+        while (len > 2 && p[len - 1] == 0) len--;
         PKT_APPEND(sc, 4);
-        PKT_APPEND(b->data, (size_t)b->size * b->num_elements);
+        PKT_APPEND(p, len);
     }
 #undef PKT_APPEND
 
@@ -1788,8 +1881,10 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
      * which is only correct when output order matches submit order: with
      * B-frames a decoded picture would land in whichever surface was submitted
      * most recently, producing ghosted frames. */
-    c->decode_queue[c->dq_tail] = c->render_target;
-    c->dq_tail = (c->dq_tail + 1) & 63;
+    if (!second_field) {
+        c->decode_queue[c->dq_tail] = c->render_target;
+        c->dq_tail = (c->dq_tail + 1) & 63;
+    }
     pthread_mutex_unlock(&c->out_lock);
 
     /* Debug valve: RKVA_DUMP_H264=<path> appends every assembled H.264 packet so

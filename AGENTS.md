@@ -113,7 +113,7 @@ Works in hardware, pixel-identical to software decode:
 - VP9 Profile 0 (incl. non-16-aligned widths) and Profile 2 (copy-back and zero-copy)
 
 Not available, and why:
-- **AV1** — decodes since v3.0.0 through the OBU re-serialiser (`src/av1.c` + the vendored GStreamer writer); film grain is not applied (KI-13).
+- **AV1** — decodes since v3.0.0 through the OBU re-serialiser (`src/av1.c` + the vendored GStreamer writer); film grain is applied by the hardware with MPP `+pd35` / the #974 fix (KI-13).
 - **Zero-copy 10-bit display** — works on Mesa (panfork) since v2.1.3 (mpv
   `hwdec=vaapi`, Firefox). Until then the export named the UV plane with a
   non-existent fourcc ("GR16") and Mesa refused it; KI-3 has the forensics. On Arm's

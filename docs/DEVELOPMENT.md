@@ -393,8 +393,9 @@ What the VA parameters do not say, and how it is handled:
   tiles as a shown `INTRA_ONLY` frame with refresh 0, because `show_existing` of a KEY makes the decoder refresh
   every slot and reset state. A hidden picture synced early is decoded as shown (INTRA_ONLY if it was a KEY).
 - **Film grain:** with `apply_grain` the client renders into `current_frame` (reused between pictures) and reads
-  `current_display_picture`. MPP applies no grain on RK3588 (#974), so the clean picture is keyed on the display
-  surface and the reconstruct surface is only marked decoded.
+  `current_display_picture`. With MPP's #974 fix (`+pd35`) the hardware applies the grain on its post-processor output,
+  which is the picture the driver keys on the display surface; the reconstruct surface is only marked decoded (the
+  references stay grain-free inside MPP). Without the fix the display surface gets the clean picture.
 - **Derived header fields:** tile log2 counts from the client's tile counts (uniform case) or the SB-aligned starts
   (non-uniform), skip-mode frames from the slots' order hints, `PrevGmParams` from the saved global motion of the
   primary reference, segmentation `update_data` passed through, loop restoration `lr_unit_shift`/`lr_uv_shift` as

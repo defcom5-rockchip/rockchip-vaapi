@@ -56,14 +56,14 @@ server-side transcode) instead of rendering a broken picture.
 
 | Codec | Profile | Status |
 |-------|---------|--------|
-| H.264 | Constrained Baseline, Main, High | ✅ hardware decode (B-frame routing fixed in v2.1.2, KI-1) |
+| H.264 | Constrained Baseline, Main, High | ✅ hardware decode (B-frame routing fixed in v2.1.2, KI-1). v4.0.0 (in development): custom scaling matrices, interlaced streams, per-picture PPS changes and CAVLC multi-slice pictures fixed — JVT-AVC_V1 111/135 and JVT-FR-EXT 67/69 bit-exact (74 and 27 in 3.5.0); KI-17, KI-20, KI-21 |
 | VP8   | Version 0–3 | ✅ advertised |
 | VP9   | Profile 0 (8-bit) | ✅ hardware decode, including non-16-aligned widths |
-| H.264 | High10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
-| HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+), bit-exact vs software |
-| HEVC  | Main10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 (mpv and Firefox verified; see KI-3 for the history) |
+| H.264 | High10 | ✅ advertised since v2.1.3, decodes on the hardware with its scaling matrices since v4.0.0 (KI-17); the two FREH10 vectors still differ (initial QP, KI-17); Firefox decodes High 10 in software by its own choice |
+| HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+), bit-exact vs software on streams with inline reference sets. ⚠ Slices that reference SPS-level reference-picture sets decode with wrong references and can stall the decoder (KI-5): most JCT-VC conformance vectors, 2026-10-23 |
+| HEVC  | Main10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 (mpv and Firefox verified; see KI-3 for the history); the KI-5 caveat applies |
 | VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
-| AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; matches the Fluster reference checksums on 213/242 libaom and 31/36 Chromium conformance vectors, the rest explained in KI-13 (film grain is not applied) |
+| AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; matches the Fluster reference checksums on 213/242 libaom and 31/36 Chromium conformance vectors, the rest explained in KI-13 (film grain is applied with the fixed MPP, see KI-13) |
 
 Releases before v2.0.0 advertised HEVC, High10 and VP9 Profile 2 without decoding
 them correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story.
@@ -92,7 +92,9 @@ MPP keeps that decode and stores it into the right slots afterwards, otherwise t
 hidden decode: one extra AV1-engine job per such picture, see [KI-14](KNOWN-ISSUES.md#ki-14-av1-decoded-twice-per-early-synced-picture-without-plaid-pis-mpp-v350)). Conformance measured through
 `ffmpeg -hwaccel vaapi` (see `evidence/2026-10-11-av1-fluster/`); decode on the AV1 engine confirmed by interrupt
 counts in Chrome, Firefox and mpv, the picture checked by eye in Chrome and Firefox.
-Film grain is **not** applied (MPP does not synthesise it on RK3588): grainy streams decode to the clean picture.
+Film grain is applied by the hardware when MPP has the one-line fix from rockchip-mpp issue #974 (Plaid Pi's `+pd35`, and the
+pull request we opened upstream); with an older MPP, grainy streams decode to the clean picture. `RKVA_AV1_NO_GRAIN=1` turns
+the grain off for a decode (the player can then apply its own).
 `RKVA_AV1_WRITER_DEBUG=1` prints the bit writer's warnings (`2` adds its debug trace), `RKVA_DUMP_AV1=file` saves the stream sent to MPP.
 AV1 needs MPP's `av1d` and the RK3588's AV1 decoder (RK356x has none); film grain depends on MPP (#974).
 Releases are named after Number Nine's Pepper boards, co-processor graphics cards of the late 1980s — this driver's

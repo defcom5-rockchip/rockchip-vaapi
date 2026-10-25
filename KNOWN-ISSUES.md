@@ -4,7 +4,7 @@ Hardware-verified on Orange Pi 5B (RK3588S) unless noted. Reports from other
 RK3588/RK3588S boards are welcome — decode silicon is identical across the two,
 so behaviour should match.
 
-Current as of **v3.5.0**.
+Current as of **v3.5.0**; fixes that landed in the v4.0.0 development tree are marked as such.
 
 ---
 
@@ -108,16 +108,19 @@ report it.
 
 ---
 
-## KI-5: some HEVC streams use SPS-indexed reference-picture sets (not yet reconstructible)
+## KI-5: HEVC slices that reference SPS-level reference-picture sets decode with wrong references (can stall the decoder)
 
-**Status:** open (Phase 1.6 candidate) · **Severity:** affected streams fall back to software
+**Status:** open (next release) · **Severity:** wrong picture or a decoder stall · measured 2026-10-23
 
-Slices that reference SPS-level RPS entries by index (`short_term_ref_pic_set_sps_flag=1`)
-or use inter-RPS prediction cannot be rebuilt from what VA-API provides — the set tables
-are not in the parameter struct. The driver detects this and logs a WARNING rather than
-guessing. The planned fix rebuilds the picture's RPS from `ReferenceFrames` and rewrites
-the slice header with an explicit inline set. Long-term SPS reference sets and custom
-scaling lists are likewise not yet handled (defaults are used).
+Slices that reference SPS-level RPS entries by index (`short_term_ref_pic_set_sps_flag=1`) or use inter-RPS prediction
+cannot be rebuilt from what VA-API provides — the set tables are not in the parameter struct. The driver detects this,
+logs a WARNING, and continues with the slice header as written: the hardware then uses the wrong references. There is
+**no software fallback** (an earlier version of this entry said there was). Measured with the JCT-VC-HEVC_V1 suite through
+`ffmpeg -hwaccel vaapi`: most Main vectors fail this way; `AMP_A_Samsung_7` decodes one frame and then stalls the decoder
+(`SyncSurface: TIMEOUT`, 178 rkvdec resets during the HEVC suite). Streams that write their reference sets inline in the
+slice header (what the x265-encoded test files used here do) are unaffected. The planned fix rebuilds the picture's RPS
+from `ReferenceFrames` and rewrites the slice header with an explicit inline set; long-term SPS reference sets and custom
+scaling lists (5 of the 147 conformance vectors) need the same treatment.
 
 ## KI-7: surface pool exhaustion on 4K in Chrome — FIXED in v2.1.4
 
@@ -264,9 +267,10 @@ decoded frames are correct; copy-back draws them right. The newer g29p1 driver i
 (`GR1616`) as an integer texture too. Chrome and Chromium draw 10-bit correctly on the same driver (checked by eye
 with a VP9 Profile 2 clip), probably because they import the whole frame, which the driver converts correctly.
 
-**Fixes:** mpv 0.41 with the fork's patch queries the texture's internal format after the import and copies integer
-planes into normalised textures (exact, ~1 ms per 4K plane). Firefox: the same check in `DMABufSurfaceYUV::CreateTexture()`
-(a Firefox build carrying the patch prepared for Mozilla, companion to Bugzilla 2078820) — 10-bit VP9 Profile 2 and AV1 then draw correctly from hardware (checked by eye; HEVC Main10 uses the same import path and is expected to follow, not yet checked).
+**Fixes:** mpv 0.41 with the fork's patches (Plaid Pi's `+pd1`/`+pd2`) queries the texture's internal format after the import
+and samples an integer luma plane as such in the shader (no copy; the refused 8-bit chroma plane is copied). Firefox: Plaid Pi
+loads a small library (libpidesktop-ffmali) as Firefox's EGL/GL library that redoes the imports, so the unmodified Firefox
+works; a Firefox patch with the same check in `DMABufSurfaceYUV::CreateTexture()` is under review (Bugzilla 2078820) — 10-bit VP9 Profile 2 and AV1 then draw correctly from hardware (checked by eye; HEVC Main10 uses the same import path and is expected to follow, not yet checked).
 
 **Workarounds for unpatched players:** mpv `--hwdec=vaapi-copy` (still decoded in hardware). For a client that cannot
 be told to copy, set `RKVA_HIDE_10BIT=1` in that client's environment only, for example `env RKVA_HIDE_10BIT=1 firefox`:
@@ -300,10 +304,13 @@ the final code, with the number of held decoder buffers staying flat (2.2.0: 273
 
 **Status:** limits, by design or by the hardware · decode is otherwise bit-exact against dav1d
 
-- **Film grain is not applied.** MPP's av1d HAL leaves grain synthesis off (rockchip-mpp issue #974, open), so a stream with
-  `apply_grain` decodes to the clean reference picture, which the driver lands on the display surface (the reference
-  surface is only marked decoded; nothing reads it). Grainy and non-grainy playback therefore look alike. Chrome, Firefox and mpv do not apply grain themselves
-  on this path.
+- **Film grain needs the MPP fix.** MPP's av1d HAL never set the register that turns grain synthesis on (rockchip-mpp
+  issue #974; a pull request with the one-line fix is prepared, 2026-10-25). With MPP up to `+pd34` a stream with
+  `apply_grain` decodes to the clean reference picture; with Plaid Pi's `+pd35` the hardware applies the grain, bit-exact
+  against dav1d on 12 streams (446 frames) including inherited parameters, 4K60 and AFBC output. No player adds grain a
+  second time on this path: ffmpeg's hwaccel sets `apply_grain` only when it does not export the grain itself, and mpv's
+  `film-grain=cpu` is the only mode that renders grain on the Mali driver (measured 2026-10-24). `RKVA_AV1_NO_GRAIN=1`
+  switches it off for a decode.
 - **Tiny frames and spatial layers.** 21 of libaom's 36 tiny-frame vectors (`av1-1-b8-01-size-*`, both dimensions
   ≤ 66 px) and the two spatial-layer vectors (`svc-L2T*`) fail on the decoder itself: the raw MPP decoder, fed the
   original stream, does not match dav1d on them either (same mismatch counts for the size vectors; for svc the raw
@@ -313,6 +320,11 @@ the final code, with the number of held decoder buffers staying flat (2.2.0: 273
   keeps the surfaces of the first size, so the picture is cropped to the surface or sits in the corner of it, and the
   raw MPP decoder fails `sizeup` as well (11 of 20 frames). The driver never writes past the surface (v3.0.0; earlier
   test builds corrupted the heap here). Browsers create a new decoder on a resolution change; these vectors do not.
+  Measured 2026-10-24 (v3.5.0, MPP `+pd34` and `+pd35` identically): on `sizeup`, ffmpeg's own download path can **read**
+  past the end of the frame it downloaded — the frame is the old size, the stream says the new one, and libswscale reads
+  the difference: 3 of 20 runs of Fluster's exact command segfault in memcpy; the rest finish with the known wrong md5,
+  which can include adjacent heap bytes in the picture (out-of-bounds read, never a write). Fix planned for the
+  resolution-change path in v4.0.0; the measurement is in the maintainer's notes (not yet in `evidence/`).
 - **Refused, so the client falls back to software:** Profile 1/2 (4:4:4, 4:2:2), 12-bit, monochrome, super-resolution
   frames, large-scale tile frames, switch frames, more than 64 tile columns or rows. ffmpeg's hwaccel path (`-c:v av1 -hwaccel vaapi`) reports an error instead of falling
   back — use `-c:v libdav1d`; players that pick libdav1d themselves fall back cleanly.
@@ -388,14 +400,81 @@ written it shows the surface's previous content (or green on a surface's first u
 
 ---
 
-## KI-17: H.264 High 10 (10-bit) in Firefox — software, and the output differs from a software decode (v3.5.0)
+## KI-17: H.264 streams with custom scaling matrices decode wrong (all High-profile depths) — FIXED in v4.0.0
 
-**Status:** open · low impact (10-bit H.264 is rare outside anime rips)
+**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was: wrong picture · measured 2026-10-23, re-measured 2026-10-25
 
-The driver advertises H.264 High 10, but Firefox decodes such streams in software, and the hardware output has been seen
-to differ from a software decode. Every other profile in the table is verified. Not investigated further yet.
+`h264.c` rebuilt the SPS/PPS it sends to MPP with `pic_scaling_matrix_present_flag = 0` and never read
+`VAIQMatrixBufferH264`, so the hardware dequantised every High-profile stream with flat matrices: streams that carry custom
+matrices (x264 `--cqm`, many Blu-ray and broadcast encodes, the JVT FRExt vectors) came out slightly wrong at every bit depth.
 
----
+Fix: the client's scaling lists (VA-API hands them over in raster order; ffmpeg resolves the SPS/PPS fall-back rules before
+it fills the buffer) are written into the PPS as explicit `pic_scaling_list` entries in zig-zag order whenever they are not
+flat. With it, the PPS is now rebuilt for every picture and sent whenever it differs from the one MPP has, under the
+`pic_parameter_set_id` the slices name: streams that switch PPS ids or change a PPS between pictures (weighted prediction,
+QP offsets, CABAC/CAVLC) are right too. A PPS with eight explicit lists of extreme values is about 440 bytes, and the writer
+reserves twice that for escaping; the first version of the fix silently dropped such a PPS because its buffers were 512
+bytes (FRExt1/FRExt3_Panasonic), so the buffers are 2 KB.
+
+Measured on the JVT suites through `ffmpeg -hwaccel vaapi` (Fluster, 2026-10-25, `evidence/2026-10-25-h264-fluster/`): JVT-FR-EXT 27/69 → 67/69, JVT-AVC_V1
+74/135 → 111/135 together with KI-20 and the slice fix of KI-21, no vector regressed. Still failing in FR-EXT: FREH10-1/2 (High 10
+initial QP: ffmpeg's `pic_init_qp_minus26` includes the bit-depth offset that the bitstream value must not; GStreamer and
+Chromium send the coded value, so the driver cannot subtract it blindly).
+
+Found on the way: **monochrome (4:0:0) High streams crashed ffmpeg** (HPCAMOLQ/HPCVMOLQ_BRCM_B; HPCVMOLQ crashed with 3.5.0 too).
+MPP returns a luma-only frame for them and the driver copied a chroma plane the frame does not have, past the end of the
+buffer. The copy now fills the surface's chroma plane with grey; both vectors decode bit-exact.
+
+The 3.5.0 entry under this number said that Firefox decodes High 10 in software and that the hardware output differed from
+software; the second part was this bug. Firefox's software decode of High 10 is Firefox's choice, not the driver's.
+
+## KI-20: interlaced H.264 (field pictures, PAFF, MBAFF) was mostly refused — FIXED in v4.0.0, output is weaved
+
+**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was: no hardware decode for interlaced streams · re-measured 2026-10-25
+
+Three things were wrong, none of them in the hardware:
+
+- **Two Begin/EndPicture rounds for one frame.** A VA-API client decodes the two fields of a frame into the same surface
+  with two pictures. The driver treated the second as a new picture: it bumped the surface's generation (the packets carry
+  it in the PTS, and MPP tags the pair's output with the second field's PTS, so the output looked stale and was dropped) and
+  queued the surface twice. The second field of a pair now keeps the surface state and the queue entry of the first.
+- **MPP deinterlaced on its own.** MPP's decoder is created with `base:enable_vproc = MPP_VPROC_MODE_DEINTELACE`: a field
+  pair came back through its IEP deinterlacer, as one or two frames per pair that never equal the decoded picture. The
+  driver turns that off; a VA-API client expects the decoded frame, one per picture pair.
+- **The option was set but not applied.** The driver built its `MppDecCfg` from `mpp_dec_cfg_init()` instead of the decoder's
+  live configuration, and MPP applies only values that differ from what the object holds, so turning a default-on option
+  off was a no-op. It reads the live configuration first now (this also means `base:split_parse = 0` was never applied
+  before; MPP accepted our per-picture packets either way).
+
+What this means for players: interlaced H.264 (DVB/ATSC recordings, DVD/Blu-ray remuxes) now decodes in hardware and comes
+out **weaved**, as every other VA-API driver delivers it; the player has to deinterlace. This driver has no VA-API
+video-processing (VPP) entry points, so the `vaapi` deinterlace filters of mpv, ffmpeg and GStreamer are not available.
+mpv 0.41 does not deinterlace by default; with `--deinterlace=yes` (or `auto`) it tries `vavpp`, logs that it failed, and
+falls back to downloading the frame and running `bwdif` in software, which works at a copy per frame (`hwdec=vaapi-copy`
+avoids the detour). Chromium and Chrome never reach the driver with interlaced H.264: their own decoder refuses it and
+they decode in software, as before. Firefox decodes it in hardware now and shows it weaved, as it showed the software
+decode before.
+
+Measured (Fluster, 2026-10-25): of the 58 JVT-AVC_V1 and FR-EXT vectors whose names mark field, PAFF or MBAFF coding (list in
+`evidence/2026-10-25-h264-fluster/`), 52 pass on the hardware, 31 of them for the first time. Still failing:
+Sharp_MP_Field_1/2/3 and Sharp_MP_PAFF_1r2/2r (picture order count type 1, whose offsets VA-API does not carry) and
+CVFI2_SVA_C (not investigated).
+
+## KI-21: a few H.264 parameter cases differ from a software decode (v3.5.0) — mostly fixed in v4.0.0
+
+**Status:** open for the remaining cases · **Severity:** wrong picture on specific streams · measured 2026-10-23, re-measured 2026-10-25
+
+Fixed by the per-picture PPS of KI-17: explicit weighted prediction (CAWP1/5, CVWP1/5), QP and chroma-QP offsets (CACQP3,
+CVCANLMA2), several PPS ids (MPS_MW_A, HCHP1). Fixed separately: **pictures with several CAVLC slices** (BA1_FT_C, BASQP1,
+CI1_FT_B, SL1_SVA_B, SVA_Base_B, SVA_CL1_E, SVA_FM1_E, CVFC1_Sony_C, and the CVFI1/CVFI2/CVNLFI1/CVNLFI2 Sony field vectors). ffmpeg hands the driver each slice NAL up to the next start
+code, and when that start code is the 4-byte form its first zero stays on the previous NAL; a software decoder ignores the
+trailing zero; the hardware parsed CAVLC slices wrongly with it (the twelve vectors above, none of them CABAC). The driver strips trailing
+zero bytes from slice data before it sends them.
+
+Still open (JVT-AVC_V1 2026-10-25, 24 failing vectors): picture order count type 1 (BAMQ2, NLMQ2, LS_SVA_D, MR9_BT_B, the
+Sharp field vectors; the offsets are not in the VA-API picture parameters, a fix rewrites the slices to type 0), long-term
+references with reordering (MR1_BT_A wrong; MR2–MR5_TANDBERG and MR6–MR8_BT refused), CVFI2_SVA_C, and the classes the hardware or VA-API do not
+cover: FMO/ASO (FM*, BA3_SVA_C), SP slices (SP1, sp2).
 
 ## KI-18: GStreamer needs `GST_VA_ALL_DRIVERS=1` (v3.5.0)
 

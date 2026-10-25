@@ -123,18 +123,52 @@ int h264_write_sps(uint8_t *buf, size_t buf_size,
     return (int)(4 + ep);
 }
 
+/* Zig-zag scan: entry k is the raster index of the k-th coefficient in the coded order (7.3.2.1.1.1 writes
+   the lists in zig-zag frame order; VA-API hands them over in raster order). */
+static const uint8_t zz4x4[16] = { 0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15 };
+static const uint8_t zz8x8[64] = {
+     0,  1,  8, 16,  9,  2,  3, 10, 17, 24, 32, 25, 18, 11,  4,  5,
+    12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13,  6,  7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63 };
+
+int h264_iq_is_flat(const VAIQMatrixBufferH264 *iq)
+{
+    if (!iq) return 1;
+    for (int i = 0; i < 6; i++) for (int j = 0; j < 16; j++) if (iq->ScalingList4x4[i][j] != 16) return 0;
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 64; j++) if (iq->ScalingList8x8[i][j] != 16) return 0;
+    return 1;
+}
+
+/* scaling_list() of 7.3.2.1.1.1 for one list given in raster order: delta_scale per coefficient in zig-zag order.
+   Every entry is 1..255, so nextScale is never 0 and useDefaultScalingMatrixFlag never triggers. */
+static void write_scaling_list(BSWriter *bs, const uint8_t *raster, const uint8_t *zz, int n)
+{
+    int last = 8;
+    for (int k = 0; k < n; k++) {
+        int v = raster[zz[k]];
+        int delta = ((v - last + 128) & 255) - 128;      /* wrapped to -128..127; (last + delta + 256) % 256 == v */
+        bs_write_se(bs, delta);
+        last = v;
+    }
+}
+
 int h264_write_pps(uint8_t *buf, size_t buf_size,
-                   const VAPictureParameterBufferH264 *pp,
+                   const VAPictureParameterBufferH264 *pp, int pps_id,
+                   const VAIQMatrixBufferH264 *iq,
                    int l0_default_minus1, int l1_default_minus1)
 {
-    uint8_t raw[256];
+    /* Eight explicit scaling lists are up to 224 delta_scale values of up to 17 bits each (a conformance stream
+       alternates 255 and 1): about 440 bytes before emulation prevention, and the size check below reserves twice
+       that, so the buffers are sized well above. */
+    uint8_t raw[1024];
     BSWriter bs;
     bs_init(&bs, raw, sizeof(raw));
 
     /* NAL header: forbidden_zero=0, nal_ref_idc=3, nal_unit_type=8 */
     bs_write(&bs, 0x68, 8);
 
-    bs_write_ue(&bs, 0); /* pic_parameter_set_id */
+    bs_write_ue(&bs, (uint32_t)(pps_id < 0 ? 0 : pps_id)); /* pic_parameter_set_id: the one the slices name */
     bs_write_ue(&bs, 0); /* seq_parameter_set_id */
     bs_write(&bs, pp->pic_fields.bits.entropy_coding_mode_flag, 1);
     bs_write(&bs, pp->pic_fields.bits.pic_order_present_flag, 1);
@@ -161,11 +195,39 @@ int h264_write_pps(uint8_t *buf, size_t buf_size,
     bs_write(&bs, pp->pic_fields.bits.constrained_intra_pred_flag, 1);
     bs_write(&bs, pp->pic_fields.bits.redundant_pic_cnt_present_flag, 1);
 
-    /* More-data present if high-profile extensions needed */
-    if (pp->pic_fields.bits.transform_8x8_mode_flag ||
+    /* More-data present if high-profile extensions needed.  The scaling lists VA-API carries are the ones in
+       effect for this picture (ffmpeg resolves the SPS/PPS fall-back rules before it fills the buffer), so they
+       are written here as explicit PPS lists whenever they are not flat; a flat set is what "no matrix" means. */
+    const int t8x8 = pp->pic_fields.bits.transform_8x8_mode_flag;
+    /* A 0 entry would end the list early in the decoder (nextScale == 0 means "use the default / hold the last") while
+       we keep writing deltas, and every field after it would be misread; no client sends one, but a zeroed buffer must
+       not desynchronise the PPS: such a buffer is treated as "no usable matrix". */
+    int usable = iq && !h264_iq_is_flat(iq);
+    if (usable) {
+        for (int i = 0; i < 6 && usable; i++) for (int j = 0; j < 16; j++) if (!iq->ScalingList4x4[i][j]) { usable = 0; break; }
+        for (int i = 0; i < 2 && usable; i++) for (int j = 0; j < 64; j++) if (!iq->ScalingList8x8[i][j]) { usable = 0; break; }
+    }
+    const int have_lists = usable;
+    if (t8x8 || have_lists ||
         pp->second_chroma_qp_index_offset != pp->chroma_qp_index_offset) {
-        bs_write(&bs, pp->pic_fields.bits.transform_8x8_mode_flag, 1);
-        bs_write(&bs, 0, 1); /* pic_scaling_matrix_present_flag = 0 */
+        bs_write(&bs, t8x8, 1);
+        bs_write(&bs, have_lists, 1); /* pic_scaling_matrix_present_flag */
+        if (have_lists) {
+            const int cfi = pp->seq_fields.bits.chroma_format_idc;
+            const int n8 = t8x8 ? ((cfi != 3) ? 2 : 6) : 0;
+            for (int i = 0; i < 6; i++) {
+                bs_write(&bs, 1, 1); /* pic_scaling_list_present_flag[i] */
+                write_scaling_list(&bs, iq->ScalingList4x4[i], zz4x4, 16);
+            }
+            for (int i = 0; i < n8; i++) {
+                if (i < 2) {        /* Intra Y, Inter Y: the two lists VA-API carries */
+                    bs_write(&bs, 1, 1);
+                    write_scaling_list(&bs, iq->ScalingList8x8[i], zz8x8, 64);
+                } else {
+                    bs_write(&bs, 0, 1); /* 4:4:4 chroma 8x8 lists: not carried; fall-back rule */
+                }
+            }
+        }
         bs_write_se(&bs, pp->second_chroma_qp_index_offset);
     }
 
@@ -198,6 +260,7 @@ static uint32_t h264_br_ue(H264BR *b)
 {
     int lz = 0;
     while (lz < 32 && h264_br_u(b, 1) == 0) lz++;
+    if (lz >= 32) return 0;                                 /* all-zero payload: no code word */
     return lz == 0 ? 0 : ((1u << lz) - 1) + h264_br_u(b, lz);
 }
 static int32_t h264_br_se(H264BR *b)
@@ -258,4 +321,19 @@ int h264_peek_ref_override(const uint8_t *nal, size_t len,
     if (pp->pic_fields.bits.redundant_pic_cnt_present_flag) (void)h264_br_ue(&r);
     if (st == 1) (void)h264_br_u(&r, 1);                    /* direct_spatial_mv_pred_flag */
     return (int)h264_br_u(&r, 1);                           /* num_ref_idx_active_override_flag */
+}
+
+/* pic_parameter_set_id of a slice NAL: the third ue(v) of the slice header. */
+int h264_peek_pps_id(const uint8_t *nal, size_t len)
+{
+    if (!nal || len < 2) return -1;
+    const int nal_type = nal[0] & 0x1F;
+    if (nal_type != 1 && nal_type != 5) return -1;
+    uint8_t tmp[32];
+    size_t n = h264_rbsp_unescape(nal + 1, len - 1 < sizeof tmp ? len - 1 : sizeof tmp, tmp, sizeof tmp);
+    H264BR r = { tmp, n, 0 };
+    (void)h264_br_ue(&r);                                   /* first_mb_in_slice */
+    (void)h264_br_ue(&r);                                   /* slice_type */
+    uint32_t id = h264_br_ue(&r);
+    return id > 255 ? -1 : (int)id;
 }

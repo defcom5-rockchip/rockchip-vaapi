@@ -14,9 +14,16 @@ int h264_write_sps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferH264 *pp,
                    int profile_idc);
 
+/* PPS for the picture: pps_id is the id the slices name; iq (may be NULL) is the client's VAIQMatrixBufferH264,
+   written as explicit pic_scaling lists when it is not flat. */
 int h264_write_pps(uint8_t *buf, size_t buf_size,
-                   const VAPictureParameterBufferH264 *pp,
+                   const VAPictureParameterBufferH264 *pp, int pps_id,
+                   const VAIQMatrixBufferH264 *iq,
                    int l0_default_minus1, int l1_default_minus1);
+/* pic_parameter_set_id of a slice NAL (escaped), or -1. */
+int h264_peek_pps_id(const uint8_t *nal, size_t len);
+/* true when every scaling-list entry is 16 (Flat_4x4_16 / Flat_8x8_16: the same as no matrix). */
+int h264_iq_is_flat(const VAIQMatrixBufferH264 *iq);
 /* num_ref_idx_active_override_flag of a P/SP/B slice, or -1; slice_type%5 in *st5. */
 int h264_peek_ref_override(const uint8_t *nal, size_t len,
                            const VAPictureParameterBufferH264 *pp, int *st5);
