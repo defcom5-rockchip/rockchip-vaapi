@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <unistd.h>
@@ -198,6 +199,7 @@ typedef struct {
     bool hevc_rewrite_rps;       /* the stream's SPS had RPS sets / long-term entries: slice headers are rewritten */
     bool hevc_rewrite_warned;
     bool     hevc_iq_warned;        /* one-time log: client scaling lists with a zero entry */
+    bool     h264_initqp_warned;    /* one-time log: the init QP value contradicted the client guess */
     int  h264_l0_minus1, h264_l1_minus1;   /* learned PPS num_ref_idx_lX_default_active_minus1 (0 until a slice teaches us) */
     VAIQMatrixBufferH264 last_iq;          /* the client's scaling lists for the picture (ffmpeg sends them every picture) */
     bool         have_iq;
@@ -1733,6 +1735,38 @@ static RK_S64 rk_surface_pts(RKDriver *d, VASurfaceID sid) {
     return (RK_S64)(((uint64_t)gen << 32) | (uint64_t)sid);
 }
 
+/* Does the client hand over pic_init_qp_minus26 with QpBdOffsetY added?  ffmpeg does (h264_ps.c adds
+   6 * (bit_depth_luma - 8) to init_qp and vaapi_h264.c sends init_qp - 26; its NVDEC backend subtracts it again, the
+   VA-API one does not), so every ffmpeg-based client (ffmpeg, mpv, Firefox, Kodi) sends High 10 streams with an initial
+   QP 12 too high.  Chromium and GStreamer send the coded value.  The bitstream value cannot be told from the number
+   alone, so the client is recognised: Chromium's GPU process (or its out-of-process video decoder) by its command
+   line, GStreamer by its symbols, and everything else is taken for ffmpeg.  RKVA_H264_INITQP=coded|ffmpeg overrides. */
+static bool h264_client_adds_qp_bd_offset(void)
+{
+    static int v = -1;                                          /* published once, after the decision is final */
+    if (v >= 0) return v == 1;
+    int r = 1;
+    const char *e = getenv("RKVA_H264_INITQP");
+    if (e && !strcmp(e, "coded"))       r = 0;
+    else if (e && !strcmp(e, "ffmpeg")) r = 1;
+    else {
+        if (e && *e) LOG("h264: RKVA_H264_INITQP=%s not understood (coded|ffmpeg): recognising the client instead", e);
+        if (dlsym(RTLD_DEFAULT, "gst_init")) r = 0;             /* GStreamer in the process */
+        FILE *f = fopen("/proc/self/cmdline", "rb");
+        if (f) {
+            char buf[4096]; size_t n = fread(buf, 1, sizeof buf - 1, f); fclose(f);
+            for (size_t i = 0; i < n; i++) if (buf[i] == 0) buf[i] = ' ';
+            buf[n] = 0;
+            if (strstr(buf, "--type=gpu-process") ||            /* Chromium / Chrome GPU process */
+                strstr(buf, "--utility-sub-type=media.mojom.")) /* Chromium out-of-process video decoder */
+                r = 0;
+        }
+    }
+    LOG("h264: client treated as %s for pic_init_qp (High 10)", r ? "ffmpeg-style (QpBdOffset added)" : "coded value");
+    __atomic_store_n(&v, r, __ATOMIC_RELEASE);
+    return r == 1;
+}
+
 /* Build Annex B bitstream from VA-API buffers and send to MPP */
 static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
 {
@@ -1834,7 +1868,21 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
                                    profile_idc(c->profile));
             if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
         }
-        int n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp, pps_id, c->have_iq ? &c->last_iq : NULL,
+        int qp_off = 0;
+        if (c->last_pp.bit_depth_luma_minus8) {
+            /* The value itself settles it when it can: for 10-bit a coded pic_init_qp_minus26 is at most 25 and an
+               ffmpeg-style one (coded + 12) at least -26, so above 25 proves ffmpeg-style and below -26 proves coded. */
+            int bd = 6 * c->last_pp.bit_depth_luma_minus8, v = c->last_pp.pic_init_qp_minus26;
+            bool adds = h264_client_adds_qp_bd_offset();
+            if (v > 25) adds = true; else if (v < -26) adds = false;
+            if (adds != h264_client_adds_qp_bd_offset() && !c->h264_initqp_warned) {
+                c->h264_initqp_warned = true;
+                LOG("h264: pic_init_qp_minus26=%d can only be %s: overriding the client guess for this context", v,
+                    adds ? "ffmpeg-style (offset added)" : "the coded value");
+            }
+            qp_off = adds ? bd : 0;
+        }
+        int n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp, pps_id, c->have_iq ? &c->last_iq : NULL, qp_off,
                                c->h264_l0_minus1, c->h264_l1_minus1);
         if (n <= 0) LOG("do_h264_decode: PPS could not be written (%d): the picture goes out with the previous one", n);
         bool differs = n > 0 && (n != c->h264_pps_last_len || memcmp(hdr, c->h264_pps_last, (size_t)n) != 0);
@@ -3540,6 +3588,7 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
 {
     log_init();
     LOG("__vaDriverInit_1_20: entry");
+    h264_client_adds_qp_bd_offset();   /* decide now: Chromium loads the driver before its GPU sandbox closes /proc */
     RKDriver *d = calloc(1, sizeof(*d));
     if (!d) return VA_STATUS_ERROR_ALLOCATION_FAILED;
     ctx->pDriverData = d;

@@ -7,11 +7,25 @@ lists, field pictures, CAVLC multi-slice". Baseline: the same suites with driver
 | suite | 3.5.0 | this tree | regressions |
 |---|---|---|---|
 | JVT-AVC_V1 | 74/135 | 111/135 | 0 |
-| JVT-FR-EXT | 27/69 | 67/69 | 0 |
+| JVT-FR-EXT | 27/69 | 67/69 (69/69 after the High 10 fix below) | 0 |
 
 Files: `fluster-JVT-AVC_V1.csv`, `fluster-JVT-FR-EXT.csv` (Fluster's `-f csv -so` output: vector, result, time). The vendor
 string in the CSVs still says 3.5.0; the binary is the development tree.
 The remaining failures are listed in KNOWN-ISSUES KI-17, KI-20 and KI-21.
+
+## `item3-high10-initqp/` — after the High 10 initial-QP fix (KI-17, commit "H.264: High 10 initial QP")
+
+| suite | before | after | regressions |
+|---|---|---|---|
+| JVT-FR-EXT | 67/69 | 69/69 (FREH10-1/2 now pass) | 0 |
+| JVT-AVC_V1 | 111/135 | 111/135 | 0 |
+
+`LOG.txt` is the run script's summary (the `driver` field is the MD5 of the board build's `.so`, not a git id); the
+kernel's decoder-reset counter is the same before and after. `fluster-JVT-FR-EXT-override-coded.csv` is the same suite
+with `RKVA_H264_INITQP=coded`, the wrong setting for ffmpeg: back to 67/69 with FREH10-1 and FREH10-2 failing, which
+shows the subtraction is what fixes them. LOG and CSVs are from the branch's final build (the later commits touch HEVC
+and AV1); the counts are identical to the first item-3 run, the per-vector times differ by fractions of a second. The
+13 JVT-AVC_V1 vectors Fluster records as Error are the same set as in the run above (FMO/ASO/SP/SI, no hardware path).
 
 Method notes, for whoever repeats this: a hardware pass is one whose per-frame MD5 equals the libdav1d/ffmpeg software
 reference; the hardware interrupt count was checked on spot tests to make sure the hardware decoded (no software fallback).

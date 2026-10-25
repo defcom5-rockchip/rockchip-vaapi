@@ -151,7 +151,9 @@ Client notes:
 - mpv with `--vo=null` never initializes VA-API; hwdec tests need a display session.
 - assign_mpp_frame `copied=`: 1 CPU memcpy · 2 RGA blit (8-bit) · 3 NV15→P010 CPU repack · 4 RGA NV15→P010 blit;
   `zero-copy fd=` = the frame is held, not copied; `zero-copy: ... read without an export` = the late copy.
-- Switches: `RKVA_ZERO_COPY=0` (always copy), `RKVA_SYNC_POLL=1` (no output thread: sync and AV1 pacing poll MPP every 1 ms),
+- Switches: `RKVA_H264_INITQP=coded|ffmpeg` (High 10 initial QP: whether the client added the bit-depth offset, KI-17;
+  default = recognise Chromium/GStreamer as coded, everything else as ffmpeg), `RKVA_DUMP_H264=file` / `RKVA_DUMP_HEVC=file`
+  (the stream sent to MPP), `RKVA_ZERO_COPY=0` (always copy), `RKVA_SYNC_POLL=1` (no output thread: sync and AV1 pacing poll MPP every 1 ms),
   `RKVA_AV1_NO_DEFER=1` (re-decode early-synced AV1 pictures even with a capable MPP),
   `RKVA_PACE=n` (AV1 pictures in flight for a client that never waits, default 2, 0 = no pacing: Chromium
   then shows old pictures or green again), `RKVA_PACE_START=n` (start window: shown pictures a new paced decoder

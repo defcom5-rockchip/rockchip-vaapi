@@ -56,10 +56,10 @@ server-side transcode) instead of rendering a broken picture.
 
 | Codec | Profile | Status |
 |-------|---------|--------|
-| H.264 | Constrained Baseline, Main, High | ✅ hardware decode (B-frame routing fixed in v2.1.2, KI-1). v4.0.0 (in development): custom scaling matrices, interlaced streams, per-picture PPS changes and CAVLC multi-slice pictures fixed — JVT-AVC_V1 111/135 and JVT-FR-EXT 67/69 bit-exact (74 and 27 in 3.5.0); KI-17, KI-20, KI-21 |
+| H.264 | Constrained Baseline, Main, High | ✅ hardware decode (B-frame routing fixed in v2.1.2, KI-1). v4.0.0 (in development): custom scaling matrices, interlaced streams, per-picture PPS changes and CAVLC multi-slice pictures fixed — JVT-AVC_V1 111/135 and JVT-FR-EXT 69/69 bit-exact (74 and 27 in 3.5.0); KI-17, KI-20, KI-21 |
 | VP8   | Version 0–3 | ✅ advertised |
 | VP9   | Profile 0 (8-bit) | ✅ hardware decode, including non-16-aligned widths |
-| H.264 | High10 | ✅ advertised since v2.1.3, decodes on the hardware with its scaling matrices since v4.0.0 (KI-17); the two FREH10 vectors still differ (initial QP, KI-17); Firefox decodes High 10 in software by its own choice |
+| H.264 | High10 | ✅ advertised since v2.1.3; v4.0.0 (in development): the two conformance vectors (FREH10-1/2) decode bit-exact through ffmpeg — scaling matrices, and the initial QP that ffmpeg hands over with the bit-depth offset added (KI-17; the Chromium/GStreamer recognition is by command line and symbols, not yet seen on a live stream); Firefox decodes High 10 in software by its own choice |
 | HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+). v4.0.0 (in development): slices that use SPS-level reference-picture sets are rewritten with inline sets, and the PPS is rebuilt per picture with the stream's scaling lists (KI-5, KI-22) — JCT-VC-HEVC_V1 141/147 bit-exact on 2026-10-25 (17 in 3.5.0); the remaining 6 are listed in KI-5 |
 | HEVC  | Main10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 (mpv and Firefox verified; see KI-3 for the history); the KI-5 and KI-22 fixes apply |
 | VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
@@ -299,6 +299,8 @@ unless a value is listed.
 | `RKVA_AV1_NO_DEFER` | off | never use MPP's deferred refresh (always re-decode) | to compare with other MPP builds |
 | `RKVA_RGA_P010=0` / `RKVA_RGA_COPY=1` | RGA for 10-bit, CPU for 8-bit | choose the copy engine | RGA problems |
 | `RKVA_AV1_WRITER_DEBUG=1`/`2`, `RKVA_DUMP_AV1=file` | off | AV1 bit-writer warnings / dump the stream sent to MPP | AV1 stream problems |
+| `RKVA_DUMP_H264=file`, `RKVA_DUMP_HEVC=file` | off | dump the H.264 / HEVC stream sent to MPP (our headers, the client's slices) | H.264/HEVC stream problems |
+| `RKVA_H264_INITQP=coded`/`ffmpeg` | recognised: Chromium and GStreamer = coded, others = ffmpeg | whether the client hands over High 10 `pic_init_qp` with the bit-depth offset added (KI-17) | a High 10 picture slightly off in a client the guess gets wrong |
 
 All of this needs the driver to be built against librga. The v2.2.0 release download was
 built without it (it does not link `librga.so.2`), so on that build 10-bit always used the

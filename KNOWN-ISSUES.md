@@ -425,7 +425,7 @@ written it shows the surface's previous content (or green on a surface's first u
 
 ---
 
-## KI-17: H.264 streams with custom scaling matrices decode wrong (all High-profile depths) — FIXED in v4.0.0
+## KI-17: H.264 streams with custom scaling matrices decode wrong (all High-profile depths), and High 10 initial QP — FIXED in v4.0.0
 
 **Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was a wrong picture · measured 2026-10-23, re-measured 2026-10-25
 
@@ -442,9 +442,24 @@ reserves twice that for escaping; the first version of the fix silently dropped 
 bytes (FRExt1/FRExt3_Panasonic), so the buffers are 2 KB.
 
 Measured on the JVT suites through `ffmpeg -hwaccel vaapi` (Fluster, 2026-10-25, `evidence/2026-10-25-h264-fluster/`): JVT-FR-EXT 27/69 → 67/69, JVT-AVC_V1
-74/135 → 111/135 together with KI-20 and the slice fix of KI-21, no vector regressed. Still failing in FR-EXT: FREH10-1/2 (High 10
-initial QP: ffmpeg's `pic_init_qp_minus26` includes the bit-depth offset that the bitstream value must not; GStreamer and
-Chromium send the coded value, so the driver cannot subtract it blindly).
+74/135 → 111/135 together with KI-20 and the slice fix of KI-21, no vector regressed.
+
+**High 10 initial QP (same day):** the two High 10 vectors FREH10-1/2 still failed at that point, and every High 10 stream
+played through an ffmpeg-based player came out slightly off (wrong quantiser). ffmpeg's decoder keeps the initial QP
+already shifted into the 10-bit range — the stream's value plus 12 (QpBdOffsetY, 6 per bit of depth above 8; the same
+for `init_qs`) — and its VA-API hwaccel passes that internal value on (`h264_ps.c`, `vaapi_h264.c`, unchanged through
+ffmpeg 9.1; its NVDEC and Vulkan back-ends subtract it again), so a High 10 PPS rebuilt from it carried an initial QP 12
+too high; GStreamer and Chromium send the coded value (by reading
+`gstvah264dec.c` and Chromium's `h264_vaapi_video_decoder_delegate.cc`; neither was run here, and stock Chromium does not
+offer High 10 H.264 to VA-API at all). The number alone cannot tell the two apart, so the driver recognises the client:
+Chromium's GPU process or its out-of-process video decoder by its command line, GStreamer by its symbols, everything
+else (ffmpeg, mpv, Firefox, Kodi, VLC) as ffmpeg-style. The decision is made when the driver loads (before Chromium's
+sandbox closes `/proc`), `RKVA_H264_INITQP=coded|ffmpeg` overrides it, and the choice is written to the driver log. The
+value itself settles it when it can: for 10-bit a coded `pic_init_qp_minus26` is at most 25 and an ffmpeg-style one at
+least −26, so a value outside the overlap overrides the guess for that stream (logged once). Should ffmpeg ever correct the value upstream, `coded` is the switch to flip.
+With it, JVT-FR-EXT is 69/69 and JVT-AVC_V1 unchanged at 111/135; the same suite with `RKVA_H264_INITQP=coded` (the
+wrong setting for ffmpeg) is back to 67/69 with FREH10-1/2 failing (`evidence/2026-10-25-h264-fluster/item3-high10-initqp/`,
+both runs).
 
 Found on the way: **monochrome (4:0:0) High streams crashed ffmpeg** (HPCAMOLQ/HPCVMOLQ_BRCM_B; HPCVMOLQ crashed with 3.5.0 too).
 MPP returns a luma-only frame for them and the driver copied a chroma plane the frame does not have, past the end of the

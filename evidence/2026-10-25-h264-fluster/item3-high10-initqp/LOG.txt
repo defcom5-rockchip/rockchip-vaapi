@@ -1,0 +1,11 @@
+driver 725592b3 (md5 of the board build) start 2026-10-25T16:26:41-07:00 resets-before 746
+=== run JVT-FR-EXT 2026-10-25T16:26:41-07:00
+Ran 69/69 tests successfully, in 26.073 secs
+=== run JVT-AVC_V1 2026-10-25T16:27:08-07:00
+Ran 111/135 tests successfully, in 23.998 secs
+=== run JCT-VC-HEVC_V1 2026-10-25T16:27:33-07:00
+Ran 141/147 tests successfully, in 38.558 secs
+=== run JVT-FR-EXT with RKVA_H264_INITQP=coded (the override set the wrong way for ffmpeg) 2026-10-25T16:28:12-07:00
+Ran 67/69 tests successfully, in 26.343 secs
+failing with the override: FREH10-1 FREH10-2 
+=== done 2026-10-25T16:28:40-07:00 resets-after 746

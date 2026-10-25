@@ -155,7 +155,7 @@ static void write_scaling_list(BSWriter *bs, const uint8_t *raster, const uint8_
 
 int h264_write_pps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferH264 *pp, int pps_id,
-                   const VAIQMatrixBufferH264 *iq,
+                   const VAIQMatrixBufferH264 *iq, int init_qp_offset,
                    int l0_default_minus1, int l1_default_minus1)
 {
     /* Eight explicit scaling lists are up to 224 delta_scale values of up to 17 bits each (a conformance stream
@@ -188,8 +188,8 @@ int h264_write_pps(uint8_t *buf, size_t buf_size,
 
     bs_write(&bs, pp->pic_fields.bits.weighted_pred_flag, 1);
     bs_write(&bs, pp->pic_fields.bits.weighted_bipred_idc, 2);
-    bs_write_se(&bs, pp->pic_init_qp_minus26);
-    bs_write_se(&bs, pp->pic_init_qs_minus26);
+    bs_write_se(&bs, pp->pic_init_qp_minus26 - init_qp_offset);
+    bs_write_se(&bs, pp->pic_init_qs_minus26 - init_qp_offset);    /* ffmpeg adds the offset to init_qs as well (h264_ps.c, 8.0 and 9.1) */
     bs_write_se(&bs, pp->chroma_qp_index_offset);
     bs_write(&bs, pp->pic_fields.bits.deblocking_filter_control_present_flag, 1);
     bs_write(&bs, pp->pic_fields.bits.constrained_intra_pred_flag, 1);

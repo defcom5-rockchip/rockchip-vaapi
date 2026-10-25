@@ -1,0 +1,94 @@
+SYSTEM INFORMATION,,,
+OS,Linux 6.1.189-vendor-rk35xx,,
+CPU,"ARM Cortex-A55 x4, ARM Cortex-A76 x4",,
+GPU,Unknown GPU,,
+RAM,15.6 GB,,
+Backend-VA-API,"Rockchip MPP VA-API Driver 3.5.0 Number Nine ""Pepper SGT"" (defcom5) (runtime 1.23)",,
+Backend-Vulkan,Mali-G610,,
+,,,
+TEST RESULTS,,,
+,,,
+Test Suite: JVT-FR-EXT,,,
+,,,
+Decoder: FFmpeg-H.264-VAAPI,,,
+Total Tests,69,,
+Passed,67,,
+Failed\Error,2,,
+Total Time (s),26.343,,
+,,,
+Profile,Passed,Total,
+HIGH,45,45,
+HIGH_10,0,2,
+HIGH_4_2_2,21,21,
+MAIN,1,1,
+,,,
+Vector Name,Result,Time (s),Profile
+FREH10-1,Fail,6.341,HIGH_10
+FREH10-2,Fail,6.343,HIGH_10
+FREXT01_JVC_D,Success,0.111,HIGH
+FREXT02_JVC_C,Success,0.104,HIGH
+FREXT1_TANDBERG_A,Success,0.094,HIGH_4_2_2
+FREXT2_TANDBERG_A,Success,0.086,HIGH_4_2_2
+FREXT3_TANDBERG_A,Success,0.096,HIGH_4_2_2
+FRExt1_Panasonic_D,Success,0.111,HIGH
+FRExt2_Panasonic_C,Success,0.138,HIGH
+FRExt3_Panasonic_E,Success,0.108,HIGH
+FRExt4_Panasonic_B,Success,0.110,HIGH
+FRExt_MMCO4_Sony_B,Success,0.153,HIGH
+HCAFF1_HHI_B,Success,0.116,HIGH
+HCAFR1_HHI_C,Success,0.108,HIGH
+HCAFR2_HHI_A,Success,0.141,HIGH
+HCAFR3_HHI_A,Success,0.207,HIGH
+HCAFR4_HHI_A,Success,0.171,HIGH
+HCAMFF1_HHI_B,Success,0.102,HIGH
+HCHP1_HHI_B,Success,0.247,HIGH
+HCHP2_HHI_A,Success,0.287,HIGH
+HCHP3_HHI_A,Success,0.722,HIGH
+HPCADQ_BRCM_B,Success,0.225,HIGH
+HPCAFLNL_BRCM_C,Success,0.234,HIGH
+HPCAFL_BRCM_C,Success,0.279,HIGH
+HPCALQ_BRCM_B,Success,0.263,HIGH
+HPCAMAPALQ_BRCM_B,Success,0.269,HIGH
+HPCAMOLQ_BRCM_B,Success,0.170,HIGH
+HPCANL_BRCM_C,Success,0.287,HIGH
+HPCAQ2LQ_BRCM_B,Success,0.163,HIGH
+HPCA_BRCM_C,Success,0.250,HIGH
+HPCVFLNL_BRCM_A,Success,0.215,HIGH
+HPCVFL_BRCM_A,Success,0.398,HIGH
+HPCVMOLQ_BRCM_B,Success,0.175,HIGH
+HPCVNL_BRCM_A,Success,0.248,HIGH
+HPCV_BRCM_A,Success,0.408,HIGH
+HVLCFI0_Sony_B,Success,0.215,HIGH
+HVLCMFF0_Sony_B,Success,0.210,HIGH
+HVLCPFF0_Sony_B,Success,0.218,HIGH
+Hi422FR10_SONY_A,Success,0.130,HIGH_4_2_2
+Hi422FR11_SONY_A,Success,0.108,HIGH_4_2_2
+Hi422FR12_SONY_A,Success,0.107,HIGH_4_2_2
+Hi422FR13_SONY_A,Success,0.083,HIGH_4_2_2
+Hi422FR14_SONY_A,Success,0.082,HIGH_4_2_2
+Hi422FR15_SONY_A,Success,0.084,HIGH_4_2_2
+Hi422FR1_SONY_A,Success,0.086,HIGH_4_2_2
+Hi422FR2_SONY_A,Success,0.081,HIGH_4_2_2
+Hi422FR3_SONY_A,Success,0.101,HIGH_4_2_2
+Hi422FR4_SONY_A,Success,0.108,HIGH_4_2_2
+Hi422FR6_SONY_A,Success,0.098,HIGH_4_2_2
+Hi422FR7_SONY_A,Success,0.101,HIGH_4_2_2
+Hi422FR8_SONY_A,Success,0.089,HIGH_4_2_2
+Hi422FR9_SONY_A,Success,0.099,HIGH_4_2_2
+Hi422FREXT16_SONY_A,Success,0.391,HIGH_4_2_2
+Hi422FREXT17_SONY_A,Success,0.388,HIGH_4_2_2
+Hi422FREXT18_SONY_A,Success,0.539,HIGH_4_2_2
+Hi422FREXT19_SONY_A,Success,0.662,HIGH_4_2_2
+alphaconformanceG,Success,0.373,MAIN
+brcm_freh10,Success,0.179,HIGH
+brcm_freh11,Success,0.290,HIGH
+brcm_freh3,Success,0.164,HIGH
+brcm_freh4,Success,0.159,HIGH
+brcm_freh5,Success,0.165,HIGH
+brcm_freh6,Success,0.199,HIGH
+brcm_freh8,Success,0.208,HIGH
+brcm_freh9,Success,0.209,HIGH
+freh12_b,Success,0.197,HIGH
+freh1_b,Success,0.230,HIGH
+freh2_b,Success,0.159,HIGH
+freh7_b,Success,0.199,HIGH

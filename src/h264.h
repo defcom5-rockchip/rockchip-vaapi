@@ -16,9 +16,11 @@ int h264_write_sps(uint8_t *buf, size_t buf_size,
 
 /* PPS for the picture: pps_id is the id the slices name; iq (may be NULL) is the client's VAIQMatrixBufferH264,
    written as explicit pic_scaling lists when it is not flat. */
+/* init_qp_offset: subtracted from pp->pic_init_qp_minus26 and pic_init_qs_minus26 before writing: ffmpeg's VA-API
+   client hands over the value plus QpBdOffsetY (6 * bit_depth_luma_minus8), the bitstream wants the coded value. */
 int h264_write_pps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferH264 *pp, int pps_id,
-                   const VAIQMatrixBufferH264 *iq,
+                   const VAIQMatrixBufferH264 *iq, int init_qp_offset,
                    int l0_default_minus1, int l1_default_minus1);
 /* pic_parameter_set_id of a slice NAL (escaped), or -1. */
 int h264_peek_pps_id(const uint8_t *nal, size_t len);
