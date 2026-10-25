@@ -1,0 +1,8 @@
+== sizedown: ref frames 20, hw frames 20
+  hw vs libdav1d per frame (by output index): 1:same 2:same 3:same 4:same 5:same 6:same 7:same 8:same 9:same 10:same 11:same 12:same 13:same 14:same 15:same 16:same 17:same 18:same 19:same 20:same 
+  refusals with -threads 1: 0, frames out 20
+== sizeup: ref frames 20, hw frames 13
+  hw vs libdav1d per frame (by output index): 1:same 2:same 3:same 4:same 5:same 6:same 7:same 8:same 9:same 10:same 11:DIFF 12:DIFF 13:DIFF 14:DIFF 15:DIFF 16:DIFF 17:DIFF 18:DIFF 19:DIFF 20:DIFF 
+  refusals with -threads 1: 7, frames out 13
+MPP alone sizedown ref 15344640 mpp 15344640 1:same 2:same 3:same 4:same 5:same 6:same 7:same 8:same 9:same 10:same 11:same 12:same 13:same 14:same 15:same 16:same 17:same 18:same 19:same 20:same
+MPP alone sizeup ref 15344640 mpp 15344640 1:same 2:same 3:same 4:same 5:same 6:same 7:same 8:same 9:same 10:same 11:same 12:same 13:same 14:same 15:same 16:same 17:same 18:same 19:same 20:same

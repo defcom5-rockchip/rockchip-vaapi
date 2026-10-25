@@ -327,7 +327,7 @@ the final code, with the number of held decoder buffers staying flat (2.2.0: 273
 
 ## KI-13: AV1 — what the hardware path does not do (v3.0.0)
 
-**Status:** limits, by design or by the hardware · decode is otherwise bit-exact against dav1d
+**Status:** limits, by design or by the hardware · the size-change bullet fixed in v4.0.0 (development tree, 2026-10-25) as far as the driver can · decode is otherwise bit-exact against dav1d
 
 - **Film grain needs the MPP fix.** MPP's av1d HAL never set the register that turns grain synthesis on (rockchip-mpp
   issue #974; a pull request with the one-line fix is prepared, 2026-10-25). With MPP up to `+pd34` a stream with
@@ -341,23 +341,36 @@ the final code, with the number of held decoder buffers staying flat (2.2.0: 273
   original stream, does not match dav1d on them either (same mismatch counts for the size vectors; for svc the raw
   decoder drops a frame and differs on another, the driver differs on all eight). Not met in practice (web video
   starts at 144p).
-- **A frame-size change inside one VA context** (libaom `sizeup`/`sizedown`: 352×288 ↔ 1280×720 mid-stream): FFmpeg
-  keeps the surfaces of the first size, so the picture is cropped to the surface or sits in the corner of it, and the
-  raw MPP decoder fails `sizeup` as well (11 of 20 frames). The driver never writes past the surface (v3.0.0; earlier
-  test builds corrupted the heap here). Browsers create a new decoder on a resolution change; these vectors do not.
-  Measured 2026-10-24 (v3.5.0, MPP `+pd34` and `+pd35` identically): on `sizeup`, ffmpeg's own download path can **read**
-  past the end of the frame it downloaded — the frame is the old size, the stream says the new one, and libswscale reads
-  the difference: 3 of 20 runs of Fluster's exact command segfault in memcpy; the rest finish with the known wrong md5,
-  which can include adjacent heap bytes in the picture (out-of-bounds read, never a write). Fix planned for the
-  resolution-change path in v4.0.0; the measurement is in the maintainer's notes (not yet in `evidence/`).
+- **A frame-size change inside one VA context** (libaom `sizeup`/`sizedown`: 352×288 ↔ 1280×720 at a key frame with a
+  new sequence header) — **fixed in v4.0.0 as far as the driver can** (2026-10-25, `evidence/2026-10-25-av1-sizechange/`).
+  MPP itself decodes both vectors bit-exact (20/20 frames each, `mpi_dec_test` against libdav1d; the 3.5.0 note that the
+  raw decoder failed `sizeup` compared against a reference ffmpeg had silently rescaled). Through the driver, `sizedown`
+  is 20/20 bit-exact. `sizeup` depends on the client. ffmpeg's AV1 decoder keeps its 352×288 surface pool across the
+  change (the driver log shows only 352×288 surfaces being created): its `get_pixel_format()` returns early when the
+  pixel format is unchanged, so `ff_get_format` — which would drop and recreate the pool, as it does on an H.264/HEVC
+  SPS change — is not run again (`libavcodec/av1dec.c`, the same in ffmpeg 8.0 and 9.1). It then decodes the 1280×720
+  pictures into those surfaces and downloads them through an image of the old size; with 3.5.0 that read past the
+  image (wrong pictures with heap bytes in them, and a segfault in 3 of 20 runs of Fluster's command — measured
+  2026-10-24, maintainer's notes). The driver now looks at the surface before it decodes. A client that exports its
+  decoded surfaces anew for every frame and did not import them at creation gets a surface of the new size: measured
+  with mpv `hwdec=vaapi`, whose sampled frames 12, 15 and 20 after the change come out at 1280×720 with 45.9 dB
+  against libdav1d — the figure a known-good 1280×720 frame scores through the same screenshot path (its own 352×288
+  frames score 42.4 dB). Firefox uses the same export path; browsers create a new decoder on a resolution change
+  anyway, and these vectors do not. A client that downloads through `vaGetImage` (ffmpeg, mpv `hwdec=vaapi-copy`), or
+  that imported its surfaces once at creation (Chromium, GStreamer — both recreate them themselves), has the picture
+  refused: ffmpeg prints `resolution not supported` for the seven coded 1280×720 pictures (`-threads 1`) and keeps
+  running — it still emits three more frames after the refusals (show-existing-frame headers, which never reach the
+  driver), and those are wrong; 10 of 10 runs of Fluster's command give the same output, none crashes. mpv with
+  `vaapi-copy` falls back to software decoding for the rest of the file after the first refusal.
 - **Refused, so the client falls back to software:** Profile 1/2 (4:4:4, 4:2:2), 12-bit, monochrome, super-resolution
   frames, large-scale tile frames, switch frames, more than 64 tile columns or rows. ffmpeg's hwaccel path (`-c:v av1 -hwaccel vaapi`) reports an error instead of falling
   back — use `-c:v libdav1d`; players that pick libdav1d themselves fall back cleanly.
 - Chromium's `48delayed` stress vector: 27 of 557 frames differ in its last 30, where the raw MPP decoder diverges
   from dav1d as well.
 
-Conformance runs (Fluster, `ffmpeg -hwaccel vaapi`; every failure except monochrome and `sizedown` attributed
-against the raw decoder):
+Conformance runs (Fluster, `ffmpeg -hwaccel vaapi`; every failure except monochrome and the two size-change vectors
+attributed against the raw decoder — `sizeup` was once attributed to it, retracted above; Fluster's command rescales
+after a size change, so both still count as failures there although the driver decodes `sizedown` bit-exact):
 libaom AV1-TEST-VECTORS 213/242, Chromium 10-bit 22/23, Chromium 8-bit 9/13 — files and the attribution table in
 `evidence/2026-10-11-av1-fluster/`, scripts in `tests/av1/`.
 

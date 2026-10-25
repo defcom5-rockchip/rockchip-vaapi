@@ -1,0 +1,6 @@
+driver 77807efc (md5 of the board build), 2026-10-25T16:41:38-07:00
+=== AV1 size change, download path: Fluster's exact command, 10 runs each
+   sizeup:      10 exit 0;     10 MD5=a2977725f3fb69afa911436bdd12b309;
+   sizedown:      10 exit 0;     10 MD5=e1ac6b277061465354852df7d3af92fd;
+   sizeup per frame (-noautoscale): 13 frames out, 10 identical to libdav1d; refusals with -threads 1: 7
+   sizedown per frame (-noautoscale): 20 frames out, 20 identical to libdav1d; refusals with -threads 1: 0

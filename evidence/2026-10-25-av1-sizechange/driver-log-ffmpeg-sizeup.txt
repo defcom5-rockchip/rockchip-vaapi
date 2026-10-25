@@ -1,0 +1,11 @@
+[t=65982069.077] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65982071.249] av1: sequence header 13 bytes (352x288 8-bit)
+[t=65982071.909] assign_mpp_frame: info_change → acknowledged, render_target=0x3000000
+[t=65982074.538] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65982074.878] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65982075.216] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65982075.682] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65982079.772] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65982082.555] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65982082.872] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65982090.727] av1: picture 1280x720 is larger than its surface 0x3000001 (352x288): refused, the client must recreate its surfaces for the new size

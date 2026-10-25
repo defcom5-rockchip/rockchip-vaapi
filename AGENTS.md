@@ -98,7 +98,11 @@ Releases are triggered by the human maintainer, never autonomously.
   first decode.** Chrome exports a surface before decoding into it; deciding the bit depth
   from the last decoded frame described every 10-bit surface as 8-bit (KI-8, three releases).
   `rt_10bit` + `surf_is_10bit()` are the rule; `tests/va-export-before-decode.c` is the check —
-  run it against any change to CreateSurfaces / ExportSurfaceHandle / DeriveImage.
+  run it against any change to CreateSurfaces / ExportSurfaceHandle / DeriveImage. The one
+  sanctioned layout change after creation is `surface_grow` (v4.0.0, KI-13): an AV1 picture
+  larger than its surface, only for a client that exports decoded surfaces anew each frame
+  (`exports_decoded`) and never for a surface exported before its first decode (`pre_exported`);
+  a copy in flight holds its own reference on the old buffer.
 - **libva names the driver after the render node's kernel driver.** On Panthor/Panfrost
   stacks that is not "rockchip"; the deb ships symlinks (KI-9). Keep them when repackaging.
 
@@ -118,7 +122,7 @@ Works in hardware, pixel-identical to software decode:
   stream's scaling lists since v4.0.0 as well (KI-22).
 
 Not available, and why:
-- **AV1** — decodes since v3.0.0 through the OBU re-serialiser (`src/av1.c` + the vendored GStreamer writer); film grain is applied by the hardware with MPP `+pd35` / the #974 fix (KI-13).
+- **AV1** — decodes since v3.0.0 through the OBU re-serialiser (`src/av1.c` + the vendored GStreamer writer); film grain is applied by the hardware with MPP `+pd35` / the #974 fix (KI-13). A mid-stream size increase inside one VA context (v4.0.0): exporting clients get a grown surface, `vaGetImage` clients and pre-exported surfaces a refusal — ffmpeg keeps its pool across an AV1 sequence change (KI-13).
 - **Zero-copy 10-bit display** — works on Mesa (panfork) since v2.1.3 (mpv
   `hwdec=vaapi`, Firefox). Until then the export named the UV plane with a
   non-existent fourcc ("GR16") and Mesa refused it; KI-3 has the forensics. On Arm's

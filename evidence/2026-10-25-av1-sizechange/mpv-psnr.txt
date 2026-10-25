@@ -1,0 +1,13 @@
+driver 77807efc, mpv 0.41, Wayland, --hwdec=vaapi --vo=gpu --video-aspect-override=0; screenshot-to-file video; PSNR vs libdav1d frame PNGs (-noautoscale)
+   hwdec at the end: vaapi
+== sizeup: mpv errors:  driver: 8 grows, 0 refusals
+   frame 5: mpv 352,288 ref 352,288 PSNR average:42.393218
+   frame 12: mpv 1280,720 ref 1280,720 PSNR average:45.874600
+   frame 15: mpv 1280,720 ref 1280,720 PSNR average:45.862212
+   frame 20: mpv 1280,720 ref 1280,720 PSNR average:45.819727
+   hwdec at the end: vaapi
+== sizedown: mpv errors:  driver: 0 grows, 0 refusals
+   frame 5: mpv 1280,720 ref 1280,720 PSNR average:45.862212
+   frame 12: mpv 352,288 ref 352,288 PSNR average:42.419713
+   frame 15: mpv 352,288 ref 352,288 PSNR average:42.393218
+   frame 20: mpv 352,288 ref 352,288 PSNR average:42.368938

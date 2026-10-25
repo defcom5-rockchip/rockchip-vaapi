@@ -1,0 +1,50 @@
+[t=65983043.223] CreateSurfaces2: 128x128 fmt=0x1 n=1 n_attribs=2
+[t=65983043.318] CreateSurfaces2: 128x128 fmt=0x1 n=1 n_attribs=2
+[t=65983043.545] ExportSurfaceHandle: surface=0x3000001 128x128 stride=128x128 export_fd=30 decoded=0 placeholder=1 10bit=0 rt10=0
+[t=65983047.975] CreateSurfaces2: 128x128 fmt=0x100 n=1 n_attribs=2
+[t=65983048.105] ExportSurfaceHandle: surface=0x3000001 128x128 stride=128x128 export_fd=30 decoded=0 placeholder=1 10bit=1 rt10=1
+[t=65983049.131] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65983051.337] av1: sequence header 13 bytes (352x288 8-bit)
+[t=65983052.023] assign_mpp_frame: info_change → acknowledged, render_target=0x3000000
+[t=65983052.118] CreateSurfaces2: 16x16 fmt=0x1 n=1 n_attribs=2
+[t=65983052.432] ExportSurfaceHandle: surface=0x3000001 16x16 stride=64x16 export_fd=42 decoded=0 placeholder=1 10bit=0 rt10=0
+[t=65983074.320] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65983074.699] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65983075.091] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65983076.617] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65983078.264] ExportSurfaceHandle: surface=0x3000000 352x288 stride=384x288 export_fd=56 decoded=1 placeholder=1 10bit=0 rt10=0
+[t=65984799.920] ExportSurfaceHandle: surface=0x3000004 352x288 stride=384x288 export_fd=61 decoded=1 placeholder=1 10bit=0 rt10=0
+[t=65984947.687] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65984963.593] ExportSurfaceHandle: surface=0x3000003 352x288 stride=384x288 export_fd=61 decoded=1 placeholder=1 10bit=0 rt10=0
+[t=65985147.474] ExportSurfaceHandle: surface=0x3000005 352x288 stride=384x288 export_fd=65 decoded=1 placeholder=1 10bit=0 rt10=0
+[t=65985247.953] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65985248.437] CreateSurfaces2: 352x288 fmt=0x1 n=1 n_attribs=2
+[t=65985280.914] ExportSurfaceHandle: surface=0x3000002 352x288 stride=384x288 export_fd=65 decoded=1 placeholder=1 10bit=0 rt10=0
+[t=65986182.824] ExportSurfaceHandle: surface=0x3000007 352x288 stride=384x288 export_fd=73 decoded=1 placeholder=1 10bit=0 rt10=0
+[t=65986332.527] ExportSurfaceHandle: surface=0x3000006 352x288 stride=384x288 export_fd=73 decoded=1 placeholder=1 10bit=0 rt10=0
+[t=65986481.663] ExportSurfaceHandle: surface=0x3000003 352x288 stride=384x288 export_fd=73 decoded=1 placeholder=1 10bit=0 rt10=0
+[t=65986631.808] ExportSurfaceHandle: surface=0x3000002 352x288 stride=384x288 export_fd=73 decoded=1 placeholder=1 10bit=0 rt10=0
+[t=65986749.783] surface_grow: surface=0x3000001 layout 384x288 -> 1280x720 for a 1280x720 picture, prime_fd=75
+[t=65986749.825] av1: picture 1280x720 is larger than its surface 0x3000001 (352x288): surface grown to the picture size
+[t=65986750.014] av1: sequence header 13 bytes (1280x720 8-bit)
+[t=65986750.821] assign_mpp_frame: info_change → acknowledged, render_target=0x3000001
+[t=65986751.513] CreateSurfaces2: 16x16 fmt=0x1 n=1 n_attribs=2
+[t=65986752.278] ExportSurfaceHandle: surface=0x3000008 16x16 stride=64x16 export_fd=44 decoded=0 placeholder=1 10bit=0 rt10=0
+[t=65986783.155] ExportSurfaceHandle: surface=0x3000007 352x288 stride=384x288 export_fd=39 decoded=1 placeholder=1 10bit=0 rt10=0
+[t=65986900.481] surface_grow: surface=0x3000002 layout 384x288 -> 1280x720 for a 1280x720 picture, prime_fd=44
+[t=65986901.394] surface_grow: surface=0x3000000 layout 384x288 -> 1280x720 for a 1280x720 picture, prime_fd=43
+[t=65986902.694] surface_grow: surface=0x3000003 layout 384x288 -> 1280x720 for a 1280x720 picture, prime_fd=27
+[t=65986904.190] surface_grow: surface=0x3000004 layout 384x288 -> 1280x720 for a 1280x720 picture, prime_fd=47
+[t=65986910.521] ExportSurfaceHandle: surface=0x3000001 1280x720 stride=1280x720 export_fd=51 decoded=1 placeholder=0 10bit=0 rt10=0 zero-copy
+[t=65987082.264] ExportSurfaceHandle: surface=0x3000004 1280x720 stride=1280x720 export_fd=56 decoded=1 placeholder=0 10bit=0 rt10=0 zero-copy
+[t=65988093.261] surface_grow: surface=0x3000007 layout 384x288 -> 1280x720 for a 1280x720 picture, prime_fd=61
+[t=65988125.206] ExportSurfaceHandle: surface=0x3000003 1280x720 stride=1280x720 export_fd=56 decoded=1 placeholder=0 10bit=0 rt10=0 zero-copy
+[t=65988279.950] ExportSurfaceHandle: surface=0x3000007 1280x720 stride=1280x720 export_fd=65 decoded=1 placeholder=0 10bit=0 rt10=0 zero-copy
+[t=65988393.399] surface_grow: surface=0x3000006 layout 384x288 -> 1280x720 for a 1280x720 picture, prime_fd=69
+[t=65988394.242] surface_grow: surface=0x3000005 layout 384x288 -> 1280x720 for a 1280x720 picture, prime_fd=67
+[t=65988425.486] ExportSurfaceHandle: surface=0x3000000 1280x720 stride=1280x720 export_fd=65 decoded=1 placeholder=0 10bit=0 rt10=0 zero-copy
+[t=65989629.552] ExportSurfaceHandle: surface=0x3000005 1280x720 stride=1280x720 export_fd=71 decoded=1 placeholder=0 10bit=0 rt10=0 zero-copy
+[t=65989778.047] ExportSurfaceHandle: surface=0x3000006 1280x720 stride=1280x720 export_fd=71 decoded=1 placeholder=0 10bit=0 rt10=0 zero-copy
+[t=65989927.400] ExportSurfaceHandle: surface=0x3000003 1280x720 stride=1280x720 export_fd=71 decoded=1 placeholder=0 10bit=0 rt10=0 zero-copy
+[t=65990077.718] ExportSurfaceHandle: surface=0x3000000 1280x720 stride=1280x720 export_fd=71 decoded=1 placeholder=0 10bit=0 rt10=0 zero-copy
+[t=65990231.462] ExportSurfaceHandle: surface=0x3000005 1280x720 stride=1280x720 export_fd=71 decoded=1 placeholder=0 10bit=0 rt10=0 zero-copy

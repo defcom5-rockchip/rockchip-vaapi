@@ -200,6 +200,7 @@ typedef struct {
     bool hevc_rewrite_warned;
     bool     hevc_iq_warned;        /* one-time log: client scaling lists with a zero entry */
     bool     h264_initqp_warned;    /* one-time log: the init QP value contradicted the client guess */
+    bool     av1_size_warned;       /* one-time log: AV1 picture larger than its surface (KI-13) */
     int  h264_l0_minus1, h264_l1_minus1;   /* learned PPS num_ref_idx_lX_default_active_minus1 (0 until a slice teaches us) */
     VAIQMatrixBufferH264 last_iq;          /* the client's scaling lists for the picture (ffmpeg sends them every picture) */
     bool         have_iq;
@@ -415,6 +416,7 @@ typedef struct {
        configs and surface pools on one driver instance concurrently. Context slots are claimed under their own
        out_lock instead. */
     pthread_mutex_t obj_lock;
+    bool            exports_decoded; /* ExportSurfaceHandle was called on a decoded surface: an exporting client */
 } RKDriver;
 
 /* ── helpers ─────────────────────────────────────────────────── */
@@ -1010,6 +1012,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         pthread_mutex_lock(&c->out_lock);      /* claim: test and mark in one step */
         if (c->used) { pthread_mutex_unlock(&c->out_lock); continue; }
         CTX_CLEAR(c);
+        __atomic_store_n(&d->exports_decoded, false, __ATOMIC_RELEASE);   /* decided afresh for this decoder (see the AV1 size check) */
         c->mpp       = mpp;
         c->mpi       = mpi;
         c->config_id = config_id;
@@ -1304,7 +1307,10 @@ static inline void nv15_row_to_p010(const uint8_t *srow, uint16_t *drow, int n)
 /* Copy (or repack) one decoded MPP frame into the surface's own buffer, priv_buf, at the layout ExportSurfaceHandle
  * reported.  Returns the assign_mpp_frame `copied=` code (0 = nothing copied); out_w and out_h get the picture size
  * actually written.  Does not consume the frame. */
-static int rk_copy_into_surface(MppFrame frame, RKSurface *s, VASurfaceID sid, int *out_w, int *out_h)
+/* dbuf/dhs/dvs: the destination buffer and layout, read by the caller under s->lock (surface_grow may swap them; the
+   caller holds a reference on dbuf for the duration of the copy). */
+static int rk_copy_into_surface(MppFrame frame, RKSurface *s, VASurfaceID sid, MppBuffer dbuf, int dhs, int dvs,
+                                int *out_w, int *out_h)
 {
     MppBuffer      buf    = mpp_frame_get_buffer(frame);
     int            fwidth = (int)mpp_frame_get_width(frame);
@@ -1325,7 +1331,7 @@ static int rk_copy_into_surface(MppFrame frame, RKSurface *s, VASurfaceID sid, i
     bool mono   = (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV400;
     int  copied = 0;
     void *src = buf ? mpp_buffer_get_ptr(buf) : NULL;
-    void *dst = s->priv_buf ? mpp_buffer_get_ptr(s->priv_buf) : NULL;
+    void *dst = dbuf ? mpp_buffer_get_ptr(dbuf) : NULL;
     /* The destination layout must match what ExportSurfaceHandle already
        reported, not MPP's frame stride.  Clients import the dma-buf once --
        Chromium does so at frame-pool creation, before any decode -- and never
@@ -1335,8 +1341,8 @@ static int rk_copy_into_surface(MppFrame frame, RKSurface *s, VASurfaceID sid, i
            3840x2160 -> MPP frame stride 3840x2176
            1920x1080 -> MPP frame stride 2304x1088
        Re-stride here instead: read with src_hs, write with dst_hs. */
-    int dst_hs = s->hstride ? s->hstride : copy_w;
-    int dst_vs = s->vstride ? s->vstride : copy_h;
+    int dst_hs = dhs ? dhs : copy_w;
+    int dst_vs = dvs ? dvs : copy_h;
     /* A picture larger than the surface was created for (AV1 sequence change inside one VA context, libaom
        av1-1-b8-03-sizeup) must never be copied past the placeholder: clamp, and tell the log.  The client sees
        a cropped picture rather than a corrupted heap. */
@@ -1364,16 +1370,16 @@ static int rk_copy_into_surface(MppFrame frame, RKSurface *s, VASurfaceID sid, i
     const char *rga_sw = getenv("RKVA_RGA_COPY");
     bool rga_off    = (rga_sw && rga_sw[0] == '0');
     bool rga_8bit   = (rga_sw && rga_sw[0] == '1');
-    if (rga_8bit && !rga_off && !i10 && !mono && buf && s->priv_buf && rga_legacy_init()) {
+    if (rga_8bit && !rga_off && !i10 && !mono && buf && dbuf && rga_legacy_init()) {
         int sfd = mpp_buffer_get_fd(buf);
-        int dfd = mpp_buffer_get_fd(s->priv_buf);
+        int dfd = mpp_buffer_get_fd(dbuf);
         size_t need_src = (size_t)src_hs * src_vs * 3 / 2;
         size_t need_dst = (size_t)dst_hs * dst_vs * 3 / 2;
         /* Only describe what the buffers really hold: an over-described rect
            makes the RGA fail to map the buffer ("src channel map job buffer
            failed") and we would rather take the CPU path than that. */
         if (sfd > 0 && dfd > 0 && mpp_buffer_get_size(buf) >= need_src &&
-            mpp_buffer_get_size(s->priv_buf) >= need_dst &&
+            mpp_buffer_get_size(dbuf) >= need_dst &&
             rga3_stride_ok(src_hs, src_vs, false) && rga3_stride_ok(dst_hs, dst_vs, false)) {
             rga_info_t rs = {0}, rd = {0};
             rs.fd = sfd; rs.mmuFlag = 1;
@@ -1399,18 +1405,18 @@ static int rk_copy_into_surface(MppFrame frame, RKSurface *s, VASurfaceID sid, i
        bit-exact against nv15_row_to_p010() on RK3588 (3840x2160 and 1920x1080:
        0 mismatches; 3.8 ms/frame at 4K vs the CPU on the decode thread).
        RKVA_RGA_P010=0 forces the CPU repack. */
-    if (!copied && !rga_off && i10 && buf && s->priv_buf) {
+    if (!copied && !rga_off && i10 && buf && dbuf) {
         const char *sw = getenv("RKVA_RGA_P010");
         if (!(sw && sw[0] == '0')) {
             int sfd = mpp_buffer_get_fd(buf);
-            int dfd = mpp_buffer_get_fd(s->priv_buf);
+            int dfd = mpp_buffer_get_fd(dbuf);
             int src_bs = src_hs;
             int min_bs = (copy_w * 10 + 7) / 8;
             if (src_bs < min_bs) src_bs = ((src_hs * 10 + 7) / 8 + 63) & ~63;
             size_t need_src = (size_t)src_bs * src_vs * 3 / 2;
             size_t need_dst = (size_t)dst_hs * 2 * dst_vs * 3 / 2;
             if (rga_legacy_init() && sfd > 0 && dfd > 0 &&
-                mpp_buffer_get_size(buf) >= need_src && mpp_buffer_get_size(s->priv_buf) >= need_dst &&
+                mpp_buffer_get_size(buf) >= need_src && mpp_buffer_get_size(dbuf) >= need_dst &&
                 rga3_stride_ok(src_bs, src_vs, true) && rga3_stride_ok(dst_hs * 2, dst_vs, true)) {
                 rga_info_t rs = {0}, rd = {0};
                 rs.fd = sfd; rs.mmuFlag = 1;
@@ -1523,7 +1529,8 @@ static void surface_zc_materialize(RKDriver *d, RKSurface *s, bool keep_exported
     if (s->zc_frame) {
         int w = 0, h = 0;
         long long t0 = rk_now_us();
-        int copied = rk_copy_into_surface(s->zc_frame, s, (VASurfaceID)(SURFACE_ID_BASE + (unsigned)(s - d->surfaces)), &w, &h);
+        int copied = rk_copy_into_surface(s->zc_frame, s, (VASurfaceID)(SURFACE_ID_BASE + (unsigned)(s - d->surfaces)),
+                                          s->priv_buf, s->hstride, s->vstride, &w, &h);   /* under s->lock */
         if (w > 0) s->width = w;
         if (h > 0) s->height = h;
         LOG("zero-copy: surface=0x%x read without an export: copied=%d copy_us=%lld%s",
@@ -1641,7 +1648,14 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
 
     int copy_w = 0, copy_h = 0;
     long long t_copy0 = rk_now_us();
-    int copied = rk_copy_into_surface(frame, s, sid, &copy_w, &copy_h);
+    /* The destination is read under the lock and held for the copy: surface_grow may swap the surface's buffer
+       while this copy runs (a picture larger than the surface arriving for a surface the client re-targeted). */
+    pthread_mutex_lock(&s->lock);
+    MppBuffer dbuf = s->priv_buf; int dhs = s->hstride, dvs = s->vstride;
+    if (dbuf) mpp_buffer_inc_ref(dbuf);
+    pthread_mutex_unlock(&s->lock);
+    int copied = rk_copy_into_surface(frame, s, sid, dbuf, dhs, dvs, &copy_w, &copy_h);
+    if (dbuf) mpp_buffer_put(dbuf);
     long long t_copy1 = rk_now_us();
     mpp_frame_deinit(&frame);
 
@@ -2584,6 +2598,35 @@ static VAStatus av1_refuse(RKContext *c, RKDriver *d, const VADecPictureParamete
     return st;
 }
 
+/* Give a surface a larger buffer than it was created with: a new placeholder of the picture's size, laid out as
+   CreateSurfaces lays them out, swapped in under the surface lock.  The old DMA-BUF stays alive for any client that
+   still holds an exported fd of it.  Used when a client decodes an AV1 picture larger than its surfaces (KI-13). */
+static bool surface_grow(RKSurface *s, VASurfaceID sid, unsigned w, unsigned h)
+{
+    unsigned hs = (w + 63u) & ~63u, vs = (h + 15u) & ~15u;
+    MppBufferGroup grp = NULL; MppBuffer buf = NULL;
+    if (mpp_buffer_group_get_internal(&grp, MPP_BUFFER_TYPE_DRM) != MPP_OK ||
+        mpp_buffer_get(grp, &buf, (size_t)hs * vs * 3) != MPP_OK) {
+        if (buf) mpp_buffer_put(buf);
+        if (grp) mpp_buffer_group_put(grp);
+        LOG("surface_grow: surface=0x%x %ux%u: placeholder alloc failed", (unsigned)sid, w, h);
+        return false;
+    }
+    int raw_fd = mpp_buffer_get_fd(buf), dup_fd = raw_fd > 0 ? dup(raw_fd) : -1;
+    if (dup_fd < 0) { mpp_buffer_put(buf); mpp_buffer_group_put(grp); LOG("surface_grow: surface=0x%x: no fd", (unsigned)sid); return false; }
+    pthread_mutex_lock(&s->lock);
+    MppBuffer old = s->priv_buf; MppBufferGroup oldg = s->priv_group; int oldfd = s->prime_fd;
+    int ohs = s->hstride, ovs = s->vstride;
+    s->priv_buf = buf; s->priv_group = grp; s->prime_fd = dup_fd;
+    s->hstride = (int)hs; s->vstride = (int)vs;          /* width/height follow the picture when it is copied in */
+    pthread_mutex_unlock(&s->lock);
+    if (oldfd >= 0) close(oldfd);
+    if (old)  mpp_buffer_put(old);                       /* a copy in flight holds its own reference */
+    if (oldg) mpp_buffer_group_put(oldg);
+    LOG("surface_grow: surface=0x%x layout %dx%d -> %ux%u for a %ux%u picture, prime_fd=%d", (unsigned)sid, ohs, ovs, hs, vs, w, h, dup_fd);
+    return true;
+}
+
 static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
     if (!c->have_pp_av1) { LOG("av1: EndPicture without picture parameters"); return av1_refuse(c, d, NULL, VA_STATUS_ERROR_INVALID_PARAMETER); }
     const VADecPictureParameterBufferAV1 *pp = &c->last_pp_av1;
@@ -2591,6 +2634,35 @@ static VAStatus do_av1_decode_locked(RKContext *c, RKDriver *d) {
     /* RKVA_HIDE_10BIT: 8- and 10-bit AV1 share one profile, so a client that ignores the RT-format/P010 answers can
        still hand us a 10-bit stream with 8-bit surfaces (ffmpeg's CLI does).  Refuse before MPP sees it. */
     if (hide_10bit() && pp->bit_depth_idx) { LOG("av1: 10-bit stream refused (RKVA_HIDE_10BIT)"); return av1_refuse(c, d, pp, VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT); }
+    /* A picture larger than the surface it is to be decoded into: the client kept its surface pool across a resolution
+       increase.  ffmpeg does on an AV1 sequence change (libaom av1-1-b8-03-sizeup: 352x288 surfaces, 1280x720
+       pictures): av1dec's get_pixel_format() returns early while the pixel format is unchanged, so ff_get_format --
+       which drops and recreates the pool on an H.264/HEVC SPS change -- never runs again (8.0 and 9.1).  MPP would
+       decode the picture full size, the copy would crop it, and the client then reads its own picture size out of an
+       image sized for the surface -- past the end of it (KI-13: wrong pictures, and ffmpeg crashed in one run of
+       several).  A client that exports its decoded surfaces anew for every frame (mpv hwdec=vaapi; Firefox would, but
+       recreates its decoder first) reads the new layout from the export, so its surface is given a buffer of the new
+       size instead.  A client that downloads through vaGetImage (ffmpeg's transfer path, mpv vaapi-copy) reads an
+       image of the old size regardless of what the surface holds, and one that imported its surfaces at creation
+       (Chromium, GStreamer: pre_exported) never re-reads the layout: for those the picture is refused, the client
+       reports a decode error for it and keeps running (Chromium and GStreamer recreate their surfaces themselves).
+       exports_decoded is reset per context (a file played zero-copy must not make the next, copy-back one grow). */
+    {
+        RKSurface *rt = surface_by_id(d, c->render_target);
+        unsigned fw = pp->frame_width_minus1 + 1u, fh = pp->frame_height_minus1 + 1u;
+        if (rt && (fw > (unsigned)rt->width || fh > (unsigned)rt->height)) {
+            int ow = rt->width, oh = rt->height;
+            bool exporter = __atomic_load_n(&d->exports_decoded, __ATOMIC_ACQUIRE) && !rt->pre_exported;
+            /* an exporting client reads the layout afresh: grow only when the buffer itself is too small */
+            bool fits = fw <= (unsigned)(rt->hstride ? rt->hstride : rt->width) && fh <= (unsigned)(rt->vstride ? rt->vstride : rt->height);
+            bool ok = exporter && (fits || surface_grow(rt, c->render_target, fw, fh));
+            if (!c->av1_size_warned) { c->av1_size_warned = true;
+                LOG("av1: picture %ux%u is larger than its surface 0x%x (%dx%d): %s", fw, fh, (unsigned)c->render_target, ow, oh,
+                    ok ? (fits ? "fits the surface's layout, decoded as is" : "surface grown to the picture size") :
+                    "refused, the client must recreate its surfaces for the new size"); }
+            if (!ok) return av1_refuse(c, d, pp, VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED);
+        }
+    }
     /* 1. the previous picture can now be decoded: this one's ref_frame_map shows where it went */
     VAStatus st = av1_resolve_pending(c, d, pp);
     if (st != VA_STATUS_SUCCESS) return av1_refuse(c, d, pp, st);
@@ -3097,6 +3169,7 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
 
     LOG("ExportSurfaceHandle: surface=0x%x %dx%d stride=%dx%d export_fd=%d decoded=%d placeholder=%d 10bit=%d rt10=%d%s",
         id, s->width, s->height, hs, vs, export_fd, decoded, is_placeholder, is_10bit, s->rt_10bit, zc ? " zero-copy" : "");
+    if (decoded) __atomic_store_n(&d->exports_decoded, true, __ATOMIC_RELEASE);   /* an exporting client: mpv, Firefox (see surface_grow); probe surfaces are undecoded */
 
     VADRMPRIMESurfaceDescriptor *desc = descriptor;
     memset(desc, 0, sizeof(*desc));

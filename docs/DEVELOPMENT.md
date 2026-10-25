@@ -291,7 +291,11 @@ is exactly what the aliasing bug below lacked. Readers of `priv_buf` (Chromium i
 each surface once; vaDeriveImage/vaGetImage; a sync without an export; a writable
 export) get the copy at the moment they read (`surface_zc_materialize`). 10-bit is
 always copied (NV15 is repacked to P010). `RKVA_ZERO_COPY=0` restores the copy
-everywhere. Measured on 4K60 AV1 in Firefox: the copy was 2.6 ms of every frame on the
+everywhere. **Since 4.0.0:** `priv_buf` and its strides can change once after creation —
+`surface_grow`, when an AV1 picture larger than the surface arrives for a client that
+exports decoded surfaces afresh each frame (never for a surface exported before its first
+decode); the copy in `assign_mpp_frame` therefore reads buffer and strides under the surface
+lock and holds a reference on the buffer while it copies (KI-13). Measured on 4K60 AV1 in Firefox: the copy was 2.6 ms of every frame on the
 decode thread.
 
 - **Buffer aliasing ("saltando frames")**: MPP's internal display pool is only
