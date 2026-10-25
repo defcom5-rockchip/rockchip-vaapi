@@ -17,8 +17,15 @@ int hevc_write_vps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferHEVC *pp, int is_main10);
 int hevc_write_sps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferHEVC *pp, int is_main10);
+/* PPS for the picture: pps_id is the id the slices name; iq (may be NULL) is the client's VAIQMatrixBufferHEVC
+   (raster order), written as pps scaling_list_data() when scaling lists are enabled for the stream. */
+/* 1 when every entry of the client's scaling lists is codable (no zero entry); 0 → default lists */
+int hevc_iq_usable(const VAIQMatrixBufferHEVC *iq);
 int hevc_write_pps(uint8_t *buf, size_t buf_size,
-                   const VAPictureParameterBufferHEVC *pp);
+                   const VAPictureParameterBufferHEVC *pp, int pps_id,
+                   const VAIQMatrixBufferHEVC *iq);
+/* slice_pic_parameter_set_id of a slice segment NAL (escaped, no start code), or -1. */
+int hevc_peek_pps_id(const uint8_t *nal, size_t len);
 
 /* Rewrite one slice segment NAL (escaped, no start code) so that its reference picture set is carried inline, built
    from pp->ReferenceFrames, instead of referring to the SPS-level short-term sets and long-term entries that VA-API

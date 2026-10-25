@@ -191,8 +191,13 @@ typedef struct {
 
     /* HEVC state for VPS/SPS/PPS reconstruction (Deep Ink phase 1.5) */
     VAPictureParameterBufferHEVC last_pp_hevc;
+    VAIQMatrixBufferHEVC last_iq_hevc;     /* the client's scaling lists for the picture */
+    bool         have_iq_hevc;
+    uint8_t      hevc_pps_last[8192];      /* the PPS last sent to MPP: the next picture's is sent only when it differs */
+    int          hevc_pps_last_len;
     bool hevc_rewrite_rps;       /* the stream's SPS had RPS sets / long-term entries: slice headers are rewritten */
     bool hevc_rewrite_warned;
+    bool     hevc_iq_warned;        /* one-time log: client scaling lists with a zero entry */
     int  h264_l0_minus1, h264_l1_minus1;   /* learned PPS num_ref_idx_lX_default_active_minus1 (0 until a slice teaches us) */
     VAIQMatrixBufferH264 last_iq;          /* the client's scaling lists for the picture (ffmpeg sends them every picture) */
     bool         have_iq;
@@ -1157,6 +1162,7 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
     c->render_target = render_target;
     c->n_pending     = 0;
     c->have_iq       = false;                /* the scaling lists are per picture: a client sends them with each one */
+    c->have_iq_hevc  = false;
 
     /* H.264 second field of a pair: the same surface, straight after a first field (the two fields of a pair are
        consecutive in decoding order).  The surface keeps its generation and its "decoding" state: MPP outputs the
@@ -1218,9 +1224,15 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
             memcpy(&c->last_iq, b->data, sizeof(VAIQMatrixBufferH264));
             c->have_iq = true;
         } else if (b && b->type == VAPictureParameterBufferType &&
-                   c->coding == MPP_VIDEO_CodingHEVC) {
+                   c->coding == MPP_VIDEO_CodingHEVC &&
+                   b->size >= sizeof(VAPictureParameterBufferHEVC)) {
             memcpy(&c->last_pp_hevc, b->data,
                    sizeof(VAPictureParameterBufferHEVC));
+        } else if (b && b->type == VAIQMatrixBufferType &&
+                   c->coding == MPP_VIDEO_CodingHEVC &&
+                   b->size >= sizeof(VAIQMatrixBufferHEVC)) {
+            memcpy(&c->last_iq_hevc, b->data, sizeof(VAIQMatrixBufferHEVC));
+            c->have_iq_hevc = true;
         
         } else if (b && b->type == VAPictureParameterBufferType &&
                    c->coding == MPP_VIDEO_CodingAV1 &&
@@ -1733,8 +1745,9 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     size_t _l = (len);                                      \
     if (pkt_sz + _l > pkt_cap) {                           \
         pkt_cap = (pkt_sz + _l) * 2 + 4096;               \
-        pkt_data = realloc(pkt_data, pkt_cap);             \
-        if (!pkt_data) return VA_STATUS_ERROR_ALLOCATION_FAILED; \
+        uint8_t *_n = realloc(pkt_data, pkt_cap);          \
+        if (!_n) { free(pkt_data); return VA_STATUS_ERROR_ALLOCATION_FAILED; } \
+        pkt_data = _n;                                      \
     }                                                       \
     memcpy(pkt_data + pkt_sz, (ptr), _l);                 \
     pkt_sz += _l;                                          \
@@ -1980,8 +1993,9 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     size_t _l = (len);                                      \
     if (pkt_sz + _l > pkt_cap) {                           \
         pkt_cap = (pkt_sz + _l) * 2 + 4096;               \
-        pkt_data = realloc(pkt_data, pkt_cap);             \
-        if (!pkt_data) return VA_STATUS_ERROR_ALLOCATION_FAILED; \
+        uint8_t *_n = realloc(pkt_data, pkt_cap);          \
+        if (!_n) { free(pkt_data); return VA_STATUS_ERROR_ALLOCATION_FAILED; } \
+        pkt_data = _n;                                      \
     }                                                       \
     memcpy(pkt_data + pkt_sz, (ptr), _l);                 \
     pkt_sz += _l;                                          \
@@ -2006,18 +2020,43 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
            built from pp->ReferenceFrames, and the SPS we send declares none (3.5.0 sent a dummy set and left the
            slices alone: a slice that picked an SPS set was then misparsed and the decoder stalled, KI-5). */
         bool rewrite_rps = hp->num_short_term_ref_pic_sets > 0 || hp->num_long_term_ref_pic_sps > 0;
+        /* the PPS id the slices name: the PPS below is sent under it */
+        int pps_id = 0;
+        for (int i = 0; i < c->n_pending; i++) {
+            RKBuffer *b = buffer_by_id(d, c->pending[i]);
+            if (!b || b->type != VASliceDataBufferType) continue;
+            int id = hevc_peek_pps_id((const uint8_t *)b->data, (size_t)b->size * b->num_elements);
+            if (id >= 0) pps_id = id;
+            break;
+        }
+        uint8_t hdr[8192];                 /* the PPS writer reserves twice its ~2.9 KB worst case for escaping */
+        int n;
         if (irap || !c->sps_sent) {
             int main10 = hp->bit_depth_luma_minus8 > 0;
-            uint8_t hdr[1024];
-            int n;
             n = hevc_write_vps(hdr, sizeof(hdr), hp, main10);                 if (n > 0) PKT_APPEND(hdr, (size_t)n);
             n = hevc_write_sps(hdr, sizeof(hdr), hp, main10);                 if (n > 0) PKT_APPEND(hdr, (size_t)n);
-            n = hevc_write_pps(hdr, sizeof(hdr), hp);                         if (n > 0) PKT_APPEND(hdr, (size_t)n);
+            c->hevc_pps_last_len = 0;                                         /* a new SPS: the PPS goes with it */
             c->sps_sent = true;
-            LOG("do_hevc: VPS/SPS/PPS synthesised (%zu bytes) %dx%d main10=%d irap=%d sps_sets=%u lt_sps=%u (rewrite=%d) st_rps_bits=%u",
+            LOG("do_hevc: VPS/SPS synthesised (%zu bytes) %dx%d main10=%d irap=%d sps_sets=%u lt_sps=%u (rewrite=%d) st_rps_bits=%u",
                 pkt_sz, hp->pic_width_in_luma_samples, hp->pic_height_in_luma_samples,
                 main10, (int)irap, (unsigned)hp->num_short_term_ref_pic_sets, (unsigned)hp->num_long_term_ref_pic_sps,
                 (int)rewrite_rps, (unsigned)hp->st_rps_bits);
+        }
+        /* The PPS is built for every picture -- its id, the per-picture flags VA-API carries and the scaling lists --
+           and sent whenever it differs from the one MPP has (a PPS change between pictures does not disturb the DPB). */
+        bool iq_usable = c->have_iq_hevc && hevc_iq_usable(&c->last_iq_hevc);
+        if (hp->pic_fields.bits.scaling_list_enabled_flag && c->have_iq_hevc && !iq_usable && !c->hevc_iq_warned) {
+            c->hevc_iq_warned = true;
+            LOG("do_hevc: the client's scaling lists contain a zero entry: the picture goes out with the default lists");
+        }
+        n = hevc_write_pps(hdr, sizeof(hdr), hp, pps_id, iq_usable ? &c->last_iq_hevc : NULL);
+        if (n <= 0) LOG("do_hevc: PPS could not be written (%d): the picture goes out with the previous one", n);
+        bool differs = n > 0 && (n != c->hevc_pps_last_len || memcmp(hdr, c->hevc_pps_last, (size_t)n) != 0);
+        if (n > 0 && differs) {
+            PKT_APPEND(hdr, (size_t)n);
+            if (c->hevc_pps_last_len) LOG("do_hevc: PPS changed (id %d%s): re-sent", pps_id,
+                                          hp->pic_fields.bits.scaling_list_enabled_flag && iq_usable ? ", scaling lists" : "");
+            memcpy(c->hevc_pps_last, hdr, (size_t)n); c->hevc_pps_last_len = n;
         }
         c->hevc_rewrite_rps = rewrite_rps;
     }

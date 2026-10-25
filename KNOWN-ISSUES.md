@@ -108,7 +108,7 @@ report it.
 
 ---
 
-## KI-5: HEVC slices that reference SPS-level reference-picture sets decoded with wrong references — FIXED in v4.0.0
+## KI-5: HEVC slices that reference SPS-level reference-picture sets decoded with wrong references — FIXED in v4.0.0 (see also KI-22)
 
 **Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was a wrong picture or a decoder stall · measured 2026-10-23, re-measured 2026-10-25
 
@@ -127,15 +127,14 @@ reference-set part (the client's `st_rps_bits` gives the length of an inline set
 rest of the header is copied bit for bit up to its alignment, and the slice data is appended untouched (entry points are
 relative to it). Pictures and streams without SPS sets are sent as before.
 
-Measured (Fluster, 2026-10-25, `evidence/2026-10-25-hevc-fluster/`): JCT-VC-HEVC_V1 17/147 → 128/147, no vector regressing.
-The kernel logged 26 decoder resets during the run (3.5.0: 178), all from the six vectors that still stall (below). The RExt
-suite (4:2:2, 4:4:4, 12/16-bit, high throughput) stays at 2/49: those profiles are not advertised, ffmpeg falls back to
-software, and Fluster records that fallback as an error (ffmpeg's own decoder passes 31 of them).
-The remaining 19 failures:
-- The PPS and scaling-list class, 14 vectors: SLIST_A/B/C/D, DBLK_B, DELTAQP_A/B, INITQP_A/B, PPS_A, TILES_A/B, TSKIP_A. Their PPS
-  changes between pictures, uses several ids, or carries scaling lists; six of them (INITQP_A/B, PPS_A, SLIST_B/D and
-  VPSSPSPPS_A below) stall the decoder because the slices are parsed against a PPS they do not match. The next change rebuilds
-  the PPS per picture with the client's lists, as done for H.264.
+Measured (Fluster, 2026-10-25) after the reference-set change alone: JCT-VC-HEVC_V1 17/147 → 128/147, no vector regressing;
+52 decoder-reset lines in the kernel log in that run, 26 per core (3.5.0: 178 lines), all from six vectors of the PPS class below, which KI-22 then fixed: the final run
+of both changes, kept in `evidence/2026-10-25-hevc-fluster/`, is 141/147 with no decoder resets. The RExt suite (4:2:2, 4:4:4,
+12/16-bit, high throughput) stays at 2/49: those profiles are not advertised, ffmpeg falls back to software, and Fluster
+records that fallback as an error (ffmpeg's own decoder passes 31 of them).
+The 19 failures left after the reference-set change alone (6 after KI-22):
+- The PPS and scaling-list class, 14 vectors: SLIST_A/B/C/D, DBLK_B, DELTAQP_A/B, INITQP_A/B, PPS_A, TILES_A/B, TSKIP_A — fixed by
+  KI-22.
 - Hardware or profile limits: PICSIZE_A/B (picture sizes the hardware refuses), TSUNEQBD_A (unequal luma and chroma bit depth).
 - NUT_A, RPS_D and VPSSPSPPS_A fail in ffmpeg's software decode as well (its output does not match the reference), so they say
   little about the driver.
@@ -523,6 +522,25 @@ a Firefox patch that does the same is under review (Bug 2078820). With Mesa (Pan
 Firefox figures in this file were measured with that helper or patch in place.
 
 ---
+
+## KI-22: HEVC PPS sent once per IRAP, without the stream's scaling lists — FIXED in v4.0.0
+
+**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was a wrong picture or a decoder stall · measured 2026-10-25
+
+The PPS the driver rebuilds was sent once per IRAP and never carried scaling lists. A stream whose PPS changes between pictures
+(initial QP, deblocking offsets, `cu_qp_delta`, tiles, transform skip), uses several PPS ids, or codes custom scaling lists
+decoded wrong, and six conformance streams stalled the decoder because their slices were parsed against a PPS they did not
+match (INITQP_A/B, PPS_A, SLIST_B/D, VPSSPSPPS_A: `Failed to sync surface`).
+
+Fix: the PPS is rebuilt for every picture under the id the slices name and sent whenever it differs from the one MPP has,
+and the client's scaling lists (`VAIQMatrixBufferHEVC`, raster order, the lists in effect for the picture) are written as
+`scaling_list_data()` in up-right diagonal order, every list explicit with the 16x16 and 32x32 DC values; the SPS keeps
+`sps_scaling_list_data_present_flag = 0`. A picture whose client sent no matrix (or one with a zero entry, which the syntax
+cannot code) goes out without PPS lists, so the hardware uses the specification's default lists, not flat ones; the driver
+log says so once. The same approach as the H.264 change (KI-17).
+
+Measured (Fluster, 2026-10-25, `evidence/2026-10-25-hevc-fluster/`): JCT-VC-HEVC_V1 128/147 → 141/147 on top of KI-5, no vector
+regressing, no decoder resets during the run. The remaining six are KI-5's hardware-limit and software-fail vectors.
 
 ## Reporting
 

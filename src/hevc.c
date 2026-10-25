@@ -23,13 +23,12 @@
  * mirrors SPS/PPS syntax almost 1:1; a minimal VPS is invented because
  * VA-API carries no VPS fields at all.
  *
- * Deliberate simplifications (documented, testable):
- *  - num_short_term_ref_pic_sets = 0: slices then carry their own RPS
- *    inline (short_term_ref_pic_set_sps_flag=0), which is what every
- *    encoder we have met emits (pp->st_rps_bits > 0 confirms per frame).
- *    A stream whose slices reference SPS-level RPS entries cannot be
- *    reconstructed from VA-API (the tables are not in the struct).
- *  - scaling lists: default tables only (sps/pps_scaling_list_data_present=0).
+ * Deliberate choices (documented, testable):
+ *  - num_short_term_ref_pic_sets = 0 and no long-term SPS entries: a slice
+ *    that referred to them is rewritten with an inline set built from the
+ *    client's reference list (hevc_rewrite_slice_rps, KI-5).
+ *  - scaling lists: the SPS declares none; the client's lists in effect for
+ *    the picture are written into the per-picture PPS (KI-22).
  *  - conformance_window_flag = 0: VA gives coded sizes; cropping is the
  *    client's problem, exactly as the H.264 path does.
  *  - no VUI, no extensions, single layer, single temporal sub-layer.
@@ -76,6 +75,7 @@ static void profile_tier_level(BSWriter *bs, int is_main10) {
 
 static int finish(BSWriter *bs, const uint8_t *raw, uint8_t *buf, size_t buf_size) {
     bs_rbsp_trailing(bs);
+    if (bs->byte_pos >= bs->capacity) return -1;   /* the writer dropped bits: never ship a truncated header */
     size_t raw_sz = bs_bytes(bs);
     if (4 + raw_sz * 2 > buf_size) return -1;
     buf[0] = 0x00; buf[1] = 0x00; buf[2] = 0x00; buf[3] = 0x01;
@@ -180,15 +180,72 @@ int hevc_write_sps(uint8_t *buf, size_t buf_size,
     return finish(&bs, raw, buf, buf_size);
 }
 
-int hevc_write_pps(uint8_t *buf, size_t buf_size,
-                   const VAPictureParameterBufferHEVC *pp)
+/* Up-right diagonal scan (6.5.3): entry k is the raster index of the k-th coefficient in the coded order.  VA-API
+   hands the lists over in raster order; scaling_list_data() codes them in this order. */
+static const uint8_t diag4x4[16] = { 0, 4, 1, 8, 5, 2, 12, 9, 6, 3, 13, 10, 7, 14, 11, 15 };
+static const uint8_t diag8x8[64] = {
+     0,  8,  1, 16,  9,  2, 24, 17, 10,  3, 32, 25, 18, 11,  4, 40,
+    33, 26, 19, 12,  5, 48, 41, 34, 27, 20, 13,  6, 56, 49, 42, 35,
+    28, 21, 14,  7, 57, 50, 43, 36, 29, 22, 15, 58, 51, 44, 37, 30,
+    23, 59, 52, 45, 38, 31, 60, 53, 46, 39, 61, 54, 47, 62, 55, 63 };
+
+/* scaling_list_data() of 7.3.4, every list explicit (scaling_list_pred_mode_flag = 1).  The client's lists are the
+   ones in effect for the picture (ffmpeg resolves SPS/PPS and the prediction rules before it fills the buffer), so
+   writing them explicitly is always equivalent. */
+static void write_scaling_list_data(BSWriter *bs, const VAIQMatrixBufferHEVC *iq)
 {
-    uint8_t raw[512];
+    for (int size_id = 0; size_id < 4; size_id++) {
+        for (int m = 0; m < 6; m += (size_id == 3) ? 3 : 1) {
+            const uint8_t *list; const uint8_t *scan; int n;
+            switch (size_id) {
+            case 0:  list = iq->ScalingList4x4[m];       scan = diag4x4; n = 16; break;
+            case 1:  list = iq->ScalingList8x8[m];       scan = diag8x8; n = 64; break;
+            case 2:  list = iq->ScalingList16x16[m];     scan = diag8x8; n = 64; break;
+            default: list = iq->ScalingList32x32[m / 3]; scan = diag8x8; n = 64; break;
+            }
+            bs_write1(bs, 1);                                   /* scaling_list_pred_mode_flag: explicit */
+            int next = 8;
+            if (size_id > 1) {
+                int dc = (size_id == 2) ? iq->ScalingListDC16x16[m] : iq->ScalingListDC32x32[m / 3];
+                bs_write_se(bs, dc - 8);                        /* scaling_list_dc_coef_minus8 */
+                next = dc;
+            }
+            for (int i = 0; i < n; i++) {
+                int v = list[scan[i]];
+                int delta = ((v - next + 128) & 255) - 128;     /* nextCoef = (nextCoef + delta + 256) % 256 == v */
+                bs_write_se(bs, delta);                         /* scaling_list_delta_coef */
+                next = v;
+            }
+        }
+    }
+}
+
+int hevc_iq_usable(const VAIQMatrixBufferHEVC *iq)
+{
+    if (!iq) return 0;
+    for (int m = 0; m < 6; m++) {
+        for (int i = 0; i < 16; i++) if (!iq->ScalingList4x4[m][i]) return 0;
+        for (int i = 0; i < 64; i++) if (!iq->ScalingList8x8[m][i] || !iq->ScalingList16x16[m][i]) return 0;
+        if (!iq->ScalingListDC16x16[m]) return 0;
+    }
+    for (int m = 0; m < 2; m++) {
+        for (int i = 0; i < 64; i++) if (!iq->ScalingList32x32[m][i]) return 0;
+        if (!iq->ScalingListDC32x32[m]) return 0;
+    }
+    return 1;
+}
+
+int hevc_write_pps(uint8_t *buf, size_t buf_size,
+                   const VAPictureParameterBufferHEVC *pp, int pps_id,
+                   const VAIQMatrixBufferHEVC *iq)
+{
+    uint8_t raw[4096];          /* explicit scaling lists are 992 delta coefficients + 8 DC values of up to 17 bits each:
+                                   ~2.1 KB; with the tile arrays and the rest the PPS stays under 2.4 KB */
     BSWriter bs;
     bs_init(&bs, raw, sizeof(raw));
     nal_header(&bs, NAL_PPS);
 
-    bs_write_ue(&bs, 0);        /* pps_pic_parameter_set_id */
+    bs_write_ue(&bs, (uint32_t)(pps_id < 0 ? 0 : pps_id));  /* pps_pic_parameter_set_id: the one the slices name */
     bs_write_ue(&bs, 0);        /* pps_seq_parameter_set_id */
     bs_write(&bs, pp->slice_parsing_fields.bits.dependent_slice_segments_enabled_flag, 1);
     bs_write(&bs, pp->slice_parsing_fields.bits.output_flag_present_flag, 1);
@@ -228,7 +285,11 @@ int hevc_write_pps(uint8_t *buf, size_t buf_size,
         bs_write_se(&bs, pp->pps_beta_offset_div2);
         bs_write_se(&bs, pp->pps_tc_offset_div2);
     }
-    bs_write(&bs, 0, 1);        /* pps_scaling_list_data_present_flag */
+    /* The stream's scaling lists come with the picture (VAIQMatrixBufferHEVC); the SPS we send leaves
+       sps_scaling_list_data_present_flag = 0, so they are written here for every picture that has them. */
+    const int lists = pp->pic_fields.bits.scaling_list_enabled_flag && hevc_iq_usable(iq);
+    bs_write(&bs, lists, 1);    /* pps_scaling_list_data_present_flag */
+    if (lists) write_scaling_list_data(&bs, iq);
     bs_write(&bs, pp->slice_parsing_fields.bits.lists_modification_present_flag, 1);
     bs_write_ue(&bs, pp->log2_parallel_merge_level_minus2);
     bs_write(&bs, pp->slice_parsing_fields.bits.slice_segment_header_extension_present_flag, 1);
@@ -254,6 +315,7 @@ static uint32_t br_ue(BR *b) {
     int lz = 0;
     while (lz < 32 && br_u(b, 1) == 0) lz++;
     if (lz == 0) return 0;
+    if (lz > 31) return 0;                           /* garbage: 32 leading zeros would shift out of range */
     return ((1u << lz) - 1u) + br_u(b, lz);
 }
 /* Strip emulation-prevention bytes so the header parses as RBSP. */
@@ -494,3 +556,17 @@ out:
     return ret;
 }
 
+/* slice_pic_parameter_set_id: first_slice_segment_in_pic_flag, [no_output_of_prior_pics_flag], then the ue(v). */
+int hevc_peek_pps_id(const uint8_t *nal, size_t len)
+{
+    if (!nal || len < 4) return -1;
+    int nal_type = (nal[0] >> 1) & 0x3F;
+    if (nal_type > 21) return -1;
+    uint8_t tmp[16];
+    size_t n = rbsp_unescape(nal, len < sizeof tmp ? len : sizeof tmp, tmp, sizeof tmp);
+    BR b = { tmp, n, 16 };
+    br_u(&b, 1);
+    if (nal_type >= 16) br_u(&b, 1);
+    uint32_t id = br_ue(&b);
+    return id > 63 ? -1 : (int)id;
+}

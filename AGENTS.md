@@ -102,7 +102,7 @@ Releases are triggered by the human maintainer, never autonomously.
 - **libva names the driver after the render node's kernel driver.** On Panthor/Panfrost
   stacks that is not "rockchip"; the deb ships symlinks (KI-9). Keep them when repackaging.
 
-## Codec state (2026-09-06, all hardware-verified on RK3588S; AV1 Main 8/10-bit added in 3.0.0 — see README)
+## Codec state (2026-10-25, all hardware-verified on RK3588S; AV1 Main 8/10-bit added in 3.0.0 — see README)
 Works in hardware, pixel-identical to software decode:
 - H.264 8-bit, **including B-frame streams** (High profile, 720p60 broadcast-style)
 - HEVC Main 8-bit and **Main10 10-bit**, including B-frames — a full 12-minute
@@ -111,6 +111,11 @@ Works in hardware, pixel-identical to software decode:
 - Menu: all of the above advertised by default since v2.1.3; `RKVA_HIDE_10BIT=1`
   hides the 10-bit trio
 - VP9 Profile 0 (incl. non-16-aligned widths) and Profile 2 (copy-back and zero-copy)
+- **HEVC streams with SPS-level reference sets** (indexed, inter-RPS-predicted,
+  or `lt_idx_sps`): since v4.0.0 every independent slice header is rewritten
+  with an inline set built from `ReferenceFrames` (KI-5); 3.5.0 sent a dummy
+  set and misdecoded them. The HEVC PPS is rebuilt per picture with the
+  stream's scaling lists since v4.0.0 as well (KI-22).
 
 Not available, and why:
 - **AV1** — decodes since v3.0.0 through the OBU re-serialiser (`src/av1.c` + the vendored GStreamer writer); film grain is applied by the hardware with MPP `+pd35` / the #974 fix (KI-13).
@@ -119,10 +124,6 @@ Not available, and why:
   non-existent fourcc ("GR16") and Mesa refused it; KI-3 has the forensics. On Arm's
   proprietary Mali GL driver, per-plane importers draw it near-black (KI-11, a GL
   driver bug); copy-back (`vaapi-copy`) is correct everywhere.
-- **HEVC streams with SPS-level reference sets** (indexed, inter-RPS-predicted,
-  or `lt_idx_sps`): since v4.0.0 every independent slice header is rewritten
-  with an inline set built from `ReferenceFrames` (KI-5); 3.5.0 sent a dummy
-  set and misdecoded them.
 
 Client notes:
 - **Firefox** hardware-decodes H.264, VP9 **and HEVC** — HEVC needs the
