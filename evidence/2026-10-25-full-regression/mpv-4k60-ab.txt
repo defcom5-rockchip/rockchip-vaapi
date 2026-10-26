@@ -1,0 +1,22 @@
+# mpv 4K60 drop counts, installed 3.5.0 vs the 4.0.0 development build — 2026-10-25
+
+Orange Pi 5B, the board's Wayland session, mpv 0.41 `--no-config --hwdec=vaapi --vo=gpu --fs`, properties read over IPC after
+25 s of playback (frames shown, frames dropped, VO-delayed, decoder fps, hwdec). Three 4K60 clips from the board's smoke set:
+8-bit H.264 (zero-copy path), 10-bit HDR10 HEVC and 10-bit VP9 Profile 2 (both copied NV15→P010 — the path whose copy now
+takes the surface lock and a buffer reference per frame). Two rounds each. The absolute drop counts on the 10-bit clips are
+the known GPU-composition cost of 4K60 10-bit on this desktop (not a decoder limit); what matters here is that the two
+drivers are the same within run-to-run noise: no cost from the 4.0.0 changes.
+
+round 1 installed h264-8bit-4k60-real-30s.mp4          frames=1487 drops=158 vo-delayed=0 fps=60.0 hwdec=vaapi
+round 1 installed hdr10-4k60-hevc-jellyfin-30s.mp4     frames=1480 drops=694 vo-delayed=0 fps=60.0 hwdec=vaapi
+round 1 installed vp92-hdr10-4k60-30s.webm             frames=1479 drops=681 vo-delayed=0 fps=60.000002 hwdec=vaapi
+round 1 dev       h264-8bit-4k60-real-30s.mp4          frames=1474 drops=151 vo-delayed=0 fps=60.0 hwdec=vaapi
+round 1 dev       hdr10-4k60-hevc-jellyfin-30s.mp4     frames=1467 drops=688 vo-delayed=0 fps=60.0 hwdec=vaapi
+round 1 dev       vp92-hdr10-4k60-30s.webm             frames=1471 drops=673 vo-delayed=0 fps=60.000002 hwdec=vaapi
+round 2 installed h264-8bit-4k60-real-30s.mp4          frames=1477 drops=155 vo-delayed=0 fps=60.0 hwdec=vaapi
+round 2 installed hdr10-4k60-hevc-jellyfin-30s.mp4     frames=1471 drops=691 vo-delayed=0 fps=60.0 hwdec=vaapi
+round 2 installed vp92-hdr10-4k60-30s.webm             frames=1470 drops=672 vo-delayed=0 fps=60.000002 hwdec=vaapi
+round 2 dev       h264-8bit-4k60-real-30s.mp4          frames=1476 drops=153 vo-delayed=0 fps=60.0 hwdec=vaapi
+round 2 dev       hdr10-4k60-hevc-jellyfin-30s.mp4     frames=1475 drops=692 vo-delayed=0 fps=60.0 hwdec=vaapi
+round 2 dev       vp92-hdr10-4k60-30s.webm             frames=1484 drops=678 vo-delayed=0 fps=60.000002 hwdec=vaapi
+== done

@@ -27,3 +27,6 @@ produces two) — the tiny-frame class that fails on the raw decoder as well (KI
 MD5; the per-frame results are in `../2026-10-25-av1-sizechange/`.
 
 The vendor string in the CSVs says 3.5.0 for both runs; the new-driver run is the development tree (`LOG.txt` names the build).
+
+Also here: `browsers.txt` (Firefox and Chromium on the board session with this build) and `mpv-4k60-ab.txt` (mpv 4K60 drop
+counts, installed 3.5.0 vs this build: equal within noise on 8-bit H.264, 10-bit HEVC and 10-bit VP9).
