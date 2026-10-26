@@ -269,8 +269,8 @@ source package). `+pd34` carries the form Rockchip's reviewer asked for in
 [rockchip-linux/mpp PR #976](https://github.com/rockchip-linux/mpp/pull/976): no RK3588 exception, MPP's default task
 count. On synthetic 4K60 clips it decodes at 214 / 233 fps (10-/8-bit) against 149 / 181 with the guard, and ran
 201,600 frames through three wraps at 214 / 231 fps with 0 resets (`mpi_dec_test`, Orange Pi 5B). Rockchip reproduced
-the fault and says the change will go through its internal Gerrit review when merged; the PR is still open. `+pd34` is
-published for Ubuntu 24.04 and 26.04 at
+the fault and says the change will go through its internal Gerrit review when merged; the PR is still open. `+pd35`
+(the `+pd34` VP9 fix plus AV1 film grain) is published for Ubuntu 24.04 and 26.04 at
 https://github.com/defcom5-rockchip/mpp/releases/tag/pd35: `sudo apt install ./librockchip-mpp1_…_arm64.deb` (exact
 file names per Ubuntu release, and the Plaid Pi 5.0 case, in the release notes). Any MPP with upstream's one-frame
 guard is also safe, at the lower throughput.
