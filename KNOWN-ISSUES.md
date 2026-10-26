@@ -481,7 +481,11 @@ MPP returns a luma-only frame for them and the driver copied a chroma plane the 
 buffer. The copy now fills the surface's chroma plane with grey; both vectors decode bit-exact.
 
 The 3.5.0 entry under this number said that Firefox decodes High 10 in software and that the hardware output differed from
-software; the second part was this bug. Firefox's software decode of High 10 is Firefox's choice, not the driver's.
+software. Both parts were this bug: Firefox 157 does decode High 10 on the hardware (2026-10-25, a 1920×1088 High 10 clip:
+one H.264 context, 360 frames through the driver, ffmpeg-style initial QP applied), so every High 10 stream it played was
+slightly wrong until the fix above. Chromium hands High 10 H.264 to its software decoder and never opens a VA context for it
+(same session, same clip). Picture correctness in Firefox was not checked by eye; the path is ffmpeg's, which the FR-EXT
+vectors cover bit-exact. `evidence/2026-10-25-full-regression/browsers.txt`.
 
 ## KI-20: interlaced H.264 (field pictures, PAFF, MBAFF) was mostly refused — FIXED in v4.0.0, output is weaved
 

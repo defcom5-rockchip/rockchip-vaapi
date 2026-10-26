@@ -1,0 +1,49 @@
+# Browser checks on the board session with the 4.0.0 development driver — 2026-10-25
+
+Orange Pi 5B, Plaid Pi image (Firefox 157 via the image's wrapper, Chromium from the image), Wayland session, driver build
+77807efc in LIBVA_DRIVERS_PATH, RK_VAAPI_LOG per run; each clip opened as file:// in a fresh profile for 30 s, then the
+driver log summarised: VA configs created (profile ids), decode contexts (size, MPP coding id: 7 = H.264, 16777220 = HEVC,
+16777224 = AV1), frames MPP returned, exports, refusals/errors, and the High 10 init-QP client decision.
+Clips: FREH10-1 (H.264 High 10, 1920x1088, remuxed to mp4), the x265 two-pass HEVC clip (1280x720, 120 frames), Tears of
+Steel with libaom film grain (AV1, 1920x1080, 12 frames).
+
+Firefox needs the session environment the image sets (MOZ_DISABLE_RDD_SANDBOX=1, MOZ_X11_EGL=1, MOZ_ENABLE_WAYLAND=1);
+launched without it, it loads the driver, probes every profile and decodes everything in software (first block below).
+
+## Firefox without the session environment (harness error, kept for the record)
+== Firefox: hi10-freh10-1.mp4
+
+## Chromium
+== Chromium: hi10-freh10-1.mp4 17:03:02
+    configs:  2 CreateConfig: profile=13; 2 CreateConfig: profile=14; 2 CreateConfig: profile=17; 2 CreateConfig: profile=18; 2 CreateConfig: profile=19; 2 CreateConfig: profile=21; 2 CreateConfig: pr
+    contexts: 
+    frames assigned: 0, exports: 0, refusals/errors: 0, initqp: client treated as coded
+== Chromium: hevc-main.mp4 17:03:36
+    configs:  2 CreateConfig: profile=13; 2 CreateConfig: profile=14; 3 CreateConfig: profile=17; 2 CreateConfig: profile=18; 2 CreateConfig: profile=19; 2 CreateConfig: profile=21; 2 CreateConfig: pr
+    contexts:  1 CreateContext: 1280x720 coding=16777220;
+    frames assigned: 120, exports: 48, refusals/errors: 0, initqp: client treated as coded
+== Chromium: av1-tos-grain.mkv 17:04:11
+    configs:  2 CreateConfig: profile=13; 2 CreateConfig: profile=14; 2 CreateConfig: profile=17; 2 CreateConfig: profile=18; 2 CreateConfig: profile=19; 2 CreateConfig: profile=21; 3 CreateConfig: pr
+    contexts:  1 CreateContext: 1920x1080 coding=16777224;
+    frames assigned: 12, exports: 44, refusals/errors: 0, initqp: client treated as coded
+== done 17:04:45
+
+
+## Firefox with the session environment
+== Firefox (session env): hi10-freh10-1.mp4 17:05:28
+    configs:  2 CreateConfig: profile=13; 2 CreateConfig: profile=14; 2 CreateConfig: profile=17; 2 CreateConfig: profile=18; 2 CreateConfig: profile=19; 2 CreateConfig: profile=21; 2 CreateConfig: pr
+    contexts:  1 CreateContext: 1920x1088 coding=7;
+    frames assigned: 360, exports: 720, refusals/errors: 0, initqp: client treated as ffmpeg-style
+== Firefox (session env): hevc-main.mp4 17:06:02
+    configs:  2 CreateConfig: profile=13; 2 CreateConfig: profile=14; 4 CreateConfig: profile=17; 2 CreateConfig: profile=18; 2 CreateConfig: profile=19; 2 CreateConfig: profile=21; 2 CreateConfig: pr
+    contexts:  1 CreateContext: 1280x720 coding=16777220;
+    frames assigned: 120, exports: 240, refusals/errors: 0, initqp: client treated as ffmpeg-style
+== Firefox (session env): av1-tos-grain.mkv 17:06:37
+    configs:  2 CreateConfig: profile=13; 2 CreateConfig: profile=14; 2 CreateConfig: profile=17; 2 CreateConfig: profile=18; 2 CreateConfig: profile=19; 2 CreateConfig: profile=21; 4 CreateConfig: pr
+    contexts:  1 CreateContext: 1920x1080 coding=16777224;
+    frames assigned: 12, exports: 24, refusals/errors: 0, initqp: client treated as ffmpeg-style
+== done 17:07:11
+
+
+Reading: Chromium decodes HEVC and AV1 on the hardware and never opens a VA context for High 10 H.264 (its GPU process is
+recognised as a coded-value client). Firefox decodes all three on the hardware, High 10 included, as an ffmpeg-style client.
