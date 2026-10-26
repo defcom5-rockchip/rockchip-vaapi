@@ -66,7 +66,7 @@ server-side transcode) instead of rendering a broken picture.
 | HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+). v4.0.0: slices that use SPS-level reference-picture sets are rewritten with inline sets, and the PPS is rebuilt per picture with the stream's scaling lists (KI-5, KI-22) — JCT-VC-HEVC_V1 141/147 bit-exact on 2026-10-25 (17 in 3.5.0); the remaining 6 are listed in KI-5 |
 | HEVC  | Main10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 (mpv and Firefox verified; see KI-3 for the history); the KI-5 and KI-22 fixes apply |
 | VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
-| AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; matches the Fluster reference checksums on 215/242 libaom and 34/36 Chromium conformance vectors with a `+pd35` MPP build (213 and 31 with an older MPP: the difference is the film-grain vectors), the rest explained in KI-13. v4.0.0: a mid-stream resolution increase no longer corrupts memory — exporting players get a surface of the new size, downloading clients a clean refusal (KI-13) |
+| AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; matches the Fluster reference checksums on 215/242 libaom and 34/36 Chromium conformance vectors with MPP `+pd35` (213 and 31 with an older MPP: the difference is the film-grain vectors), the rest explained in KI-13. v4.0.0: a mid-stream resolution increase no longer corrupts memory — exporting players get a surface of the new size, downloading clients a clean refusal (KI-13) |
 
 Releases before v2.0.0 advertised HEVC, High10 and VP9 Profile 2 without decoding
 them correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story.
@@ -95,8 +95,8 @@ MPP keeps that decode and stores it into the right slots afterwards, otherwise t
 hidden decode: one extra AV1-engine job per such picture, see [KI-14](KNOWN-ISSUES.md#ki-14-av1-decoded-twice-per-early-synced-picture-without-plaid-pis-mpp-v350)). Conformance measured through
 `ffmpeg -hwaccel vaapi` (see `evidence/2026-10-11-av1-fluster/`); decode on the AV1 engine confirmed by interrupt
 counts in Chrome, Firefox and mpv, the picture checked by eye in Chrome and Firefox.
-Film grain is applied by the hardware when MPP has the one-line fix from rockchip-mpp issue #974 (a `+pd35` build of Plaid
-Pi's MPP — `+pd34` is the current download, `+pd35` follows with Plaid Pi 6.0 — and the pull request we have prepared upstream); with an older MPP, grainy streams decode to the clean picture. `RKVA_AV1_NO_GRAIN=1` turns
+Film grain is applied by the hardware when MPP has the one-line fix from rockchip-mpp issue #974 (Plaid Pi's MPP `+pd35`, published
+2026-10-25 — https://github.com/defcom5-rockchip/mpp/releases/tag/pd35 — and the pull request we have prepared upstream); with an older MPP, grainy streams decode to the clean picture. `RKVA_AV1_NO_GRAIN=1` turns
 the grain off for a decode (the player can then apply its own).
 `RKVA_AV1_WRITER_DEBUG=1` prints the bit writer's warnings (`2` adds its debug trace), `RKVA_DUMP_AV1=file` saves the stream sent to MPP.
 AV1 needs MPP's `av1d` and the RK3588's AV1 decoder (RK356x has none); film grain depends on MPP (#974).
@@ -112,7 +112,7 @@ Runtime:
 - `libva2` (>= 2.20; the driver exports only the 1.20 init entry point)
 - `librockchip-mpp1` (any ≥ 1.5.0 decodes every codec, but the Ubuntu-Rockchip PPA builds lose frames in VP9 sessions
   past ~65,536 frames, KI-10; for that, and for 4K60 AV1 in Firefox and clean AV1 last frames in Chrome, KI-14/15, use
-  Plaid Pi's MPP build, published for Ubuntu 24.04 and 26.04 at https://github.com/defcom5-rockchip/mpp/releases/tag/pd34)
+  Plaid Pi's MPP build, published for Ubuntu 24.04 and 26.04 at https://github.com/defcom5-rockchip/mpp/releases/tag/pd35)
 - `librga2` (the RK3588 2D engine, used for the 10-bit conversion)
 
 Build:

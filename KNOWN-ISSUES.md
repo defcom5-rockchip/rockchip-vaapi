@@ -271,7 +271,7 @@ count. On synthetic 4K60 clips it decodes at 214 / 233 fps (10-/8-bit) against 1
 201,600 frames through three wraps at 214 / 231 fps with 0 resets (`mpi_dec_test`, Orange Pi 5B). Rockchip reproduced
 the fault and says the change will go through its internal Gerrit review when merged; the PR is still open. `+pd34` is
 published for Ubuntu 24.04 and 26.04 at
-https://github.com/defcom5-rockchip/mpp/releases/tag/pd34: `sudo apt install ./librockchip-mpp1_…_arm64.deb` (exact
+https://github.com/defcom5-rockchip/mpp/releases/tag/pd35: `sudo apt install ./librockchip-mpp1_…_arm64.deb` (exact
 file names per Ubuntu release, and the Plaid Pi 5.0 case, in the release notes). Any MPP with upstream's one-frame
 guard is also safe, at the lower throughput.
 
@@ -331,8 +331,8 @@ the final code, with the number of held decoder buffers staying flat (2.2.0: 273
 
 - **Film grain needs the MPP fix.** MPP's av1d HAL never set the register that turns grain synthesis on (rockchip-mpp
   issue #974; a pull request with the one-line fix is prepared, 2026-10-25). With MPP up to `+pd34` a stream with
-  `apply_grain` decodes to the clean reference picture; with a `+pd35` build of Plaid Pi's MPP (`+pd34` is the current
-  download, `+pd35` follows with Plaid Pi 6.0) the hardware applies the grain, bit-exact
+  `apply_grain` decodes to the clean reference picture; with Plaid Pi's MPP `+pd35` (published 2026-10-25, defcom5-rockchip/mpp release `pd35`) the hardware
+  applies the grain, bit-exact
   against dav1d on 12 streams (446 frames) including inherited parameters, 4K60 and AFBC output. No player adds grain a
   second time on this path: ffmpeg's hwaccel sets `apply_grain` only when it does not export the grain itself, and mpv's
   `film-grain=cpu` is the only mode that renders grain on the Mali driver (measured 2026-10-24). `RKVA_AV1_NO_GRAIN=1`
@@ -373,7 +373,7 @@ Conformance runs (Fluster, `ffmpeg -hwaccel vaapi`; every failure except monochr
 attributed against the raw decoder — `sizeup` was once attributed to it, retracted above; Fluster's command rescales
 after a size change, so both still count as failures there although the driver decodes `sizedown` bit-exact):
 libaom AV1-TEST-VECTORS 213/242, Chromium 10-bit 22/23, Chromium 8-bit 9/13 — files and the attribution table in
-`evidence/2026-10-11-av1-fluster/`, scripts in `tests/av1/`. Re-run 2026-10-25 with the v4.0.0 tree and a `+pd35` MPP build
+`evidence/2026-10-11-av1-fluster/`, scripts in `tests/av1/`. Re-run 2026-10-25 with the v4.0.0 tree and MPP `+pd35`
 (`evidence/2026-10-25-full-regression/`): 215/242, 23/23, 11/13 — the three film-grain vectors now pass, nothing else
 moved; the decoder resets during that run all come from the tiny-frame vectors above.
 
@@ -393,7 +393,7 @@ path is in use ("deferred refresh available" / "off (this MPP lacks it ...)" —
 active; a package version alone is not); `RKVA_AV1_NO_DEFER` (any value) forces the re-decode.
 
 **Workaround:** install Plaid Pi's MPP (`+pd32` or later) on RK3588 — published for Ubuntu 24.04 and 26.04 at
-https://github.com/defcom5-rockchip/mpp/releases/tag/pd34. Firefox tip: `media.video-queue.hw-accel-size` = 10
+https://github.com/defcom5-rockchip/mpp/releases/tag/pd35. Firefox tip: `media.video-queue.hw-accel-size` = 10
 in about:config lets Firefox queue more decoded frames (YouTube 4K60 AV1 drops went from about 8 % to 1.2–1.5 % after
 start-up on an Orange Pi 5B).
 
@@ -412,7 +412,7 @@ there the newest picture is still held: the last frame of a non-looping AV1 vide
 content, and low-delay playback (WebRTC, WebCodecs) may show stale frames. 3.0.0 behaves the same way.
 
 **Workaround:** Plaid Pi's MPP (`+pd32` or later) on RK3588 — published for Ubuntu 24.04 and 26.04 at
-https://github.com/defcom5-rockchip/mpp/releases/tag/pd34.
+https://github.com/defcom5-rockchip/mpp/releases/tag/pd35.
 
 ## KI-16: AV1 in Chrome/Chromium — a rare old frame mid-stream when the browser runs out of decoded pictures (v3.5.0)
 
