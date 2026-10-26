@@ -2148,6 +2148,9 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
                     c->hevc_rewrite_warned = true;
                 }
                 free(rew); free(pkt_data);
+                /* nothing will come out of MPP for this picture: release a client that syncs the surface */
+                RKSurface *tgt = surface_by_id(d, c->render_target);
+                if (tgt) { pthread_mutex_lock(&tgt->lock); tgt->decoded = true; pthread_cond_broadcast(&tgt->cond); pthread_mutex_unlock(&tgt->lock); }
                 return VA_STATUS_ERROR_DECODING_ERROR;
             }
         }
@@ -3680,7 +3683,7 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
     ctx->max_image_formats    = 4;
     ctx->max_subpic_formats   = 4;
     ctx->max_display_attributes = 4;
-    ctx->str_vendor           = "Rockchip MPP VA-API Driver 3.5.0 Number Nine \"Pepper SGT\" (defcom5)";
+    ctx->str_vendor           = "Rockchip MPP VA-API Driver 4.0.0 Number Nine \"Pepper Pro\" (defcom5)";
 
     struct VADriverVTable *v = ctx->vtable;
     v->vaTerminate                = rk_Terminate;

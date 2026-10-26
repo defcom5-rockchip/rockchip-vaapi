@@ -471,7 +471,7 @@ int hevc_rewrite_slice_rps(const uint8_t *nal, size_t len, const VAPictureParame
             if ((pp->ReferenceFrames[lt_cand[c2]].pic_order_cnt & lsb_mask) == orig[e].lsb) found = c2;
         }
         if (found < 0) goto out;                               /* the header names a picture the client did not give */
-        taken[found] = 1; orig[e].used = orig[e].used;         /* keep the header's used flag */
+        taken[found] = 1;                                       /* the header's used flag is kept as parsed */
     }
     /* assign candidates to slots: first the SPS-coded slots (unknown pictures), then the matched explicit ones */
     int fill_order[16], nf = 0; int placed[16] = {0};

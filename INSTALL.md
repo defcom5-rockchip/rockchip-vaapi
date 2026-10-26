@@ -35,10 +35,10 @@ grep CmaTotal /proc/meminfo                     # → CmaTotal: 524288 kB
 ## Option A: Install from Debian package (recommended)
 
 ```bash
-sudo apt install ./rockchip-vaapi_3.5.0-1_arm64.deb
+sudo apt install ./rockchip-vaapi_4.0.0-1_arm64.deb
 ```
 
-**Upgrading from 3.0.0:** the same command. If an image holds the package (`apt-mark showhold` lists it), add
+**Upgrading from 3.x:** the same command. If an image holds the package (`apt-mark showhold` lists it), add
 `--allow-change-held-packages`. Your environment answer (below) carries over; `sudo dpkg-reconfigure rockchip-vaapi`
 changes it.
 
@@ -80,6 +80,11 @@ cd /path/to/rockchip-vaapi
 make
 ```
 
+On a release without a `librga-dev` package (Ubuntu 26.04 "resolute" at the time of writing): unpack the headers from the
+librga source, write a `librga.pc` whose `Cflags` points at them and whose `Libs` is `-l:librga.so.2` (or pass
+`RGA_CFLAGS=… RGA_LIBS=-l:librga.so.2` to make), and build the package with `dpkg-buildpackage -d`; the 4.0.0 .deb was built
+that way, with the same linkage a `librga-dev` build gives.
+
 Expected output: `rockchip_drv_video.so` in the project root. Without `librga-dev` the
 build stops with a message; `make RGA=no` builds without the RGA paths (10-bit is then
 converted on the CPU).
@@ -104,7 +109,7 @@ sudo install -m 755 rockchip_drv_video.so /your/path/rockchip_drv_video.so
 tar --exclude='rockchip-vaapi/debian' \
     --exclude='rockchip-vaapi/*.so' \
     --exclude='rockchip-vaapi/src/*.o' \
-    -czf rockchip-vaapi_3.5.0.orig.tar.gz rockchip-vaapi/
+    -czf rockchip-vaapi_4.0.0.orig.tar.gz rockchip-vaapi/
 
 # Build binary package
 cd rockchip-vaapi

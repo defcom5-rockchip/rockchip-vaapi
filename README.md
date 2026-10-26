@@ -36,6 +36,9 @@ Key features:
 - 4K60 AV1 in Firefox (v3.5.0 "Pepper SGT"): one AV1-engine job per picture with Plaid Pi's MPP `+pd32` or later (other MPP builds re-decode, [known issue KI-14](KNOWN-ISSUES.md#ki-14-av1-decoded-twice-per-early-synced-picture-without-plaid-pis-mpp-v350)), 8-bit zero-copy
   export, a per-decoder output thread instead of a 1 ms polling sync; in Chrome/Chromium no more green or old frames
   at playback start and quality switches (see below, KI-15 and KI-16)
+- H.264 and HEVC parameter sets rebuilt per picture with the streams' scaling lists, H.264 field pictures and CAVLC
+  multi-slice, the HEVC slice-header rewrite for SPS-level reference sets, the High 10 initial QP, and a safe AV1
+  resolution change (v4.0.0 "Pepper Pro"): JVT-AVC_V1 111/135, JVT-FR-EXT 69/69, JCT-VC-HEVC_V1 141/147 bit-exact
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)
 - Implements the full VA-API 1.20 vtable (`__vaDriverInit_1_20`)
 
@@ -56,14 +59,14 @@ server-side transcode) instead of rendering a broken picture.
 
 | Codec | Profile | Status |
 |-------|---------|--------|
-| H.264 | Constrained Baseline, Main, High | ✅ hardware decode (B-frame routing fixed in v2.1.2, KI-1). v4.0.0 (in development): custom scaling matrices, interlaced streams, per-picture PPS changes and CAVLC multi-slice pictures fixed — JVT-AVC_V1 111/135 and JVT-FR-EXT 69/69 bit-exact (74 and 27 in 3.5.0); KI-17, KI-20, KI-21 |
+| H.264 | Constrained Baseline, Main, High | ✅ hardware decode (B-frame routing fixed in v2.1.2, KI-1). v4.0.0: custom scaling matrices, interlaced streams, per-picture PPS changes and CAVLC multi-slice pictures fixed — JVT-AVC_V1 111/135 and JVT-FR-EXT 69/69 bit-exact (74 and 27 in 3.5.0); KI-17, KI-20, KI-21 (the last two mostly: POC type 1 and FMO/ASO/SP stay open) |
 | VP8   | Version 0–3 | ✅ advertised |
 | VP9   | Profile 0 (8-bit) | ✅ hardware decode, including non-16-aligned widths |
-| H.264 | High10 | ✅ advertised since v2.1.3; v4.0.0 (in development): the two conformance vectors (FREH10-1/2) decode bit-exact through ffmpeg — scaling matrices, and the initial QP that ffmpeg hands over with the bit-depth offset added (KI-17; the Chromium/GStreamer recognition is by command line and symbols, not yet seen on a live stream). Firefox 157 decodes High 10 on the hardware through this path (measured 2026-10-25); Chromium offers High 10 H.264 to software only |
-| HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+). v4.0.0 (in development): slices that use SPS-level reference-picture sets are rewritten with inline sets, and the PPS is rebuilt per picture with the stream's scaling lists (KI-5, KI-22) — JCT-VC-HEVC_V1 141/147 bit-exact on 2026-10-25 (17 in 3.5.0); the remaining 6 are listed in KI-5 |
+| H.264 | High10 | ✅ advertised since v2.1.3; v4.0.0: the two conformance vectors (FREH10-1/2) decode bit-exact through ffmpeg — scaling matrices, and the initial QP that ffmpeg hands over with the bit-depth offset added (KI-17; the Chromium/GStreamer recognition is by command line and symbols, not yet seen on a live stream). Firefox 157 decodes High 10 on the hardware through this path (measured 2026-10-25); Chromium offers High 10 H.264 to software only |
+| HEVC  | Main (8-bit) | ✅ hardware decode, advertised (v2.1.0+). v4.0.0: slices that use SPS-level reference-picture sets are rewritten with inline sets, and the PPS is rebuilt per picture with the stream's scaling lists (KI-5, KI-22) — JCT-VC-HEVC_V1 141/147 bit-exact on 2026-10-25 (17 in 3.5.0); the remaining 6 are listed in KI-5 |
 | HEVC  | Main10 | ✅ hardware decode + zero-copy display, advertised since v2.1.3 (mpv and Firefox verified; see KI-3 for the history); the KI-5 and KI-22 fixes apply |
 | VP9   | Profile 2 (10-bit) | ✅ hardware decode + zero-copy display, advertised since v2.1.3 |
-| AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; matches the Fluster reference checksums on 215/242 libaom and 34/36 Chromium conformance vectors with MPP `+pd35` (213 and 31 with an older MPP: the difference is the film-grain vectors), the rest explained in KI-13. v4.0.0 (in development): a mid-stream resolution increase no longer corrupts memory — exporting players get a surface of the new size, downloading clients a clean refusal (KI-13) |
+| AV1   | Main (Profile 0), 8- and 10-bit | ✅ hardware decode since v3.0.0 "Plaid Number Nine": the driver rebuilds the OBU headers MPP needs from the VA-API parameters; matches the Fluster reference checksums on 215/242 libaom and 34/36 Chromium conformance vectors with a `+pd35` MPP build (213 and 31 with an older MPP: the difference is the film-grain vectors), the rest explained in KI-13. v4.0.0: a mid-stream resolution increase no longer corrupts memory — exporting players get a surface of the new size, downloading clients a clean refusal (KI-13) |
 
 Releases before v2.0.0 advertised HEVC, High10 and VP9 Profile 2 without decoding
 them correctly — see [KNOWN-ISSUES](KNOWN-ISSUES.md) for the full story.
@@ -92,14 +95,15 @@ MPP keeps that decode and stores it into the right slots afterwards, otherwise t
 hidden decode: one extra AV1-engine job per such picture, see [KI-14](KNOWN-ISSUES.md#ki-14-av1-decoded-twice-per-early-synced-picture-without-plaid-pis-mpp-v350)). Conformance measured through
 `ffmpeg -hwaccel vaapi` (see `evidence/2026-10-11-av1-fluster/`); decode on the AV1 engine confirmed by interrupt
 counts in Chrome, Firefox and mpv, the picture checked by eye in Chrome and Firefox.
-Film grain is applied by the hardware when MPP has the one-line fix from rockchip-mpp issue #974 (Plaid Pi's `+pd35`, and the
-pull request we opened upstream); with an older MPP, grainy streams decode to the clean picture. `RKVA_AV1_NO_GRAIN=1` turns
+Film grain is applied by the hardware when MPP has the one-line fix from rockchip-mpp issue #974 (a `+pd35` build of Plaid
+Pi's MPP — `+pd34` is the current download, `+pd35` follows with Plaid Pi 6.0 — and the pull request we have prepared upstream); with an older MPP, grainy streams decode to the clean picture. `RKVA_AV1_NO_GRAIN=1` turns
 the grain off for a decode (the player can then apply its own).
 `RKVA_AV1_WRITER_DEBUG=1` prints the bit writer's warnings (`2` adds its debug trace), `RKVA_DUMP_AV1=file` saves the stream sent to MPP.
 AV1 needs MPP's `av1d` and the RK3588's AV1 decoder (RK356x has none); film grain depends on MPP (#974).
 Releases are named after Number Nine's Pepper boards, co-processor graphics cards of the late 1980s — this driver's
-whole job is handing video work to a co-processor. 3.0.0 was "Plaid Number Nine"; 3.5.0 is "Pepper SGT", after the
-board of that name (announced May 1987: a TMS34010 beside an Intel 82786, 1–4 MB, ISA). The name is a tribute; this
+whole job is handing video work to a co-processor. 3.0.0 was "Plaid Number Nine"; 3.5.0 was "Pepper SGT", after the
+board of that name (1987: a TMS34010 beside an Intel 82786, 1–4 MB, ISA); 4.0.0 is "Pepper Pro", after the series that
+followed it (Pepper Pro 1024, 1280 and 1600, 1988–1990, TMS34010; the 1024 shipped with 1.5–2 MB in ISA and MCA versions). The name is a tribute; this
 project is not affiliated with or endorsed by Number Nine or the successors to its assets.
 
 ## Dependencies
@@ -213,6 +217,11 @@ This fork (`defcom5-rockchip/rockchip-vaapi`) builds on the base driver above, a
   `tests/av1/` harness were written by Claude (Opus 5.5 and Fable 5.1) in pair sessions; defcom5-rockchip set the
   design constraints, ran every measurement on the Orange Pi 5B and reviewed each change. Fluster results and the
   attribution table are in `evidence/2026-10-11-av1-fluster/`.
+- **H.264 and HEVC conformance (v4.0.0 "Pepper Pro")** — per-picture PPS with the streams' scaling lists for both
+  codecs, H.264 field pictures and CAVLC multi-slice, the High 10 initial-QP correction with client recognition, the
+  HEVC slice-header rewrite with inline reference picture sets (`src/hevc.c`), and the AV1 surface growth/refusal on a
+  resolution change; written by Claude (Fable 5.1) in pair sessions under the same division of work, every change
+  measured on the Orange Pi 5B against Fluster and real players. Evidence in `evidence/2026-10-25-*/`.
 
 These fork additions were developed with the assistance of **Claude (Fable 5)** and were
 reviewed, tested, and validated on real hardware — **Orange Pi 5B (RK3588S)**, Arm's Mali driver (libmali g24p0) and, earlier, panfork
@@ -238,7 +247,8 @@ This is a fork, and the lineage matters:
 - **defcom5-rockchip** maintains this fork: the HEVC bitstream assembler (`src/hevc.c`,
   original work — upstream has no HEVC), the NV15 to P010 repack with its NEON path,
   B-frame and reference-routing fixes, `vaDeriveImage`, the honest profile
-  advertisement, the AV1 OBU re-serialiser (`src/av1.c`, v3.0.0), and the test tooling. Developed with Claude as co-engineer;
+  advertisement, the AV1 OBU re-serialiser (`src/av1.c`, v3.0.0), the per-picture H.264/HEVC parameter sets and the
+  HEVC slice-header rewrite (v4.0.0), and the test tooling. Developed with Claude as co-engineer;
   contributions are attributed in the commit trailers.
 
 Rockchip MPP, libva and the other libraries this links against carry their own
@@ -251,7 +261,7 @@ licenses and are not redistributed here.
 | **Eduardo García-Mádico Portabella** (`woodyst`) | original driver: VA-API ↔ MPP bridge, H.264 path, the H.264 bit writer this fork builds on |
 | **TruongSinh Tran-Nguyen** (`truongsinh`) | surface-stride fixes (upstream PR #2) |
 | **GStreamer project** (Intel / He Junyan, Georg Ottinger) | the AV1 bit writer and parser headers vendored in `src/av1/` |
-| **defcom5-rockchip** | fork maintainer: 10-bit zero-copy (GR1616 fix), Main10/High10/VP9 P2, Chrome created-depth export, Panthor/Panfrost libva names, the RGA3 NV15→P010 export lane, AV1 (v3.0.0), the KI test ladder, releases — and the RK3588 kernel-side fixes that surfaced along the way (Armbian `linux-rockchip` PR #548) |
+| **defcom5-rockchip** | fork maintainer: 10-bit zero-copy (GR1616 fix), Main10/High10/VP9 P2, Chrome created-depth export, Panthor/Panfrost libva names, the RGA3 NV15→P010 export lane, AV1 (v3.0.0), the H.264/HEVC conformance work (v4.0.0), the KI test ladder, releases — and the RK3588 kernel-side fixes that surfaced along the way (Armbian `linux-rockchip` PR #548) |
 | **Claude** (Anthropic) — Opus 5.5, Fable 5.1, Fable 5, Opus 5, Sonnet 4.6 | co-engineer on the fork, credited per commit in the `Co-Authored-By` trailers: root-cause work, patches, test tooling and the documentation |
 | An Armbian forum tester (RK3588 Orange Pi 5 Plus / Armbian vendor kernel) | confirmed Chrome 10-bit HEVC and VP9 Profile 2 hardware playback with 2.1.5, measured the 2.2.0-rc1 RGA lane (97 → 1 dropped frames at 4K60 HDR), and reported the Panthor libva naming that became the shipped symlinks |
 | **nyanmisaka** (`ffmpeg-rockchip`, `jellyfin-ffmpeg`) | the RGA3 P010 recipe (`RK_FORMAT_YCbCr_420_SP_10B` + the 10-bit flags) the export lane follows, and the Rockchip lanes in Jellyfin's FFmpeg |

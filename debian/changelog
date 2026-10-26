@@ -1,3 +1,35 @@
+rockchip-vaapi (4.0.0-1) resolute; urgency=medium
+
+  * Release 4.0.0 Number Nine "Pepper Pro": H.264 and HEVC conformance,
+    High 10 initial QP, AV1 resolution changes.
+  * H.264: the PPS is rebuilt for every picture with the stream's scaling
+    matrices (KI-17); field pictures and PAFF/MBAFF streams decode, weaved
+    (KI-20); CAVLC multi-slice pictures decode (KI-21); monochrome 4:0:0
+    streams no longer crash the client. JVT-AVC_V1 74 -> 111 of 135 vectors
+    bit-exact, JVT-FR-EXT 27 -> 69 of 69.
+  * H.264 High 10: the bit-depth offset ffmpeg adds to the initial QP is
+    undone (Firefox, mpv, ffmpeg); the client is recognised when the driver
+    loads, RKVA_H264_INITQP=coded|ffmpeg overrides. Both High 10 vectors pass.
+  * HEVC: slice headers rewritten with inline reference picture sets (KI-5),
+    per-picture PPS with scaling lists (KI-22). JCT-VC-HEVC_V1 17 -> 141 of
+    147; the rest are hardware limits (PICSIZE_A/B, TSUNEQBD_A) or vectors
+    ffmpeg's own decoder fails too (NUT_A, RPS_D, VPSSPSPPS_A).
+  * AV1: a picture larger than its surface grows the surface for a client
+    that exports its frames (mpv hwdec=vaapi) and is refused for vaGetImage
+    clients (ffmpeg): no more out-of-bounds read on a resolution increase
+    (KI-13). MPP decodes both libaom size-change vectors bit-exact.
+  * Conformance re-run: AV1 215/242, Chromium 11/13 and 23/23 (film grain
+    applied with a +pd35 build of Plaid Pi's MPP); VP9 189/305 and 3/6, unchanged. mpv 4K60 drop
+    counts equal to 3.5.0 within run-to-run noise. Evidence in
+    evidence/2026-10-25-*/.
+  * New switch: RKVA_H264_INITQP; RKVA_DUMP_H264 and RKVA_DUMP_HEVC are now
+    in the README table.
+  * Vendor string: Rockchip MPP VA-API Driver 4.0.0 Number Nine "Pepper Pro"
+    (defcom5). Named after Number Nine's Pepper Pro series (1988-1990), the
+    TIGA boards that followed the Pepper SGT.
+
+ -- defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>  Sun, 25 Oct 2026 18:40:00 -0700
+
 rockchip-vaapi (3.5.0-1) resolute; urgency=medium
 
   * Release 3.5.0 Number Nine "Pepper SGT": 4K60 AV1 in Firefox and clean

@@ -5,13 +5,13 @@ from the 4.0.0 development tree after the H.264, HEVC, High 10 and AV1 size-chan
 of the `.so`). `LOG.txt` is the run script's summary. The H.264 and HEVC suites from the same build are in
 `../2026-10-25-h264-fluster/item3-high10-initqp/` and `../2026-10-25-hevc-fluster/`.
 
-| suite | 3.5.0 | this tree | per-vector changes |
+| suite | baseline | this tree | per-vector changes |
 |---|---|---|---|
-| AV1-TEST-VECTORS (libaom) | 213/242 | 215/242 | `av1-1-b8-23-film_grain-50`, `av1-1-b10-23-film_grain-50` Fail → Success; nothing else |
-| CHROMIUM-8bit-AV1 | 9/13 | 11/13 | `av1-1-b8-23-filmgrain-50`, `ccvbfilmgrain` Fail → Success |
-| CHROMIUM-10bit-AV1 | 22/23 | 23/23 | `av1-1-b10-23-filmgrain-50` Fail → Success |
-| VP9-TEST-VECTORS | 189/305 | 189/305 | none |
-| VP9-TEST-VECTORS-HIGH | 3/6 | 3/6 | none |
+| AV1-TEST-VECTORS (libaom) | 213/242 (2026-10-11, 3.0.0 tree, MPP +pd34) | 215/242 | `av1-1-b8-23-film_grain-50`, `av1-1-b10-23-film_grain-50` Fail → Success; nothing else |
+| CHROMIUM-8bit-AV1 | 9/13 (same run) | 11/13 | `av1-1-b8-23-filmgrain-50`, `ccvbfilmgrain` Fail → Success |
+| CHROMIUM-10bit-AV1 | 22/23 (same run) | 23/23 | `av1-1-b10-23-filmgrain-50` Fail → Success |
+| VP9-TEST-VECTORS | 189/305 (3.5.0, today) | 189/305 | none |
+| VP9-TEST-VECTORS-HIGH | 3/6 (3.5.0, today) | 3/6 | none |
 
 The AV1 baselines are the 2026-10-11 run in `../2026-10-11-av1-fluster/` (driver 2.5.0/3.0.0 tree, MPP `+pd34`); the three
 film-grain vectors pass now because MPP `+pd35` applies the grain (KI-13), not because of a driver change. The VP9

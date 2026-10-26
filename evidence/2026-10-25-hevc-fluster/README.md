@@ -24,3 +24,5 @@ SPS carries 16 reference sets, every slice indexing them, decodes bit-exact (120
 NUT_A, RPS_D, SAODBLK_A/B, TSUNEQBD_A, VPSSPSPPS_A), so the hardware path now passes two vectors software fails (SAODBLK_A/B)
 and fails two that software passes (PICSIZE_A/B). The kernel log of the run window holds no decoder lines; its `rga:` lines come from the 2D engine refusing
 the 10-bit 416x240 vectors' stride (the driver then converts on the CPU), not from the decoder.
+
+The 3.5.0 baseline run of 2026-10-23 (17/147, RExt 2/49; same board, installed 3.5.0 package) is in `baseline-3.5.0/`.

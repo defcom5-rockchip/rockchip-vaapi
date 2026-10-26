@@ -4,7 +4,7 @@ Hardware-verified on Orange Pi 5B (RK3588S) unless noted. Reports from other
 RK3588/RK3588S boards are welcome — decode silicon is identical across the two,
 so behaviour should match.
 
-Current as of **v3.5.0**; fixes that landed in the v4.0.0 development tree are marked as such.
+Current as of **v4.0.0** (2026-10-25).
 
 ---
 
@@ -110,7 +110,7 @@ report it.
 
 ## KI-5: HEVC slices that reference SPS-level reference-picture sets decoded with wrong references — FIXED in v4.0.0 (see also KI-22)
 
-**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was a wrong picture or a decoder stall · measured 2026-10-23, re-measured 2026-10-25
+**Status:** fixed in v4.0.0 (2026-10-25) · **Severity:** was a wrong picture or a decoder stall · measured 2026-10-23, re-measured 2026-10-25
 
 VA-API hands a decoder the parsed SPS fields but not its reference-picture-set tables. Slices that pick one of those
 sets by index (`short_term_ref_pic_set_sps_flag = 1`), predict their inline set from one (`inter_ref_pic_set_prediction`),
@@ -327,11 +327,12 @@ the final code, with the number of held decoder buffers staying flat (2.2.0: 273
 
 ## KI-13: AV1 — what the hardware path does not do (v3.0.0)
 
-**Status:** limits, by design or by the hardware · the size-change bullet fixed in v4.0.0 (development tree, 2026-10-25) as far as the driver can · decode is otherwise bit-exact against dav1d
+**Status:** limits, by design or by the hardware · the size-change bullet fixed in v4.0.0 (2026-10-25) as far as the driver can · decode is otherwise bit-exact against dav1d
 
 - **Film grain needs the MPP fix.** MPP's av1d HAL never set the register that turns grain synthesis on (rockchip-mpp
   issue #974; a pull request with the one-line fix is prepared, 2026-10-25). With MPP up to `+pd34` a stream with
-  `apply_grain` decodes to the clean reference picture; with Plaid Pi's `+pd35` the hardware applies the grain, bit-exact
+  `apply_grain` decodes to the clean reference picture; with a `+pd35` build of Plaid Pi's MPP (`+pd34` is the current
+  download, `+pd35` follows with Plaid Pi 6.0) the hardware applies the grain, bit-exact
   against dav1d on 12 streams (446 frames) including inherited parameters, 4K60 and AFBC output. No player adds grain a
   second time on this path: ffmpeg's hwaccel sets `apply_grain` only when it does not export the grain itself, and mpv's
   `film-grain=cpu` is the only mode that renders grain on the Mali driver (measured 2026-10-24). `RKVA_AV1_NO_GRAIN=1`
@@ -372,7 +373,7 @@ Conformance runs (Fluster, `ffmpeg -hwaccel vaapi`; every failure except monochr
 attributed against the raw decoder — `sizeup` was once attributed to it, retracted above; Fluster's command rescales
 after a size change, so both still count as failures there although the driver decodes `sizedown` bit-exact):
 libaom AV1-TEST-VECTORS 213/242, Chromium 10-bit 22/23, Chromium 8-bit 9/13 — files and the attribution table in
-`evidence/2026-10-11-av1-fluster/`, scripts in `tests/av1/`. Re-run 2026-10-25 with the v4.0.0 tree and MPP `+pd35`
+`evidence/2026-10-11-av1-fluster/`, scripts in `tests/av1/`. Re-run 2026-10-25 with the v4.0.0 tree and a `+pd35` MPP build
 (`evidence/2026-10-25-full-regression/`): 215/242, 23/23, 11/13 — the three film-grain vectors now pass, nothing else
 moved; the decoder resets during that run all come from the tiny-frame vectors above.
 
@@ -442,7 +443,7 @@ written it shows the surface's previous content (or green on a surface's first u
 
 ## KI-17: H.264 streams with custom scaling matrices decode wrong (all High-profile depths), and High 10 initial QP — FIXED in v4.0.0
 
-**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was a wrong picture · measured 2026-10-23, re-measured 2026-10-25
+**Status:** fixed in v4.0.0 (2026-10-25) · **Severity:** was a wrong picture · measured 2026-10-23, re-measured 2026-10-25
 
 `h264.c` rebuilt the SPS/PPS it sends to MPP with `pic_scaling_matrix_present_flag = 0` and never read
 `VAIQMatrixBufferH264`, so the hardware dequantised every High-profile stream with flat matrices: streams that carry custom
@@ -489,7 +490,7 @@ vectors cover bit-exact. `evidence/2026-10-25-full-regression/browsers.txt`.
 
 ## KI-20: interlaced H.264 (field pictures, PAFF, MBAFF) was mostly refused — FIXED in v4.0.0, output is weaved
 
-**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was no hardware decode for interlaced streams · re-measured 2026-10-25
+**Status:** fixed in v4.0.0 (2026-10-25) · **Severity:** was no hardware decode for interlaced streams · re-measured 2026-10-25
 
 Three things were wrong, none of them in the hardware:
 
@@ -559,7 +560,7 @@ Firefox figures in this file were measured with that helper or patch in place.
 
 ## KI-22: HEVC PPS sent once per IRAP, without the stream's scaling lists — FIXED in v4.0.0
 
-**Status:** fixed in v4.0.0 (development tree, 2026-10-25) · **Severity:** was a wrong picture or a decoder stall · measured 2026-10-25
+**Status:** fixed in v4.0.0 (2026-10-25) · **Severity:** was a wrong picture or a decoder stall · measured 2026-10-25
 
 The PPS the driver rebuilds was sent once per IRAP and never carried scaling lists. A stream whose PPS changes between pictures
 (initial QP, deblocking offsets, `cu_qp_delta`, tiles, transform skip), uses several PPS ids, or codes custom scaling lists

@@ -9,7 +9,8 @@ lists, field pictures, CAVLC multi-slice". Baseline: the same suites with driver
 | JVT-AVC_V1 | 74/135 | 111/135 | 0 |
 | JVT-FR-EXT | 27/69 | 67/69 (69/69 after the High 10 fix below) | 0 |
 
-Files: `fluster-JVT-AVC_V1.csv`, `fluster-JVT-FR-EXT.csv` (Fluster's `-f csv -so` output: vector, result, time). The vendor
+Files: `fluster-JVT-AVC_V1.csv`, `fluster-JVT-FR-EXT.csv` (Fluster's `-f csv -so` output: vector, result, time); the 3.5.0
+baseline run of 2026-10-23 is in `baseline-3.5.0/` (same board, installed 3.5.0 package). The vendor
 string in the CSVs still says 3.5.0; the binary is the development tree.
 The remaining failures are listed in KNOWN-ISSUES KI-17, KI-20 and KI-21.
 

@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: rockchip-vaapi
-Upstream-Contact: defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+Upstream-Contact: defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>
 Source: https://github.com/defcom5-rockchip/rockchip-vaapi
 Comment:
  This is the defcom5-rockchip fork of the rockchip-vaapi driver originally
@@ -11,11 +11,11 @@ Comment:
 
 Files: *
 Copyright: 2026 Eduardo García-Mádico Portabella <woodyst@gmail.com>
-           2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+           2026 defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>
 License: LGPL-2.1+
 
 Files: docs/branding/*.svg docs/branding/*.png
-Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+Copyright: 2026 defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>
 License: all-rights-reserved
  The Number Nine logo files in docs/branding/ (SVG and PNG) are © 2026 defcom5-rockchip, all rights reserved. They may
  be used to refer to this project — for example in articles, reviews, package listings or link previews. Scaling,
@@ -32,7 +32,7 @@ Comment:
  no font files are included.
 
 Files: src/hevc.c src/hevc.h
-Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+Copyright: 2026 defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>
 Comment:
  The HEVC bitstream assembler is original work in this fork; the upstream
  project has no HEVC support.
@@ -54,17 +54,17 @@ Comment:
 License: LGPL-2.1+
 
 Files: src/av1.c src/av1.h src/av1/gstcompat.c src/av1/gstcompat.h
-Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+Copyright: 2026 defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>
 Comment:
  The AV1 OBU re-serialiser is original work in this fork.
 License: LGPL-2.1+
 
 Files: tests/* tools/*
-Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+Copyright: 2026 defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>
 License: LGPL-2.1+
 
 Files: debian/*
-Copyright: 2026 defcom5-rockchip <defcom5-rockchip@users.noreply.github.com>
+Copyright: 2026 defcom5-rockchip <286489597+defcom5-rockchip@users.noreply.github.com>
 License: LGPL-2.1+
 
 License: LGPL-2.0+

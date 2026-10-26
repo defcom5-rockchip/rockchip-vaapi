@@ -128,15 +128,16 @@
 <div class="wrap">
 
   <header class="reveal">
-    <p class="eyebrow">defcom5-rockchip <span class="sep">/</span> rockchip-vaapi <span class="sep">·</span> update 2026-10-19</p>
-    <h1>4K60 AV1 in Firefox. Pepper SGT.</h1>
+    <p class="eyebrow">defcom5-rockchip <span class="sep">/</span> rockchip-vaapi <span class="sep">·</span> update 2026-10-25</p>
+    <h1>H.264 and HEVC headers, per picture. Pepper Pro.</h1>
     <div class="tags">
-      <span class="pill on">v3.5.0</span>
+      <span class="pill on">v4.0.0</span>
       <span class="pill">RK3588 / RK3588S</span>
       <span class="pill">ubuntu-rockchip BSP</span>
       <span class="pill">H.264 · HEVC · VP9 · AV1</span>
     </div>
-    <p class="lede"><b>3.5.0 "Pepper SGT"</b> brings <b>4K60 AV1 in Firefox</b> with Plaid Pi's MPP (each AV1 picture decoded once instead of twice), clean AV1 starts and quality switches in Chrome and Chromium, 8-bit frames reaching Firefox and mpv without a copy, and a decoder-side sync instead of 1 ms polling for every codec. Other MPP builds still decode everything correctly; only 4K60 AV1 in Firefox needs the patched MPP (<a href="https://github.com/defcom5-rockchip/rockchip-vaapi/blob/main/KNOWN-ISSUES.md">known issue 14</a>).</p>
+    <p class="lede"><b>4.0.0 "Pepper Pro"</b> rebuilds the <b>H.264 and HEVC headers per picture</b> the way the streams need them: scaling matrices, field pictures, CAVLC multi-slice, SPS-level reference sets and per-picture PPS — JVT-AVC_V1 74 → 111/135, JVT-FR-EXT 27 → 69/69, JCT-VC-HEVC_V1 17 → 141/147 bit-exact. High 10 H.264 gets the initial QP ffmpeg shifts; an AV1 resolution change inside one decoder no longer corrupts memory (exporting players get a surface of the new size, downloaders a clean refusal). Film grain is applied with a <code>+pd35</code> build of Plaid Pi's MPP (<code>+pd34</code> is the current download). VP9 unchanged.</p>
+    <p class="lede"><b>3.5.0 "Pepper SGT"</b> brought <b>4K60 AV1 in Firefox</b> with Plaid Pi's MPP (each AV1 picture decoded once instead of twice), clean AV1 starts and quality switches in Chrome and Chromium, 8-bit frames reaching Firefox and mpv without a copy, and a decoder-side sync instead of 1 ms polling for every codec. Other MPP builds still decode everything correctly; only 4K60 AV1 in Firefox needs the patched MPP (<a href="https://github.com/defcom5-rockchip/rockchip-vaapi/blob/main/KNOWN-ISSUES.md">known issue 14</a>).</p>
     <p class="lede"><b>3.0.0 "Plaid Number Nine"</b> added <b>AV1 Main, 8- and 10-bit, in hardware</b>: VA-API clients hand the driver parsed parameters and tile data, Rockchip MPP wants a complete OBU stream, so the driver rebuilds the sequence and frame headers in between. Matches the Fluster reference checksums on <b>213/242</b> libaom and <b>31/36</b> Chromium conformance vectors (the rest is explained in KI-13; film grain is applied with the fixed MPP, see KI-13). Verified in ffmpeg, mpv, Chrome and Firefox. The VP9 odd-width fix below still ships. Named after Number Nine's Pepper boards, the co-processor graphics cards of the late 1980s.</p>
   </header>
 
@@ -169,10 +170,10 @@
       <li>
         <div class="body">
           <h3>Install the packaged VA-API driver</h3>
-          <p class="muted">Release 3.5.0 "Pepper SGT". Grab it from the release; upgrading from 3.0.0 is the same command (add <code>--allow-change-held-packages</code> if your image holds it).</p>
+          <p class="muted">Release 4.0.0 "Pepper Pro". Grab it from the release; upgrading from 3.x is the same command (add <code>--allow-change-held-packages</code> if your image holds it).</p>
           <div class="term"><div class="bar"><span class="dot"></span><span class="name">bash</span></div><button class="copy">Copy</button><pre>cd /tmp
-wget https://github.com/defcom5-rockchip/rockchip-vaapi/releases/download/v3.5.0/rockchip-vaapi_3.5.0-1_arm64.deb
-sudo apt install ./rockchip-vaapi_3.5.0-1_arm64.deb</pre></div>
+wget https://github.com/defcom5-rockchip/rockchip-vaapi/releases/download/v4.0.0/rockchip-vaapi_4.0.0-1_arm64.deb
+sudo apt install ./rockchip-vaapi_4.0.0-1_arm64.deb</pre></div>
           <p class="muted" style="margin-top:10px">If apt says <code>librga2</code> or <code>librockchip-mpp1</code> is not installable, add your image's Rockchip multimedia repository first. Or download from the <a href="https://github.com/defcom5-rockchip/rockchip-vaapi/releases">Releases page</a>.</p>
         </div>
       </li>
@@ -247,7 +248,9 @@ sed 's|^Exec=/usr/bin/firefox|Exec=env LIBVA_DRIVER_NAME=rockchip MOZ_DISABLE_RD
   </section>
 
   <section class="reveal">
-    <h2>What 3.5.0 adds</h2>
+    <h2>What 4.0.0 adds</h2>
+    <p>The H.264 PPS is rebuilt for every picture under the id the slices name, with the stream's scaling matrices (x264 <code>--cqm</code>, Blu-ray and broadcast encodes were slightly wrong at every bit depth); field pictures, PAFF and MBAFF streams decode (weaved); CAVLC multi-slice pictures decode; monochrome streams no longer crash the player. HEVC slices that refer to SPS-level reference picture sets are rewritten with inline sets and the HEVC PPS is rebuilt per picture with the stream's scaling lists — the hardware used to stall on both. High 10 H.264: ffmpeg hands the initial QP over with the bit-depth offset already added; the driver undoes it (Firefox decodes High 10 on the hardware, so its High 10 streams carried the wrong initial QP before — the conformance vectors show the effect; not checked by eye in Firefox). AV1: a picture larger than its surface grows the surface for players that export their frames (mpv <code>hwdec=vaapi</code>) and is refused for <code>vaGetImage</code> clients (ffmpeg) instead of reading past the image. Every number in <code>KNOWN-ISSUES.md</code> has its run in <code>evidence/2026-10-25-*/</code>; the full AV1 and VP9 suites were re-run with no regression.</p>
+    <h2>What 3.5.0 added</h2>
     <p>With Plaid Pi's MPP (<code>librockchip-mpp1 … +pd32</code> or later) an AV1 picture that the player syncs early is decoded once and its reference slots committed afterwards, instead of being decoded twice; on an Orange Pi 5B, YouTube 4K60 AV1 in Firefox went from 91–95&nbsp;% dropped frames with 3.0.0 to about 8&nbsp;%, and to 1.2–1.5&nbsp;% after start-up with <code>media.video-queue.hw-accel-size</code>&nbsp;=&nbsp;10. Pictures go to MPP from a per-decoder thread and come back through an output thread, so <code>vaEndPicture</code> never waits and <code>vaSyncSurface</code> waits for the decoder instead of polling. Chrome and Chromium, which never wait on a picture, are paced: a new decoder finishes its first 25 shown pictures before returning, which removed the green and old frames at playback start and quality switches (none seen in 10 measured first plays). 8-bit frames are exported as MPP's own buffer when the client re-exports after decoding (Firefox, mpv). The VP9 reset storm after ~65,536 frames is fixed in MPP <code>+pd33</code> and submitted upstream (rockchip-linux/mpp PR&nbsp;#976). Named after Number Nine's Pepper SGT co-processor board of 1987.</p>
     <h2>What 3.0.0 added</h2>
     <p>An AV1 OBU re-serialiser (<code>src/av1.c</code> with a vendored copy of GStreamer's AV1 bit writer, five bugs fixed in it and segmentation implemented). The one value VA-API never passes, <code>refresh_frame_flags</code>, is read from the next picture's reference map, so each picture is held until its successor arrives — or decoded at once when the player syncs it, with the slot refresh following as a hidden frame. Hidden frames are shown through a synthesised <code>show_existing_frame</code>; hidden key frames through a second decode as an intra-only frame. Details in <a href="https://github.com/defcom5-rockchip/rockchip-vaapi/blob/main/docs/DEVELOPMENT.md">DEVELOPMENT.md</a>, limits in <a href="https://github.com/defcom5-rockchip/rockchip-vaapi/blob/main/KNOWN-ISSUES.md">KNOWN-ISSUES KI-13</a>.</p>
@@ -262,7 +265,7 @@ sed 's|^Exec=/usr/bin/firefox|Exec=env LIBVA_DRIVER_NAME=rockchip MOZ_DISABLE_RD
   <footer class="reveal">
     <div class="credit">
       <span>Source &amp; reproducer → <a href="https://github.com/defcom5-rockchip/rockchip-vaapi">github.com/defcom5-rockchip/rockchip-vaapi</a></span>
-      <span class="muted">Base driver: woodyst (Eduardo García-Mádico Portabella). PR&nbsp;#2 fixes: truongsinh. VP9 64-align fix, AV1 (3.0.0), 3.5.0 + packaging: defcom5-rockchip.</span>
+      <span class="muted">Base driver: woodyst (Eduardo García-Mádico Portabella). PR&nbsp;#2 fixes: truongsinh. VP9 64-align fix, AV1 (3.0.0), 3.5.0, the 4.0.0 H.264/HEVC conformance work + packaging: defcom5-rockchip.</span>
     </div>
     <p class="sig">Diagnosed, fixed, and hardware-verified on real silicon — co-authored with Claude (Fable 5, Opus 5.5, Fable 5.1).</p>
   </footer>
