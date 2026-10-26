@@ -489,8 +489,10 @@ The 3.5.0 entry under this number said that Firefox decodes High 10 in software 
 software. Both parts were this bug: Firefox 157 does decode High 10 on the hardware (2026-10-25, a 1920×1088 High 10 clip:
 one H.264 context, 360 frames through the driver, ffmpeg-style initial QP applied), so every High 10 stream it played was
 slightly wrong until the fix above. Chromium hands High 10 H.264 to its software decoder and never opens a VA context for it
-(same session, same clip). Picture correctness in Firefox was not checked by eye; the path is ffmpeg's, which the FR-EXT
-vectors cover bit-exact. `evidence/2026-10-25-full-regression/browsers.txt`.
+(same session, same clip). Checked by eye on 2026-10-26 with Firefox 159 on a Plaid Pi 6.0 image (a 1080p60 High 10 clip
+encoded from real footage): decoded on the video engine (Firefox's media process held the decoder, about 8 % CPU), normal
+colours, no blocking or smearing. The path is ffmpeg's, which the FR-EXT vectors cover bit-exact.
+`evidence/2026-10-25-full-regression/browsers.txt`, `evidence/2026-10-26-byeye/`.
 
 ## KI-20: interlaced H.264 (field pictures, PAFF, MBAFF) was mostly refused — FIXED in v4.0.0, output is weaved
 
@@ -516,8 +518,13 @@ video-processing (VPP) entry points, so the `vaapi` deinterlace filters of mpv, 
 mpv 0.41 does not deinterlace by default; with `--deinterlace=yes` (or `auto`) it tries `vavpp`, logs that it failed, and
 falls back to downloading the frame and running `bwdif` in software, which works at a copy per frame (`hwdec=vaapi-copy`
 avoids the detour). Chromium and Chrome never reach the driver with interlaced H.264: their own decoder refuses it and
-they decode in software, as before. Firefox decodes it in hardware now and shows it weaved, as it showed the software
-decode before.
+they decode in software, as before. Firefox should decode it in hardware now and show it weaved, as it showed the software
+decode before (not measured).
+
+Checked by eye on 2026-10-26 (Plaid Pi 6.0 image, a 1080i H.264 clip encoded from real footage, MBAFF, top field first):
+plain mpv decodes on the video engine at about 0.36 cores and shows comb lines on moving edges; with `--deinterlace=yes`
+the decode stays on the video engine, the comb lines are gone, and the software deinterlace brings mpv to about 1.1–1.5
+cores. `evidence/2026-10-26-byeye/`.
 
 Measured (Fluster, 2026-10-25): of the 58 JVT-AVC_V1 and FR-EXT vectors whose names mark field, PAFF or MBAFF coding (list in
 `evidence/2026-10-25-h264-fluster/`), 52 pass on the hardware, 31 of them for the first time. Still failing:
