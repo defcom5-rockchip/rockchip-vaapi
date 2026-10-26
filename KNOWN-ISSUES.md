@@ -458,7 +458,11 @@ reserves twice that for escaping; the first version of the fix silently dropped 
 bytes (FRExt1/FRExt3_Panasonic), so the buffers are 2 KB.
 
 Measured on the JVT suites through `ffmpeg -hwaccel vaapi` (Fluster, 2026-10-25, `evidence/2026-10-25-h264-fluster/`): JVT-FR-EXT 27/69 → 67/69, JVT-AVC_V1
-74/135 → 111/135 together with KI-20 and the slice fix of KI-21, no vector regressed.
+74/135 → 111/135 together with KI-20 and the slice fix of KI-21, no vector regressed. Of FR-EXT's 69 vectors, 21 are
+High 4:2:2 (8- and 10-bit): ffmpeg never offers 4:2:2 H.264 to VA-API, so it decodes them in software and they pass with
+any driver (checked: no decode context is opened for `Hi422FR1_SONY_A`). The hardware share of the suite is its 48 4:2:0
+vectors — 6 of them bit-exact with 3.5.0, 46 after these fixes, 48 after the High 10 fix below. (Corrected 2026-10-25:
+the 4.0.0 release text counted the 21 software decodes in both columns as "27 → 69".)
 
 **High 10 initial QP (same day):** the two High 10 vectors FREH10-1/2 still failed at that point, and every High 10 stream
 played through an ffmpeg-based player came out slightly off (wrong quantiser). ffmpeg's decoder keeps the initial QP
@@ -473,7 +477,7 @@ else (ffmpeg, mpv, Firefox, Kodi, VLC) as ffmpeg-style. The decision is made whe
 sandbox closes `/proc`), `RKVA_H264_INITQP=coded|ffmpeg` overrides it, and the choice is written to the driver log. The
 value itself settles it when it can: for 10-bit a coded `pic_init_qp_minus26` is at most 25 and an ffmpeg-style one at
 least −26, so a value outside the overlap overrides the guess for that stream (logged once). Should ffmpeg ever correct the value upstream, `coded` is the switch to flip.
-With it, JVT-FR-EXT is 69/69 and JVT-AVC_V1 unchanged at 111/135; the same suite with `RKVA_H264_INITQP=coded` (the
+With it, JVT-FR-EXT is 69/69 (48/48 on the hardware) and JVT-AVC_V1 unchanged at 111/135; the same suite with `RKVA_H264_INITQP=coded` (the
 wrong setting for ffmpeg) is back to 67/69 with FREH10-1/2 failing (`evidence/2026-10-25-h264-fluster/item3-high10-initqp/`,
 both runs).
 
@@ -580,7 +584,7 @@ regressing, no decoder resets during the run. The remaining six are KI-5's hardw
 ## Reporting
 
 Open an issue with: board model, kernel (`uname -a`), distro, driver version
-(`vainfo` prints it), the codec/resolution involved, and `ffprobe` output for a
+(`vainfo` prints it), the MPP build (`apt-cache policy librockchip-mpp1`), the codec/resolution involved, and `ffprobe` output for a
 local file that reproduces it. For browser reports, `about:support` (Firefox) or
 `chrome://gpu` (Chrome) plus whether `sudo fuser -v /dev/mpp_service` shows the
 decoder process during playback.

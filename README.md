@@ -10,7 +10,7 @@
 *Number Nine* is this project's name, a tribute to the 1980s graphics-card maker; not affiliated with or endorsed by
 Number Nine, the successors to its assets, or Rockchip.
 
-VA-API driver for Rockchip RK3588 / RK3576 that bridges **libva** to
+VA-API driver for Rockchip RK3588 / RK3588S (RK3576 untested) that bridges **libva** to
 **librockchip-mpp** (MPP), enabling hardware-accelerated video decode in
 applications such as Firefox.
 
@@ -38,7 +38,7 @@ Key features:
   at playback start and quality switches (see below, KI-15 and KI-16)
 - H.264 and HEVC parameter sets rebuilt per picture with the streams' scaling lists, H.264 field pictures and CAVLC
   multi-slice, the HEVC slice-header rewrite for SPS-level reference sets, the High 10 initial QP, and a safe AV1
-  resolution change (v4.0.0 "Pepper Pro"): JVT-AVC_V1 111/135, JVT-FR-EXT 69/69, JCT-VC-HEVC_V1 141/147 bit-exact
+  resolution change (v4.0.0 "Pepper Pro"): JVT-AVC_V1 111/135, JVT-FR-EXT 48/48 on the hardware, JCT-VC-HEVC_V1 141/147 bit-exact
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)
 - Implements the full VA-API 1.20 vtable (`__vaDriverInit_1_20`)
 
@@ -46,9 +46,14 @@ Key features:
 
 | SoC | Board (tested) |
 |-----|---------------|
-| RK3588 | Orange Pi 5 Plus |
-| RK3588S | Orange Pi 5B (tested); Orange Pi 5 / Rock 5B (should work) |
-| RK3576 | Likely compatible (untested) |
+| RK3588 | Orange Pi 5 Plus (forum tester, Armbian vendor kernel, earlier releases); Rock 5B (should work) |
+| RK3588S | Orange Pi 5B (tested, every number in this README); Orange Pi 5, Rock 5A / 5C (should work) |
+| RK3576 | Untested (its decoder has AV1, but this driver's AV1 path has only run on RK3588) |
+| RK356x | Untested; no AV1 decoder |
+
+Kernel: a Rockchip vendor (BSP) kernel with MPP — `/dev/mpp_service` must exist. Tested on Armbian's vendor branch
+(6.1.189-vendor-rk35xx); earlier releases also on ubuntu-rockchip 6.1.0-1027. Mainline kernels (Armbian current/edge)
+decode through V4L2 and have no MPP; this driver does not apply there.
 
 ## Supported codecs
 
@@ -59,7 +64,7 @@ server-side transcode) instead of rendering a broken picture.
 
 | Codec | Profile | Status |
 |-------|---------|--------|
-| H.264 | Constrained Baseline, Main, High | ✅ hardware decode (B-frame routing fixed in v2.1.2, KI-1). v4.0.0: custom scaling matrices, interlaced streams, per-picture PPS changes and CAVLC multi-slice pictures fixed — JVT-AVC_V1 111/135 and JVT-FR-EXT 69/69 bit-exact (74 and 27 in 3.5.0); KI-17, KI-20, KI-21 (the last two mostly: POC type 1 and FMO/ASO/SP stay open) |
+| H.264 | Constrained Baseline, Main, High | ✅ hardware decode (B-frame routing fixed in v2.1.2, KI-1). v4.0.0: custom scaling matrices, interlaced streams, per-picture PPS changes and CAVLC multi-slice pictures fixed — JVT-AVC_V1 111/135 and JVT-FR-EXT 48/48 bit-exact (74 and 6 in 3.5.0; FR-EXT's other 21 vectors are 4:2:2, which ffmpeg decodes in software, KI-17); KI-17, KI-20, KI-21 (the last two mostly: POC type 1 and FMO/ASO/SP stay open) |
 | VP8   | Version 0–3 | ✅ advertised |
 | VP9   | Profile 0 (8-bit) | ✅ hardware decode, including non-16-aligned widths |
 | H.264 | High10 | ✅ advertised since v2.1.3; v4.0.0: the two conformance vectors (FREH10-1/2) decode bit-exact through ffmpeg — scaling matrices, and the initial QP that ffmpeg hands over with the bit-depth offset added (KI-17; the Chromium/GStreamer recognition is by command line and symbols, not yet seen on a live stream). Firefox 157 decodes High 10 on the hardware through this path (measured 2026-10-25); Chromium offers High 10 H.264 to software only |

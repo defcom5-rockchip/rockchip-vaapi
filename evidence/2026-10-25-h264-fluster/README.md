@@ -8,6 +8,12 @@ lists, field pictures, CAVLC multi-slice". Baseline: the same suites with driver
 |---|---|---|---|
 | JVT-AVC_V1 | 74/135 | 111/135 | 0 |
 | JVT-FR-EXT | 27/69 | 67/69 (69/69 after the High 10 fix below) | 0 |
+| — of which 4:2:0, decoded on the hardware | 6/48 | 46/48 (48/48 after the High 10 fix) | 0 |
+
+JVT-FR-EXT's other 21 vectors are High 4:2:2 (`yuv422p`, `yuv422p10le` in Fluster's suite file). ffmpeg never offers
+4:2:2 H.264 to VA-API and decodes them in software, so they pass with any driver: on the board `Hi422FR1_SONY_A` opens no
+decode context, `FRExt1_Panasonic_D` (4:2:0) opens one. JVT-AVC_V1 and JCT-VC-HEVC_V1 are all 4:2:0 (135 and 136 + 11
+10-bit), so their numbers are hardware numbers.
 
 Files: `fluster-JVT-AVC_V1.csv`, `fluster-JVT-FR-EXT.csv` (Fluster's `-f csv -so` output: vector, result, time); the 3.5.0
 baseline run of 2026-10-23 is in `baseline-3.5.0/` (same board, installed 3.5.0 package). The vendor
